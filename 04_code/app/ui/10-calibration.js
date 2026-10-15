@@ -97,7 +97,10 @@ const CAL = {
 
     // the panel
     $('calMode').value = s.mode;
-    if (document.activeElement !== $('calSquare')) $('calSquare').value = s.square_mm;
+    // the operator types the long side of the board as measured; the square is computed here
+    CAL.nx = s.board.squares[0];
+    if (document.activeElement !== $('calSquare')) $('calSquare').value = Math.round(s.square_mm * CAL.nx * 10) / 10;
+    $('calSquareCalc').textContent = T('cal.square.calc', cifre(s.square_mm, 2), CAL.nx);
     $('calFolder').textContent = f ? f.name : T('cal.folder.none');
     $('calCount').textContent = f ? String(f.n) : '0';
     const busyNow = s.busy.indexOf('calibration') >= 0;
@@ -110,7 +113,7 @@ const CAL = {
   },
 
   settings: function () {
-    const sq = parseFloat($('calSquare').value);
+    const side = parseFloat($('calSquare').value), sq = side / (CAL.nx || 11);
     be('calib_settings', $('calMode').value, isFinite(sq) ? sq : 0, function (raw) {
       const s = JSON.parse(raw);
       if (!failed(s)) CAL.render(s);
