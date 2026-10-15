@@ -23,3 +23,5 @@ slantui[shell] @ git+https://github.com/federicosalerno-phd/SlantUI.git@1a4470e7
 PyQt6==6.11.0
 PyQt6-WebEngine==6.11.0
 adbutils==2.12.0
+# OpenGL renderer of the face for scoring and correction (04_code/src/gl_overlay.py)
+moderngl==5.13.0
