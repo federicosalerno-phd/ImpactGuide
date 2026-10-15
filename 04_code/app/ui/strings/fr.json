@@ -77,7 +77,7 @@
   "cal.mode.sec": "Mode de la caméra",
   "cal.mode.photo": "Mode photo",
   "cal.mode.video": "Mode vidéo",
-  "cal.square.sec": "Grand côté de la mire, mesuré",
+  "cal.square.sec": "Longueur mesurée entre les flèches",
   "cal.square.calc": "{0} mm par case (grand côté divisé par {1})",
   "cal.folder.sec": "Dossier de photos",
   "cal.folder.new": "Nouveau dossier à calibrer",

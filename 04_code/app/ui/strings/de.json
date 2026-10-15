@@ -77,7 +77,7 @@
   "cal.mode.sec": "Kameramodus",
   "cal.mode.photo": "Fotomodus",
   "cal.mode.video": "Videomodus",
-  "cal.square.sec": "Lange Seite der Tafel, gemessen",
+  "cal.square.sec": "Gemessene Länge zwischen den Pfeilen",
   "cal.square.calc": "{0} mm pro Feld (lange Seite geteilt durch {1})",
   "cal.folder.sec": "Fotoordner",
   "cal.folder.new": "Neuer Kalibrierordner",

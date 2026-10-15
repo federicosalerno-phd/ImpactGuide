@@ -77,7 +77,7 @@
   "cal.mode.sec": "相机模式",
   "cal.mode.photo": "照片模式",
   "cal.mode.video": "视频模式",
-  "cal.square.sec": "标定板长边实测长度",
+  "cal.square.sec": "两箭头之间的实测长度",
   "cal.square.calc": "每格 {0} mm（长边除以 {1}）",
   "cal.folder.sec": "照片文件夹",
   "cal.folder.new": "新建标定文件夹",

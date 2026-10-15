@@ -77,7 +77,7 @@
   "cal.mode.sec": "Camera mode",
   "cal.mode.photo": "Photo mode",
   "cal.mode.video": "Video mode",
-  "cal.square.sec": "Measured long side of the board",
+  "cal.square.sec": "Measured length between the arrows",
   "cal.square.calc": "{0} mm per square (long side divided by {1})",
   "cal.folder.sec": "Photo folder",
   "cal.folder.new": "New folder to calibrate",

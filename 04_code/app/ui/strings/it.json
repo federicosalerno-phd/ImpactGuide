@@ -77,7 +77,7 @@
   "cal.mode.sec": "Modalità della camera",
   "cal.mode.photo": "Modalità foto",
   "cal.mode.video": "Modalità video",
-  "cal.square.sec": "Lato lungo della tavola, misurato",
+  "cal.square.sec": "Lunghezza misurata tra le frecce",
   "cal.square.calc": "{0} mm per quadrato (lato lungo diviso {1})",
   "cal.folder.sec": "Cartella delle foto",
   "cal.folder.new": "Cartella nuova per calibrare",

@@ -102,8 +102,19 @@ def write_board(out, square):
     ax.set_ylim(PAGE[1], 0)
     ax.axis("off")
     note = (f"ChArUco {nx} x {ny}, square {square:g} mm, marker {board.getMarkerLength():g} mm, "
-            f"{BOARD['dictionary']}. Print at 100% (actual size). Check: 10 squares = {10 * square:g} mm.")
+            f"{BOARD['dictionary']}. Print at 100% (actual size). On a screen, measure the length between the arrows "
+            f"and type it in ImpactGuide.")
     ax.text(ox, oy + ny * square + 2.5, note, fontsize=6, va="top", color="0.4")
+    # what to measure: a dimension line over the long side, from the outer edge of the first square
+    # to the outer edge of the last one, with the length it has when printed at 100%
+    width = nx * square
+    y = max(oy - 4.0, 2.0)
+    for x in (ox, ox + width):
+        ax.plot([x, x], [oy - 0.8, max(oy - 7.0, 0.5)], color="k", lw=0.4)
+    ax.annotate("", xy=(ox, y), xytext=(ox + width, y),
+                arrowprops=dict(arrowstyle="<->", lw=0.6, color="k", shrinkA=0, shrinkB=0))
+    ax.text(ox + width / 2, y, f"measure this length: {width:g} mm at 100% ({nx} squares)",
+            fontsize=6.5, ha="center", va="center", bbox=dict(fc="white", ec="none", pad=1.2))
     fig.savefig(out / f"{stem}.pdf", metadata={"CreationDate": None})
     plt.close(fig)
     print(f"board: {out / stem}.pdf, .png")
