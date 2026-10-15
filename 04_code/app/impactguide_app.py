@@ -125,15 +125,6 @@ class Prefs:
             pass
 
 
-def system_lang():
-    try:
-        from slantui.shell.qt import QLocale
-        code = QLocale.system().name()[:2].lower()
-    except Exception:
-        code = "en"
-    return code if code in LANGS else "en"
-
-
 def file_url(path):
     return QUrl.fromLocalFile(str(path)).toString()
 
@@ -156,7 +147,7 @@ class Backend(Bridge):
         super().__init__()
         self.roots, self.prefs = roots, prefs
         self.replay = replay        # recorded frames for the live page in place of the phone
-        self.lang = lang if lang in LANGS else (prefs["lang"] if prefs["lang"] in LANGS else system_lang())
+        self.lang = lang if lang in LANGS else (prefs["lang"] if prefs["lang"] in LANGS else "en")  # English unless chosen
         self.on_page_ready = None
         self._runs = {}
         self._jobs = queue.Queue()
