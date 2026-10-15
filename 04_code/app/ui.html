@@ -81,7 +81,7 @@
               <div class="card col">
                 <div class="sec-lbl" data-t="cal.board.sec"></div>
                 <div id="calBoard"></div>
-                <div class="row">
+                <div class="row" id="calBoardPrint">
                   <button class="btn btn-2 grow" id="calBoardBtn"><span class="btn-label" data-t="cal.board.action"></span></button>
                   <button class="btn btn-2 grow" id="calBoardOpen"><span class="btn-label" data-t="cal.board.open"></span></button>
                 </div>
@@ -233,14 +233,43 @@
         <div class="rp-scroll stack">
           <div class="sec-lbl" data-t="cal.mode.sec"></div>
           <div class="combo" id="calMode" tabindex="0" role="button"><span class="combo-v"></span></div>
-          <div class="sec-lbl" data-t="cal.square.sec"></div>
-          <div class="row">
-            <input class="input" type="number" id="calSquare" min="50" max="1100" step="0.1"/>
-            <span class="input-unit">mm</span>
+          <div class="sec-lbl" data-t="board.sec"></div>
+          <div id="calBd">
+            <div class="mlist" id="calBdKinds">
+              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.screen"></span></span><span class="mbadge" data-t="board.badge.screen"></span></div>
+              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.printed"></span></span><span class="mbadge">A4</span></div>
+            </div>
+            <div class="stack" id="calBdScreen">
+              <div id="calBdSquare"></div>
+              <div class="callout callout-warn hidden" id="calBdWarn"></div>
+              <button class="btn btn-2 btn-wide" id="calBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
+              <button class="btn btn-2 btn-wide" id="calBdMoreBtn"><span class="btn-label" data-t="board.more"></span></button>
+              <div class="stack hidden" id="calBdMore">
+                <div class="sec-lbl" data-t="board.monitor.sec"></div>
+                <div class="combo" id="calBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
+                <div id="calBdRows"></div>
+                <div class="note" id="calBdSure"></div>
+                <div class="sec-lbl" data-t="board.ruler.sec"></div>
+                <div class="row">
+                  <input class="input" type="number" id="calBdRuler" min="50" max="2000" step="0.1"/>
+                  <span class="input-unit">mm</span>
+                </div>
+                <div class="note" id="calBdRulerNote"></div>
+                <button class="btn btn-2 btn-wide hidden" id="calBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
+              </div>
+            </div>
+            <div class="stack" id="calBdPrinted">
+              <div class="sec-lbl" data-t="cal.square.sec"></div>
+              <div class="row">
+                <input class="input" type="number" id="calBdLong" min="50" max="1100" step="0.1"/>
+                <span class="input-unit">mm</span>
+              </div>
+              <div class="note" id="calBdLongNote"></div>
+            </div>
           </div>
-          <div class="note" id="calSquareCalc"></div>
           <div class="sec-lbl" data-t="cal.folder.sec"></div>
           <div class="note note-path" id="calFolder"></div>
+          <div class="note hidden" id="calFolderBoard"></div>
           <button class="btn btn-2 btn-wide" id="calNewCal"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.new"></span></button>
           <button class="btn btn-2 btn-wide" id="calNewChk"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.check"></span></button>
           <div class="sec-lbl" data-t="cal.photos.sec"></div>
@@ -277,6 +306,39 @@
           <div class="sec-lbl" data-t="live.board.sec"></div>
           <div class="combo" id="lvBoard" tabindex="0" role="button"><span class="combo-v"></span></div>
           <div class="note" id="lvBoardNote"></div>
+          <div id="lvBd">
+            <div class="mlist" id="lvBdKinds">
+              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.screen"></span></span><span class="mbadge" data-t="board.badge.screen"></span></div>
+              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.printed"></span></span><span class="mbadge">A4</span></div>
+            </div>
+            <div class="stack" id="lvBdScreen">
+              <div id="lvBdSquare"></div>
+              <div class="callout callout-warn hidden" id="lvBdWarn"></div>
+              <button class="btn btn-2 btn-wide" id="lvBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
+              <button class="btn btn-2 btn-wide" id="lvBdMoreBtn"><span class="btn-label" data-t="board.more"></span></button>
+              <div class="stack hidden" id="lvBdMore">
+                <div class="sec-lbl" data-t="board.monitor.sec"></div>
+                <div class="combo" id="lvBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
+                <div id="lvBdRows"></div>
+                <div class="note" id="lvBdSure"></div>
+                <div class="sec-lbl" data-t="board.ruler.sec"></div>
+                <div class="row">
+                  <input class="input" type="number" id="lvBdRuler" min="50" max="2000" step="0.1"/>
+                  <span class="input-unit">mm</span>
+                </div>
+                <div class="note" id="lvBdRulerNote"></div>
+                <button class="btn btn-2 btn-wide hidden" id="lvBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
+              </div>
+            </div>
+            <div class="stack" id="lvBdPrinted">
+              <div class="sec-lbl" data-t="cal.square.sec"></div>
+              <div class="row">
+                <input class="input" type="number" id="lvBdLong" min="50" max="1100" step="0.1"/>
+                <span class="input-unit">mm</span>
+              </div>
+              <div class="note" id="lvBdLongNote"></div>
+            </div>
+          </div>
           <div class="sec-lbl" data-t="live.reg.sec"></div>
           <div class="note" id="lvRegNote"></div>
           <button class="btn btn-2 btn-wide" id="lvRegLoad"><span data-icon="open"></span><span class="btn-label" data-t="live.reg.load"></span></button>
@@ -545,6 +607,7 @@
 <script src="ui/00-strings.js"></script>
 <script src="ui/01-shell.js"></script>
 <script src="ui/10-calibration.js"></script>
+<script src="ui/15-board.js"></script>
 <script src="ui/20-trials.js"></script>
 <script src="ui/30-live.js"></script>
 <script src="ui/40-phone.js"></script>

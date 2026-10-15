@@ -10,11 +10,17 @@ backend   the slots the page calls, without a window: a trial from the first
           to a simulated phone (cable, Wi-Fi paired with the code and the QR
           code, a drop and the reconnection, plain words for each failure, the
           live view on the phone's screen and its added latency), the
-          calibration and the session check on synthetic board photos.
+          calibration board on a monitor (the window drawn pixel for pixel,
+          the ruler check, the printed board, the live view on either), the
+          calibration and the session check on synthetic photos of the printed
+          board and of the board on a monitor.
 --ui DIR  the same through the real window: the page's own buttons are
           pressed, one trial is run to its log row, the other views are opened,
-          the live view is started from its page and left, and the window is
-          grabbed into DIR at each stage, in English and in Italian.
+          the live view is started from its page and left, the board is shown
+          on a monitor from the Calibration page (the screen grabbed back and
+          compared with the image pixel for pixel, the board found in the grab)
+          and closed with Esc, and the window is grabbed into DIR at each
+          stage, in English and in Italian.
 
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
@@ -36,6 +42,7 @@ sys.path.insert(0, str(HERE))
 import impactguide_app as ig  # noqa: E402  (sets the bytecode cache and the path to 04_code/src)
 
 import calibrate_charuco  # noqa: E402
+import screen_board  # noqa: E402
 import trials  # noqa: E402
 
 FAILS = []
@@ -251,8 +258,12 @@ def test_backend(app, work, calibration=True):
     # 10. the link to the phone: cable or Wi-Fi, pairing, a drop and its return, the phone's own screen
     test_link(d)
 
-    # 11. the calibration and the session check, on synthetic photos of the board
+    # 11. the calibration board on a monitor (the default), its window, the ruler check, the printed board
+    test_board(d)
+
+    # 12. the calibration and the session check, on synthetic photos of the printed board
     if calibration:
+        d.call("board_set", json.dumps({"kind": "printed", "printed_mm": 264.0}))
         s = d.call("calib_folder_new", "photo")
         folder = work / "raw" / "calibration" / s["folder"]
         print("      writing 12 synthetic calibration photos...", flush=True)
@@ -270,6 +281,8 @@ def test_backend(app, work, calibration=True):
                "calibration saved as intrinsics_photo.json")
         s = d.call("calib_folder_new", "check_photo")
         folder = work / "raw" / "calibration" / s["folder"]
+        # the photo the simulated phone left here (test_link) is of no board: the folder takes the active one
+        (folder / calibrate_charuco.BOARD_FILE).unlink(missing_ok=True)
         with contextlib.redirect_stdout(io.StringIO()):
             calibrate_charuco.synth(folder, 8, seed=4)
         (folder / "truth.json").unlink()
@@ -278,7 +291,90 @@ def test_backend(app, work, calibration=True):
         checks = trials.read_csv(work / "processed" / "calibration" / "session_checks.csv")
         expect(e is not None and e["ok"] and len(checks) == 1 and checks[0]["ok"] == "1",
                "session check: the stored calibration is still valid, logged in session_checks.csv")
+
+        # 13. the same on synthetic photos of the board on a monitor: its layout goes with the folder
+        s = d.call("board_set", json.dumps({"kind": "screen"}))
+        a = s["active"]
+        s = d.call("calib_folder_new", "video")
+        folder = work / "raw" / "calibration" / s["folder"]
+        kept = json.loads((folder / calibrate_charuco.BOARD_FILE).read_text(encoding="utf-8"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            calibrate_charuco.synth(folder, 12, seed=6, board=calibrate_charuco.make_board(
+                a["square_mm"], a["squares"], a["marker_mm"]))
+        (folder / "truth.json").unlink()
+        d.call("board_set", json.dumps({"kind": "printed"}))      # changed after the photos: the folder's board holds
+        d.call("calib_run", s["folder"], "video")
+        e = d.wait_event("calib", timeout=600)
+        expect(kept["kind"] == "screen" and kept["squares"] == a["squares"] and e is not None and e["ok"]
+               and e["result"]["n_views"] >= 8 and d.backend._pending_cal["video"]["board"]["squares"] == a["squares"],
+               f"calibration on photos of the board on a monitor ({a['squares'][0]} x {a['squares'][1]}, "
+               f"{a['square_mm']:.2f} mm, from board.json of the folder while the printed one is active): RMS "
+               f"{e and e.get('result', {}).get('rms_px')} px on {e and e.get('result', {}).get('n_views')} photos")
+        d.call("board_set", json.dumps({"kind": "screen"}))
     d.backend.shutdown()
+
+
+def test_board(d):
+    """The calibration board on a monitor of this computer (offscreen here: Qt's stand-in screen): the layout from its
+    pitch, the window that shows it pixel for pixel, the ruler check, the printed board, the live view on both."""
+    s = d.call("board_state")
+    lay, mon, a = s["layout"], s["mon"], s["active"]
+    expect(s["kind"] == "screen" and mon is not None and lay is not None and a["kind"] == "screen"
+           and a["squares"] == lay["squares"] and isinstance(lay["square_px"], int)
+           and abs(lay["square_mm"] - lay["square_px"] * lay["pitch_mm"]) < 1e-9 and lay["marker_px"] % 7 == 0,
+           f"board on screen by default: {lay and lay['squares']} squares of {lay and lay['square_px']} px = "
+           f"{lay and round(lay['square_mm'], 3)} mm on {mon and mon['px']} px at {mon and mon['pitch_mm']:.5f} mm "
+           f"({mon and mon['source']})")
+    s = d.call("board_show")
+    win = d.backend._board_win
+    d.wait(lambda: win is not None and win.isVisible(), 5)
+    ok = False
+    if win is not None:
+        import numpy as np
+        img = win.grab().toImage()
+        ref = screen_board.render(win.lay)
+        from slantui.shell.qt import QImage
+        g = img.convertToFormat(QImage.Format.Format_Grayscale8)
+        ptr = g.constBits()
+        ptr.setsize(g.bytesPerLine() * g.height())
+        got = np.frombuffer(ptr, np.uint8).reshape(g.height(), g.bytesPerLine())[:, :g.width()]
+        x0, y0 = win.lay["origin_px"]
+        nx, ny = win.lay["squares"]
+        q = win.lay["square_px"]
+        box = (slice(y0 - 2, y0 + ny * q + 2), slice(x0 - 2, x0 + nx * q + 2))
+        ok = got.shape == ref.shape and bool(np.array_equal(got[box], ref[box]))
+    expect(s.get("shown") and ok, "board window: shown, the board in it pixel for pixel as screen_board draws it")
+    n = len(d.events)
+    from slantui.shell.qt import QApplication, QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent, QWheelEvent  # noqa: F401
+    if win is not None:
+        QApplication.sendEvent(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier))
+        still = win.isVisible()
+        QApplication.sendEvent(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    closed = d.wait(lambda: any(e["type"] == "board" and e.get("action") == "closed" for e in d.events[n:]), 5)
+    expect(win is not None and still and closed and not d.call("board_state")["shown"],
+           "board window: Ctrl and + does nothing, Esc closes it and the page is told")
+    # the ruler check: the pitch of this monitor from the length read, kept; a misreading refused; forgotten
+    width = lay["width_mm"]
+    r = d.call("board_set", json.dumps({"ruler_mm": round(width * 1.004, 1)}))
+    bad = d.call("board_set", json.dumps({"ruler_mm": round(width * 1.09, 1)}))
+    kept = ig.Prefs(d.backend.roots.prefs)["monitors"].get(mon["key"], {})
+    expect(r["mon"]["source"] == "ruler" and abs(r["mon"]["pitch_mm"] / mon["pitch_mm"] - round(width * 1.004, 1) / width)
+           < 1e-9 and bad.get("error") == "ruler_bad" and kept.get("measured_mm") == round(width * 1.004, 1),
+           f"ruler check: {round(width * 1.004, 1)} mm read for {width:.1f} mm, pitch {r['mon']['pitch_mm']:.5f} mm "
+           f"kept for this monitor; 9 % off refused")
+    live = d.call("live_state")
+    expect(live["board"]["squares"] == r["active"]["squares"]
+           and abs(live["board"]["square_mm"] - r["active"]["square_mm"]) < 1e-9,
+           f"live view: the board on screen, {live['board']['squares']} of {live['board']['square_mm']:.3f} mm")
+    f = d.call("board_set", json.dumps({"forget": True}))
+    p = d.call("board_set", json.dumps({"kind": "printed", "printed_mm": 265.0}))
+    live = d.call("live_state")
+    expect(f["mon"]["source"] == mon["source"] and p["active"]["kind"] == "printed" and p["active"]["squares"] == [11, 8]
+           and abs(p["active"]["square_mm"] - 265.0 / 11) < 1e-3 and live["board"]["squares"] == [11, 8],
+           f"printed board: {p['active']['square_mm']:.3f} mm squares from 265 mm measured, used by the live view; "
+           f"ruler check forgotten")
+    d.call("board_set", json.dumps({"kind": "screen", "printed_mm": 264.0}))
 
 
 def test_link(d):
@@ -379,7 +475,7 @@ def test_link(d):
              if sorted(re.findall(r"\{\d\}", strings[c][k])) != sorted(re.findall(r"\{\d\}", strings["en"][k]))]
     used = set()
     for f in sorted((ig.APP / "ui").glob("*.js")) + [ig.APP / "ui.html"]:
-        used |= set(re.findall(r"""(?:T\(|data-t(?:-title|-ph)?=)['"]((?:link|view|pill\.phone|live)\.[\w.]+)['"]""",
+        used |= set(re.findall(r"""(?:T\(|data-t(?:-title|-ph)?=)['"]((?:link|view|pill\.phone|live|board)\.[\w.]+)['"]""",
                                f.read_text(encoding="utf-8")))
     unknown = sorted(k for k in used if k not in keys and not k.endswith("."))   # a prefix with its end added
     expect(not missing and not differ and not marks and not unknown,
@@ -416,6 +512,11 @@ DRIVE = r"""
 """
 
 
+def Qt_key(name):
+    from slantui.shell.qt import Qt
+    return getattr(Qt.Key, "Key_" + name)
+
+
 def test_ui(work, shots):
     from slantui.shell.qt import QTimer
     shots.mkdir(parents=True, exist_ok=True)
@@ -424,7 +525,44 @@ def test_ui(work, shots):
     plan = []          # (name, js, wait ms), run in order
     taken = set()
 
+    board = {}
+
+    def grab_board(name):
+        """The monitor the board is on, as it is: the board window from the screen itself, compared with the image
+        screen_board drew, pixel for pixel, and the board found in it by the calibration's detection."""
+        import cv2
+        import numpy as np
+        import board_window
+        bw = backend._board_win
+        if bw is None:
+            board["error"] = "no board window"
+            return
+        img = board_window.grab_screen(bw.screen_)
+        ref, lay = bw.image, bw.lay
+        x0, y0 = lay["origin_px"]
+        nx, ny = lay["squares"]
+        q = lay["square_px"]
+        box = (slice(y0 - 2, y0 + ny * q + 2), slice(x0 - 2, x0 + nx * q + 2))
+        board["identical"] = img.shape == ref.shape and bool(np.array_equal(img[box], ref[box]))
+        if not board["identical"]:      # the board is not what the screen shows: that grab is someone's desktop
+            return
+        cv2.imwrite(str(shots / f"{name}.png"), img)
+        taken.add(name)
+        views, _, _ = calibrate_charuco.detect([shots / f"{name}.png"], screen_board.make_board(lay))
+        board["corners"] = (len(views[f"{name}.png"][0]) if views else 0, (nx - 1) * (ny - 1))
+        board["layout"] = (nx, ny, q, round(lay["square_mm"], 3), round(lay["width_mm"], 2), round(lay["pitch_mm"], 5))
+
+    def board_key(key):
+        from slantui.shell.qt import QApplication, QEvent, Qt
+        from PyQt6.QtGui import QKeyEvent
+        bw = backend._board_win
+        if bw is not None:
+            QApplication.sendEvent(bw, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+
     def grab(name):
+        if name.startswith("board_"):
+            grab_board(name)
+            return
         img = win.grabWindow()
         for _ in range(10):  # now and then the first grab comes back at a fraction of the size
             if img.width() >= win.width():
@@ -480,13 +618,35 @@ def test_ui(work, shots):
                                  " === 'wifi' && LINK.state.state === 'ready'", 6000),
             ("ui_20_phone_it", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change'));", 2000),
             ("ui_21_phone_closed", "LINK.setMode('usb'); $('lkClose').click(); go('trials')", 2000),
+            # the calibration board on a monitor, from the Calibration page: shown, grabbed off the screen, closed
+            ("ui_22_board_controls", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
+                                     "setTimeout(function () { go('calibration'); }, 900)", 2400),
+            ("board_23_window", "$('calBdShow').click()", 2500),
+            ("ui_24_board_shown", "", 600),
+            ("ui_25_board_closed", lambda: board_key(Qt_key("Escape")), 1500),
+            ("ui_26_board_advanced", "$('calBdMoreBtn').click()", 1200),
+            ("ui_27_board_ruler", "$('calBdRuler').value = (BOARD.state.layout.width_mm * 1.003).toFixed(1);"
+                                  "$('calBdRuler').dispatchEvent(new Event('change'))", 1500),
+            ("ui_28_board_printed", "window.__ruler = BOARD.state.mon.source; BOARD.set({forget: true});"
+                                    "setTimeout(function () { BOARD.set({kind: 'printed'}); }, 300)", 1500),
+            ("ui_29_it_board", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change'));"
+                               "setTimeout(function () { go('calibration'); BOARD.set({kind: 'screen'}); }, 900)", 2400),
+            ("ui_30_it_live_board", "LIVE.settings({board: 'sheet'}); go('live');"
+                                    "setTimeout(function () { $('lvBd').scrollIntoView(); }, 900)", 2000),
+            ("ui_31_en_live_board", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
+                                    "setTimeout(function () { go('live'); }, 900);"
+                                    "setTimeout(function () { $('lvBd').scrollIntoView(); }, 1600)", 2600),
         ]
 
         def nxt():
             if name_done and name_done[-1] == "ui_08b_home":
                 js("JSON.stringify([page, trialsView, !!document.querySelector('.tbar-logo-btn')])",
                    lambda v: log.append("home " + str(v)))
+            if name_done and name_done[-1] == "ui_25_board_closed":
+                js("JSON.stringify([!!(BOARD.state && BOARD.state.shown), BOARD.state && BOARD.state.kind])",
+                   lambda v: log.append("board " + str(v)))
             if not steps:
+                js("JSON.stringify(window.__ruler || '')", lambda v: log.append("ruler " + str(v)))
                 js("JSON.stringify([!!window.__live, !!(LIVE.state && LIVE.state.running)])",
                    lambda v: log.append("live " + str(v)))
                 js("JSON.stringify([!!window.__wifi, LINK.open, LINK.state && LINK.state.mode])",
@@ -494,7 +654,9 @@ def test_ui(work, shots):
                 js("JSON.stringify(window.__errs||[])", lambda v: (log.append("errors " + str(v)), app.quit()))
                 return
             name, script, wait = steps.pop(0)
-            if script:
+            if callable(script):
+                script()
+            elif script:
                 js(script)
             QTimer.singleShot(wait, lambda: (grab(name), name_done.append(name), nxt()))
         name_done = []
@@ -532,6 +694,15 @@ def test_ui(work, shots):
     phone = next((x for x in log if x.startswith("phone")), "phone ?")
     expect(phone == 'phone [true,false,"usb"]',
            f"window: Phone pane opened from the rail, Wi-Fi paired with the QR code, back to the cable, closed ({phone})")
+    expect(board.get("identical") and board.get("corners", (0, 1))[0] == board.get("corners", (0, 1))[1],
+           f"window: board shown from the Calibration page, the screen holds it pixel for pixel "
+           f"({board.get('identical')}), {board.get('corners')} corners found in the grab, layout "
+           f"{board.get('layout')} {board.get('error', '')}")
+    closed = next((x for x in log if x.startswith("board ")), "board ?")
+    ruler = next((x for x in log if x.startswith("ruler ")), "ruler ?")
+    expect(closed == 'board [false,"screen"]' and ruler == 'ruler "ruler"',
+           f"window: Esc closed the board and the page knew ({closed}); the ruler check typed in the page "
+           f"corrected the size ({ruler})")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
     print("page actions: " + ", ".join(log[:-1]), flush=True)
 

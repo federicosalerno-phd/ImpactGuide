@@ -1,19 +1,26 @@
 """ChArUco calibration of the phone camera intrinsics (T5.1, T5.3).
 
-The calibration board is 11 x 8 squares of 24 mm with 18 mm DICT_5X5_100
-markers, centred on an A4 page glued to a flat support. The bench marker uses
-DICT_4X4_50, so the two boards never share a marker. If the printed squares
-do not measure 24 mm, pass the caliper value with --square (the marker size
-scales with it).
+The printed calibration board is 11 x 8 squares of 24 mm with 18 mm
+DICT_5X5_100 markers, centred on an A4 page glued to a flat support. The bench
+marker uses DICT_4X4_50, so the two boards never share a marker. If the printed
+squares do not measure 24 mm, pass the caliper value with --square (the marker
+size scales with it).
+
+The same board can be shown on a monitor instead (screen_board.py): same
+dictionary and markers about 3/4 of the square, but as many squares as the
+monitor holds, each a whole number of its pixels. Its layout and true square
+size go with the photos in board.json in their folder (written by ImpactGuide),
+which calibrate and check read when it is there; --squares and --marker set
+them by hand.
 
 Usage:
     python calibrate_charuco.py board [--out DIR]
         printable page: PDF at 1:1 scale and PNG
     python calibrate_charuco.py synth [--out DIR] [--n 40] [--seed 0]
         synthetic photos of the board taken with known intrinsics (truth.json)
-    python calibrate_charuco.py calibrate IMAGES [--out FILE] [--truth FILE]
+    python calibrate_charuco.py calibrate IMAGES [--out FILE] [--truth FILE] [--square MM --squares NXxNY --marker MM]
         intrinsics from a folder of photos, compared with the truth if given
-    python calibrate_charuco.py check IMAGES --intrinsics FILE
+    python calibrate_charuco.py check IMAGES --intrinsics FILE [--square MM --squares NXxNY --marker MM]
         start-of-session check: are the stored intrinsics still valid?
     python calibrate_charuco.py test [--work DIR]
         synth + calibrate + check on synthetic photos; exit code 1 on failure
@@ -35,6 +42,8 @@ import numpy as np
 WORK = Path(r"C:\work\marker-impact\calibration")
 BOARD = {"squares": (11, 8), "square": 24.0, "marker": 18.0, "dictionary": "DICT_5X5_100"}
 PAGE = (297.0, 210.0)  # A4 landscape, mm
+PAGE_MARGIN = 10.0  # mm around a board larger than the page (synthetic photos of a board on a monitor)
+BOARD_FILE = "board.json"  # the board of the photos of a folder: squares, square_mm, marker_mm, dictionary
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 MIN_CORNERS = 12  # per view
 MIN_VIEWS = 8
@@ -63,18 +72,50 @@ CHECK_FOCAL = 0.001  # relative
 CHECK_CENTRE = 2.0  # px
 
 
-def make_board(square=BOARD["square"]):
+def make_board(square=BOARD["square"], squares=None, marker=None):
+    """The calibration board: the A4 one (11 x 8, marker 3/4 of the square) unless squares or marker are given."""
     d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, BOARD["dictionary"]))
-    marker = square * BOARD["marker"] / BOARD["square"]
-    return cv2.aruco.CharucoBoard(BOARD["squares"], square, marker, d)
+    if marker is None:
+        marker = square * BOARD["marker"] / BOARD["square"]
+    nx, ny = squares or BOARD["squares"]
+    return cv2.aruco.CharucoBoard((int(nx), int(ny)), float(square), float(marker), d)
+
+
+def board_spec(board):
+    """What board.json and the calibration results say of a board."""
+    nx, ny = board.getChessboardSize()
+    return {"squares": [int(nx), int(ny)], "square_mm": round(float(board.getSquareLength()), 6),
+            "marker_mm": round(float(board.getMarkerLength()), 6), "dictionary": BOARD["dictionary"]}
+
+
+def folder_board(folder):
+    """The board of the photos of a folder, from its board.json: (square, squares, marker), or None."""
+    p = Path(folder) / BOARD_FILE
+    if not p.is_file():
+        return None
+    d = json.loads(p.read_text(encoding="utf-8"))
+    if d.get("dictionary", BOARD["dictionary"]) != BOARD["dictionary"]:
+        sys.exit(f"{p}: dictionary {d['dictionary']}, the calibration board uses {BOARD['dictionary']}")
+    return float(d["square_mm"]), tuple(int(n) for n in d["squares"]), float(d["marker_mm"])
+
+
+def texture_ppm(board, ppm=TEXTURE_PPM):
+    """A texture resolution near ppm (px per mm) at which a square is a whole number of pixels: its corners then fall
+    exactly between texture pixels, as they do for the A4 board (24 mm at 12 px per mm)."""
+    sq = board.getSquareLength()
+    return round(sq * ppm) / sq
 
 
 def page_image(board, ppm):
-    """A4 page with the board centred, `ppm` px per mm, and the board origin on the page in mm."""
+    """A4 page with the board centred (a larger page with a margin when the board does not fit on A4), `ppm` px per
+    mm, and the board origin on the page in mm."""
     nx, ny = board.getChessboardSize()
     sq = board.getSquareLength()
     bw, bh = round(nx * sq * ppm), round(ny * sq * ppm)
-    pw, ph = round(PAGE[0] * ppm), round(PAGE[1] * ppm)
+    page = PAGE
+    if nx * sq > PAGE[0] or ny * sq > PAGE[1]:
+        page = (max(PAGE[0], nx * sq + 2 * PAGE_MARGIN), max(PAGE[1], ny * sq + 2 * PAGE_MARGIN))
+    pw, ph = round(page[0] * ppm), round(page[1] * ppm)
     x0, y0 = (pw - bw) // 2, (ph - bh) // 2
     page = np.full((ph, pw), 255, np.uint8)
     page[y0:y0 + bh, x0:x0 + bw] = board.generateImage((bw, bh), marginSize=0, borderBits=1)
@@ -186,10 +227,10 @@ def board_maps(rays, R, t, origin, ppm):
     return mx.astype(np.float32), my.astype(np.float32)
 
 
-def render(page, origin, rays, R, t, rng):
+def render(page, origin, rays, R, t, rng, ppm=TEXTURE_PPM):
     h, w = rays.shape[:2]
     size = (w, h)
-    mx, my = board_maps(rays, R, t, origin, TEXTURE_PPM)
+    mx, my = board_maps(rays, R, t, origin, ppm)
     paper = cv2.remap(page, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     inside = cv2.remap(np.full_like(page, 255), mx, my, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -210,17 +251,19 @@ def render(page, origin, rays, R, t, rng):
     return np.clip(np.rint(img), 0, 255).astype(np.uint8), blur, noise
 
 
-def synth(out, n, seed, K=SYNTH_K, dist=SYNTH_DIST, size=SYNTH_SIZE, prefix="synth"):
+def synth(out, n, seed, K=SYNTH_K, dist=SYNTH_DIST, size=SYNTH_SIZE, prefix="synth", board=None):
+    """n photos of the board (the A4 one unless given) taken with the camera K, dist; truth.json beside them."""
     rng = np.random.default_rng(seed)
-    board = make_board()
-    page, origin = page_image(board, TEXTURE_PPM)
+    board = board or make_board()
+    ppm = texture_ppm(board)
+    page, origin = page_image(board, ppm)
     page = cv2.GaussianBlur(page, (0, 0), 0.6)  # anti-aliasing of the texture
     rays = pixel_rays(K, dist, size)
     out.mkdir(parents=True, exist_ok=True)
     views = []
     for i in range(n):
         R, t = sample_pose(rng, board, K, dist, size)
-        img, blur, noise = render(page, origin, rays, R, t, rng)
+        img, blur, noise = render(page, origin, rays, R, t, rng, ppm)
         name = f"{prefix}_{i:03d}.jpg"
         cv2.imwrite(str(out / name), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         views.append({"image": name, "rvec": cv2.Rodrigues(R)[0].ravel().tolist(), "tvec": t.tolist(),
@@ -338,14 +381,11 @@ def print_compare(c):
           f"model max {c['model_max_px']:.3f} px, RMS {c['model_rms_px']:.3f} px")
 
 
-def run_calibrate(images, out, truth, square):
-    board = make_board(square)
+def run_calibrate(images, out, truth, square, squares=None, marker=None):
+    board = make_board(square, squares, marker)
     views, skipped, size = detect(find_images(images), board)
     cal = calibrate(views, size)
-    nx, ny = board.getChessboardSize()
-    cal = {"images": str(Path(images)), "date": date.today().isoformat(),
-           "board": {"squares": [nx, ny], "square_mm": square, "marker_mm": board.getMarkerLength(),
-                     "dictionary": BOARD["dictionary"]},
+    cal = {"images": str(Path(images)), "date": date.today().isoformat(), "board": board_spec(board),
            "skipped": dict(skipped), **cal}
     summary(cal, skipped)
     if truth:
@@ -358,7 +398,7 @@ def run_calibrate(images, out, truth, square):
     return cal
 
 
-def run_check(images, intrinsics, square):
+def run_check(images, intrinsics, square, squares=None, marker=None):
     """Start-of-session check of the stored intrinsics on about 10 new photos.
 
     Refocusing changes mostly the focal length and the principal point, so these
@@ -372,7 +412,7 @@ def run_check(images, intrinsics, square):
     value, the change, the limit and whether it passed.
     """
     ref = json.loads(Path(intrinsics).read_text())
-    views, skipped, size = detect(find_images(images), make_board(square))
+    views, skipped, size = detect(find_images(images), make_board(square, squares, marker))
     if list(size) != ref["image_size"]:
         sys.exit(f"photo size {size} differs from the calibration {tuple(ref['image_size'])}: wrong camera mode")
     if len(views) < MIN_VIEWS:
@@ -445,11 +485,15 @@ def main():
     a.add_argument("images", type=Path)
     a.add_argument("--out", type=Path)
     a.add_argument("--truth", type=Path)
-    a.add_argument("--square", type=float, default=BOARD["square"], help="measured square size, mm")
     a = sub.add_parser("check")
     a.add_argument("images", type=Path)
     a.add_argument("--intrinsics", type=Path, required=True)
-    a.add_argument("--square", type=float, default=BOARD["square"], help="measured square size, mm")
+    for a in (sub.choices["calibrate"], sub.choices["check"]):
+        a.add_argument("--square", type=float, help="measured square size, mm (default: board.json of the folder, "
+                                                    "else 24)")
+        a.add_argument("--squares", type=lambda v: tuple(int(n) for n in v.lower().split("x")),
+                       help="squares across and down, e.g. 13x7 (default: board.json of the folder, else 11x8)")
+        a.add_argument("--marker", type=float, help="marker size, mm (default: board.json, else 3/4 of the square)")
     a = sub.add_parser("test")
     a.add_argument("--work", type=Path, default=WORK)
     args = ap.parse_args()
@@ -458,10 +502,16 @@ def main():
         write_board(args.out, args.square)
     elif args.cmd == "synth":
         synth(args.out, args.n, args.seed)
-    elif args.cmd == "calibrate":
-        run_calibrate(args.images, args.out, args.truth, args.square)
-    elif args.cmd == "check":
-        sys.exit(0 if run_check(args.images, args.intrinsics, args.square)[0] else 1)
+    elif args.cmd in ("calibrate", "check"):
+        square, squares, marker = folder_board(args.images) or (BOARD["square"], None, None)
+        if args.square is not None or args.squares is not None:     # set by hand: board.json is not mixed in
+            square, squares, marker = args.square or BOARD["square"], args.squares, None
+        if args.marker is not None:
+            marker = args.marker
+        if args.cmd == "calibrate":
+            run_calibrate(args.images, args.out, args.truth, square, squares, marker)
+        else:
+            sys.exit(0 if run_check(args.images, args.intrinsics, square, squares, marker)[0] else 1)
     elif args.cmd == "test":
         sys.exit(0 if run_test(args.work) else 1)
 

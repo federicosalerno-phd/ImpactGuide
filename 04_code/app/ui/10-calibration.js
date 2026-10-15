@@ -1,6 +1,7 @@
-// ImpactGuide · the Calibration page: the ChArUco board, the photos, the
-// intrinsics of each camera mode and the check at the start of a session.
-// The work is calibrate_charuco.py's; the page only asks the backend.
+// ImpactGuide · the Calibration page: the ChArUco board (on a monitor or
+// printed, 15-board.js), the photos, the intrinsics of each camera mode and
+// the check at the start of a session. The work is calibrate_charuco.py's;
+// the page only asks the backend.
 
 const CAL = {
   state: null,
@@ -62,14 +63,18 @@ const CAL = {
       host.append(card);
     });
 
-    // the board
-    const b = s.board;
+    // the board the photos are of: the active one (a folder keeps the one it was made with)
+    const a = s.active;
     $('calBoard').replaceChildren(
-      piRow(T('cal.board.squares'), b.squares[0] + ' × ' + b.squares[1]),
-      piRow(T('cal.board.square'), cifre(s.square_mm, 2) + ' mm'),
-      piRow(T('cal.board.marker'), cifre(s.square_mm * b.marker / b.square, 2) + ' mm'),
-      piRow(T('cal.board.dict'), b.dictionary));
+      piRow(T('cal.board.kind'), a.kind === 'screen' ? T('board.kind.screen') + ' · ' + (a.monitor_label || '')
+                                                     : T('board.kind.printed')),
+      piRow(T('cal.board.squares'), a.squares[0] + ' × ' + a.squares[1]),
+      piRow(T('cal.board.square'), cifre(a.square_mm, 2) + ' mm'),
+      piRow(T('cal.board.marker'), cifre(a.marker_mm, 2) + ' mm'),
+      piRow(T('cal.board.dict'), a.dictionary));
+    $('calBoardPrint').classList.toggle('hidden', a.kind === 'screen');
     $('calBoardOpen').disabled = !s.board_file;
+    BOARD.render(s.board_ui);
 
     // the last run
     const last = CAL.last;
@@ -97,11 +102,10 @@ const CAL = {
 
     // the panel
     $('calMode').value = s.mode;
-    // the operator types the long side of the board as measured; the square is computed here
-    CAL.nx = s.board.squares[0];
-    if (document.activeElement !== $('calSquare')) $('calSquare').value = Math.round(s.square_mm * CAL.nx * 10) / 10;
-    $('calSquareCalc').textContent = T('cal.square.calc', cifre(s.square_mm, 2), CAL.nx);
     $('calFolder').textContent = f ? f.name : T('cal.folder.none');
+    $('calFolderBoard').textContent = f && f.board ? T('cal.folder.board', T('board.kind.' + f.board.kind),
+      f.board.squares[0], f.board.squares[1], cifre(f.board.square_mm, 2)) : '';
+    $('calFolderBoard').classList.toggle('hidden', !(f && f.board));
     $('calCount').textContent = f ? String(f.n) : '0';
     const busyNow = s.busy.indexOf('calibration') >= 0;
     $('calShoot').disabled = !f;
@@ -113,8 +117,7 @@ const CAL = {
   },
 
   settings: function () {
-    const side = parseFloat($('calSquare').value), sq = side / (CAL.nx || 11);
-    be('calib_settings', $('calMode').value, isFinite(sq) ? sq : 0, function (raw) {
+    be('calib_settings', $('calMode').value, 0, function (raw) {
       const s = JSON.parse(raw);
       if (!failed(s)) CAL.render(s);
     });
@@ -139,6 +142,7 @@ const CAL = {
   },
 
   onEvent: function (e) {
+    BOARD.onEvent(e);     // the board's controls live on this page and on the Live AR page
     if (e.type === 'calib') {
       busy(false);
       work(false);
@@ -160,7 +164,6 @@ const CAL = {
   wire: function () {
     setOptions($('calMode'), [T('cal.mode.photo'), T('cal.mode.video')], ['photo', 'video']);
     $('calMode').onchange = CAL.settings;
-    $('calSquare').onchange = CAL.settings;
     $('calNewCal').onclick = function () { CAL.newFolder(CAL.state ? CAL.state.mode : 'photo'); };
     $('calNewChk').onclick = function () { CAL.newFolder('check_' + (CAL.state ? CAL.state.mode : 'photo')); };
     $('calShoot').onclick = function () {
@@ -186,5 +189,6 @@ const CAL = {
       if (st && !armed($('calSave'), T('cal.save.replace', st.date))) return;
       ask('calib_save', mode, function (s) { if (s) { CAL.render(s); toast(T('cal.save.done', T('cal.mode.' + mode))); } });
     };
+    BOARD.wire();         // its two copies, here and on the Live AR page
   },
 };

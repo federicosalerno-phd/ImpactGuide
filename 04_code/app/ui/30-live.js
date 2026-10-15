@@ -123,6 +123,9 @@ const LIVE = {
     $('lvBoardNote').textContent = T('live.board.note', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
                                      cifre(b.marker_mm, b.marker_mm % 1 ? 2 : 0), b.dictionary)
       + (b.name === 'sheet' ? ' ' + T('live.board.note.sheet') : '');
+    // the calibration board: on a monitor or printed, the same controls as on the Calibration page
+    $('lvBd').classList.toggle('hidden', s.prefs.board !== 'sheet');
+    BOARD.render(s.board_ui);
     let r = reg.source === 'file' ? T('live.reg.file', reg.path) : T('live.reg.demo.' + (reg.demo || 'lying'));
     if (reg.error) r = T('live.reg.error', LIVE.name(s.prefs.registration)) + ' ' + r;
     $('lvRegNote').textContent = r;

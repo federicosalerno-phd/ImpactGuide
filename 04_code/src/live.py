@@ -52,7 +52,10 @@ SCRCPY_VERSION = "4.1"          # the server refuses a client of another version
 PORT = 27183
 BIT_RATE = 20_000_000           # high, so that compression does not move the ChArUco corners
 # per link: over Wi-Fi the camera stream shares the air with the AR view sent back to the phone (phone_view.py)
-BIT_RATES = {phone_link.USB: BIT_RATE, phone_link.WIFI: 12_000_000}
+BIT_RATES = {phone_link.USB: BIT_RATE, phone_link.WIFI: 5_000_000}
+# per link: 1920x1440 at 20 Mbit/s fills a cable but stalls a shared Wi-Fi link; 1280x960 keeps the board
+# readable at 40-60 cm and leaves room for the AR view going back to the phone (15/10, Wi-Fi stalls)
+SIZES = {phone_link.USB: "1920x1440", phone_link.WIFI: "1280x960"}
 RESTARTS = 3                    # server restarts after the stream broke while the link was up
 LINK_WAIT_S = 60.0              # after the link dropped, the stream waits this long for it to come back
 STALL_S = 3.0                   # no data from the phone this long: the stream is broken (a Wi-Fi link can die silently)
@@ -124,6 +127,8 @@ class PhoneStream:
         self.record = record            # an open binary file that gets the raw H.264 (`record`)
         self.frame_times = []           # decoding time of every frame while recording
         bit_rate = bit_rate or BIT_RATES.get(self.link, BIT_RATE)
+        if size == SIZES[phone_link.USB]:   # the default asked for: the link decides
+            size = SIZES.get(self.link, size)
         self.size, self.fps, self.bit_rate, self.camera_id, self.port = size, fps, bit_rate, camera_id, port
         self.max_restarts, self.restarts = restarts, 0
         self.waiting = False            # the link dropped: waiting for it to come back

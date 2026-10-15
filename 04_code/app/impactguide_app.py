@@ -4,10 +4,12 @@ A frameless SlantUI window hosting a page (ui.html and ui/) that talks to this
 backend over QWebChannel. The app guides the protocol step by step and keeps
 what the bench produces: the phone calibration, the live AR view and the
 impact trials today; scans, analysis, charts and the dataset are the next pages.
+The calibration board is shown full screen on a monitor (board_window.py,
+screen_board.py) or printed.
 
 This file is the host: the window, the bridge, the background jobs. The logic
 is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py,
-phone_link.py, phone_view.py), which the host only calls; everything there also
+phone_link.py, phone_view.py, screen_board.py), which the host only calls; everything there also
 runs without the app. The live frames reach the page as MJPEG from 127.0.0.1
 (live_ar.MjpegServer), and the phone's own screen from a port of this PC
 (phone_view.ViewServer). The link to the phone, cable or Wi-Fi, is chosen on
@@ -49,7 +51,8 @@ from datetime import date, datetime  # noqa: E402
 import slantui.css as slantui_css  # noqa: E402
 import slantui.js as slantui_js  # noqa: E402
 from slantui.shell import Application, Bridge, Splash, Window, pyqtSignal, pyqtSlot  # noqa: E402
-from slantui.shell.qt import QColor, QDesktopServices, QFileDialog, QTimer, QUrl, USE_QT6  # noqa: E402
+from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialog, QTimer, QUrl,  # noqa: E402
+                              USE_QT6)
 from slantui.tokens import PALETTES  # noqa: E402
 
 import acquisition  # noqa: E402
@@ -57,7 +60,10 @@ import calibrate_charuco  # noqa: E402
 import live_ar  # noqa: E402
 import phone_link  # noqa: E402
 import phone_view  # noqa: E402
+import screen_board  # noqa: E402
 import trials  # noqa: E402
+
+import board_window  # noqa: E402  (beside this file)
 
 APP_NAME = "ImpactGuide"
 APP_VERSION = "0.1.0"
@@ -76,6 +82,9 @@ CALIB_MODES = ("photo", "video")
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
                 "cx_change", "cy_change")
+BOARD_KINDS = ("screen", "printed")
+GUESS_PITCH = 25.4 / 96     # mm: a monitor that says nothing of its size is laid out as a 96 dpi one, to be measured
+COMMA_LANGS = ("it", "fr", "es", "de")
 
 
 # ── where things are ─────────────────────────────────────────────────────────
@@ -107,7 +116,12 @@ class Prefs:
                 "calib_mode": "photo", "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down",
                                                   "switch_modes": True, "link": phone_link.USB, "wifi_address": "",
                                                   "phone_id": ""},
-                "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": ""}}
+                "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": ""},
+                # the calibration board: on a monitor (the one chosen, else screen_board.default_monitor) or printed;
+                # last: the board last laid out on a monitor, for when that monitor is away
+                "board": {"kind": "screen", "monitor": "", "last": None},
+                # the ruler check of each monitor (screen_board.with_ruler): pitch_mm, measured_mm, data_mm, date
+                "monitors": {}}
 
     def __init__(self, path):
         self.path = Path(path)
@@ -174,7 +188,12 @@ class Backend(Bridge):
         self._qr = ""               # the pairing QR code on show, while it waits for the phone
         self._svgs = {}
         self._link_was = {}
+        self._board_win = None      # the board on a monitor (board_window.BoardWindow), while it is shown
+        self._win_mons = (None, {})  # what Windows says of the monitors, read again when Qt's screens change
         self.link = self._make_link()
+        app = QApplication.instance()
+        if app is not None:
+            app.screenRemoved.connect(self._screen_removed)
         self._pump = QTimer(self)
         self._pump.setInterval(150)
         self._pump.timeout.connect(self._drain)
@@ -940,12 +959,17 @@ class Backend(Bridge):
         if r.calib_raw.is_dir():
             for d in sorted((d for d in r.calib_raw.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True):
                 n = sum(1 for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
-                folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1]})
+                board = None
+                with contextlib.suppress(OSError, ValueError):
+                    board = json.loads((d / calibrate_charuco.BOARD_FILE).read_text(encoding="utf-8"))
+                folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1],
+                                "board": board})
         b = calibrate_charuco.BOARD
         nx, ny = b["squares"]
         board_file = r.board / f"charuco_{nx}x{ny}_{float(self.prefs['square_mm']):g}mm_{b['dictionary'].lower()}_a4.pdf"
+        bs = self._board_state()
         return {"board": {**b, "squares": list(b["squares"])}, "square_mm": self.prefs["square_mm"],
-                "mode": self.prefs["calib_mode"], "modes": modes, "last_check": last, "folders": folders,
+                "active": bs["active"], "board_ui": bs, "mode": self.prefs["calib_mode"], "modes": modes, "last_check": last, "folders": folders,
                 "raw": str(r.calib_raw), "out": str(r.calib_out), "board_file": str(board_file) if board_file.exists() else "",
                 "board_dir": str(r.board), "phone": self.phone_status, "busy": sorted(self._busy),
                 "min_views": calibrate_charuco.MIN_VIEWS, "max_rms": calibrate_charuco.MAX_RMS}
@@ -985,8 +1009,27 @@ class Backend(Bridge):
                 return {"error": "bad_value"}
             d = self.roots.calib_raw / f"{date.today():%Y%m%d}_{kind}"
             d.mkdir(parents=True, exist_ok=True)
+            self._folder_board(d)
             return {**self._calib_state(), "folder": d.name}
         return self._answer(go)
+
+    def _folder_board(self, d):
+        """board.json in a photo folder: the active board, written while the folder has no photos (so it is the
+        board the first photo is of); a folder with photos keeps the one it has."""
+        p = d / calibrate_charuco.BOARD_FILE
+        if p.exists() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in d.iterdir()):
+            return
+        a = self._board()["active"]
+        p.write_text(json.dumps({**a, "written": datetime.now().isoformat(timespec="seconds")}, indent=1),
+                     encoding="utf-8")
+
+    def _board_args(self, d):
+        """(square, squares, marker) for calibrate_charuco: the folder's board.json, else the active board."""
+        got = calibrate_charuco.folder_board(d)
+        if got:
+            return got
+        a = self._board()["active"]
+        return a["square_mm"], tuple(a["squares"]), a["marker_mm"]
 
     def _calib_dir(self, name):
         d = (self.roots.calib_raw / name).resolve()
@@ -1002,6 +1045,7 @@ class Backend(Bridge):
             blocked = self._free_camera()
             if blocked:
                 return blocked
+            self._folder_board(d)
 
             def done(path, error):
                 if error is not None:
@@ -1023,6 +1067,8 @@ class Backend(Bridge):
             d = self._calib_dir(name)
             pattern = " ".join("*" + s for s in IMAGE_SUFFIXES)
             paths, _ = QFileDialog.getOpenFileNames(None, "ImpactGuide", str(Path.home()), f"photos ({pattern})")
+            if paths:
+                self._folder_board(d)
             added = skipped = 0
             for p in paths:
                 dest = d / Path(p).name
@@ -1046,10 +1092,12 @@ class Backend(Bridge):
         """Calibrates the camera mode on the photos of the folder; the result waits for calib_save."""
         def go():
             d = self._calib_dir(name)
-            square = float(self.prefs["square_mm"])
+            active = self._board()["active"]
 
             def work():
-                return self._captured(lambda: calibrate_charuco.run_calibrate(d, None, None, square))
+                board = calibrate_charuco.folder_board(d) or (active["square_mm"], active["squares"],
+                                                             active["marker_mm"])
+                return self._captured(lambda: calibrate_charuco.run_calibrate(d, None, None, *board))
 
             def done(result, error):
                 if error is not None:
@@ -1083,10 +1131,12 @@ class Backend(Bridge):
             intr = self._intrinsics_path(mode)
             if not intr.exists():
                 return {"error": "no_intrinsics", "message": mode}
-            square = float(self.prefs["square_mm"])
+            active = self._board()["active"]
 
             def work():
-                return self._captured(lambda: calibrate_charuco.run_check(d, intr, square))
+                board = calibrate_charuco.folder_board(d) or (active["square_mm"], active["squares"],
+                                                             active["marker_mm"])
+                return self._captured(lambda: calibrate_charuco.run_check(d, intr, *board))
 
             def done(result, error):
                 if error is not None:
@@ -1103,14 +1153,184 @@ class Backend(Bridge):
             return {"ok": started} if started else {"error": "busy"}
         return self._answer(go)
 
+    # ── the calibration board: on a monitor (the default) or printed ─────
+    def _screens(self):
+        """([monitor of screen_board.monitors], {key: QScreen}): what Qt and Windows say of each monitor now, with
+        this computer's ruler checks. Windows is asked again only when Qt's screens change."""
+        app = QApplication.instance()
+        screens = list(app.screens()) if app is not None else []
+        qt = [screen_board.qt_screen(sc, sc is app.primaryScreen()) for sc in screens]
+        sig = json.dumps([[q["device"], q["geometry"], q["dpr"]] for q in qt])
+        if self._win_mons[0] != sig:
+            self._win_mons = (sig, screen_board.windows_monitors())
+        mons = screen_board.monitors(qt, self._win_mons[1], self.prefs["monitors"])
+        return mons, {m["key"]: sc for m, sc in zip(mons, screens)}
+
+    def _board(self):
+        """The board as it stands: kind, the monitor chosen (or the default one) with its layout, the printed
+        board, and the active board (what the Calibration and Live AR pages use)."""
+        mons, screens = self._screens()
+        b = self.prefs["board"]
+        kind = b.get("kind") if b.get("kind") in BOARD_KINDS else "screen"
+        mon = next((m for m in mons if m["key"] == b.get("monitor")), None)
+        if mon is None:
+            mon = next((m for m in mons if m["key"] == screen_board.default_monitor(mons)), None)
+        lay, error = None, ""
+        if mon is not None:
+            try:
+                lay = screen_board.layout(mon["px"], mon["pitch_mm"] or GUESS_PITCH)
+            except ValueError:
+                error = "too_small"
+        screen = screen_board.spec(lay, mon) if lay else b.get("last")
+        if lay and b.get("last") != screen:
+            self.prefs.set("board", {**b, "last": screen})
+        printed = {"kind": "printed",
+                   **calibrate_charuco.board_spec(calibrate_charuco.make_board(float(self.prefs["square_mm"])))}
+        active = screen if kind == "screen" and screen else printed
+        return {"kind": kind, "mons": mons, "screens": screens, "mon": mon, "lay": lay, "error": error,
+                "printed": printed, "active": active}
+
+    def _board_state(self):
+        st = self._board()
+        mon, lay = st["mon"], st["lay"]
+        view = None
+        if lay:
+            view = {k: lay[k] for k in ("squares", "square_px", "marker_px", "square_mm", "marker_mm", "width_mm",
+                                        "height_mm", "pitch_mm")}
+            view["width_u_mm"] = lay["width_mm"] * (mon["rel_u"] or 0.0)
+        keys = ("key", "label", "device", "primary", "px", "native", "is_native", "dpr", "diag_in", "pitch_mm",
+                "pitch_data_mm", "rel_u", "source", "sources", "agree", "spread", "ruler")
+        shown = self._board_win is not None
+        return {"kind": st["kind"], "monitors": [{k: m[k] for k in keys} for m in st["mons"]],
+                "monitor": mon["key"] if mon else "", "mon": {k: mon[k] for k in keys} if mon else None,
+                "layout": view, "error": st["error"], "printed": st["printed"], "active": st["active"],
+                "shown": shown, "shown_on": self._board_win.key if shown else ""}
+
+    @pyqtSlot(result=str)
+    def board_state(self):
+        return self._answer(self._board_state)
+
+    def _num(self, v, n=1):
+        text = f"{v:.{n}f}"
+        return text.replace(".", ",") if self.lang in COMMA_LANGS else text
+
+    @pyqtSlot(str, result=str)
+    def board_set(self, payload):
+        """{kind, monitor, printed_mm (the printed board's long side as measured), ruler_mm (the length between the
+        arrows of the board on a monitor, as a ruler reads it), forget (the ruler check of that monitor)}."""
+        def go():
+            c = json.loads(payload)
+            b = dict(self.prefs["board"])
+            if c.get("kind") in BOARD_KINDS:
+                b["kind"] = c["kind"]
+            if c.get("monitor"):
+                b["monitor"] = str(c["monitor"])
+            self.prefs.set("board", b)
+            if c.get("printed_mm") is not None:
+                sq = float(c["printed_mm"]) / calibrate_charuco.BOARD["squares"][0]
+                if not 5 <= sq <= 100:
+                    return {"error": "bad_value", "message": str(c["printed_mm"])}
+                self.prefs.set("square_mm", round(sq, 3))
+            if c.get("ruler_mm") is not None or c.get("forget"):
+                st = self._board()
+                mon, lay = st["mon"], st["lay"]
+                if mon is None or lay is None:
+                    return {"error": "no_monitor"}
+                if self._board_win is not None and self._board_win.key == mon["key"]:
+                    lay = self._board_win.lay      # the reading is of the board on show
+                checks = dict(self.prefs["monitors"])
+                if c.get("forget"):
+                    checks.pop(mon["key"], None)
+                else:
+                    try:
+                        pitch = screen_board.ruler_pitch(lay, float(c["ruler_mm"]))
+                    except (ValueError, TypeError):
+                        return {"error": "ruler_bad", "message": self._num(lay["width_mm"])}
+                    width_px = lay["squares"][0] * lay["square_px"]
+                    checks[mon["key"]] = {"pitch_mm": pitch, "measured_mm": float(c["ruler_mm"]),
+                                          "data_mm": round(mon["pitch_data_mm"] * width_px, 2)
+                                          if mon["pitch_data_mm"] else None,
+                                          "expected_mm": round(lay["width_mm"], 2),
+                                          "date": datetime.now().isoformat(timespec="seconds")}
+                self.prefs.set("monitors", checks)
+            if self._board_win is not None:
+                self._show_board(self._board())     # the board on show follows: another monitor, another size
+            return self._board_state()
+        return self._answer(go)
+
+    def _board_words(self, lay):
+        words = {}
+        for code in ("en", self.lang):
+            with contextlib.suppress(OSError, ValueError):
+                words.update(json.loads((APP / "ui" / "strings" / f"{code}.json").read_text(encoding="utf-8")))
+        nx, ny = lay["squares"]
+        return {"title": words.get("board.window.title", "ImpactGuide"),
+                "measure": words.get("board.window.measure", "{0} mm").replace("{0}", self._num(lay["width_mm"])),
+                "info": words.get("board.window.info", "").replace("{0}", str(nx)).replace("{1}", str(ny))
+                .replace("{2}", self._num(lay["square_mm"], 2))}
+
+    def _show_board(self, st):
+        """The board on the monitor of st (a _board()), in place of the one on show if any."""
+        mon, lay = st["mon"], st["lay"]
+        screen = st["screens"].get(mon["key"]) if mon else None
+        if screen is None or lay is None:
+            return False
+        self._hide_board()
+        win = board_window.BoardWindow(screen, lay, self._board_words(lay))
+        win.key = mon["key"]
+        win.closed.connect(lambda why, w=win: self._board_closed(w, why))
+        self._board_win = win
+        win.show_board()
+        return True
+
+    def _hide_board(self):
+        win, self._board_win = self._board_win, None
+        if win is not None:
+            with contextlib.suppress(TypeError, RuntimeError):
+                win.closed.disconnect()
+            win.close()
+
+    def _screen_removed(self, screen):
+        if self._board_win is not None and self._board_win.screen_ is screen:
+            self._board_win.changed()
+
+    def _board_closed(self, win, why):
+        if self._board_win is win:
+            self._board_win = None
+            self._emit({"type": "board", "action": "closed", "reason": why})
+
+    @pyqtSlot(result=str)
+    def board_show(self):
+        def go():
+            if not self._show_board(self._board()):
+                return {"error": "no_monitor"}
+            return self._board_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def board_hide(self):
+        def go():
+            self._hide_board()
+            return self._board_state()
+        return self._answer(go)
+
+    def _live_board(self):
+        """The calibration board as live_ar wants it: the layout of the one on a monitor, None for the A4 one."""
+        a = self._board()["active"]
+        screen = a["kind"] == "screen"
+        return {"square_mm": float(a["square_mm"]), "squares": list(a["squares"]) if screen else None,
+                "marker_mm": float(a["marker_mm"]) if screen else None}
+
     # ── live AR ──────────────────────────────────────────────────────────
     def live(self):
         """The live AR, made at first use and kept for the session: its overlay thread owns the OpenGL
         context (live_ar.py). In simulation a synthetic board stands in for the phone."""
         if self._live is None:
             p = self.prefs["live"]
+            lb = self._live_board()
             self._live = live_ar.LiveAR(board=p["board"] if p["board"] in live_ar.BOARDS else "sheet",
-                                        square_mm=float(self.prefs["square_mm"]), registration=p["registration"] or None,
+                                        square_mm=lb["square_mm"], squares=lb["squares"], marker_mm=lb["marker_mm"],
+                                        registration=p["registration"] or None,
                                         face=p["face"], mandible=p["mandible"], axes=p["axes"],
                                         intrinsics=self.roots.calib_out / "intrinsics_stream.json",
                                         synthetic=bool(self.roots.simulate), colors=live_colors(),
@@ -1130,15 +1350,17 @@ class Backend(Bridge):
 
     def _live_state(self):
         ar = self.live()
-        square = float(self.prefs["square_mm"])
-        if ar.settings()["square_mm"] != square:      # changed on the Calibration page
-            ar.configure(square_mm=square)
+        lb = self._live_board()
+        now = ar.settings()
+        if any(now[k] != v for k, v in lb.items()):    # the board changed here or on the Calibration page
+            ar.configure(**lb)
         ln = self.link.status()
         return {**ar.status(), "url": self._live_server.url, "prefs": self.prefs["live"], "phone": self.phone_status,
                 "busy": sorted(self._busy), "simulate": bool(self.roots.simulate),
                 "intrinsics_file": str(self.roots.calib_out / "intrinsics_stream.json"),
                 "phone_link": {k: ln[k] for k in ("mode", "state", "cause", "rtt_ms", "model")},
-                "phone_view": self._view.stats() if self._view is not None else None}
+                "phone_view": self._view.stats() if self._view is not None else None,
+                "board_ui": self._board_state()}
 
     @pyqtSlot(result=str)
     def live_state(self):
@@ -1215,6 +1437,7 @@ class Backend(Bridge):
     # ── the window is closing ────────────────────────────────────────────
     def shutdown(self):
         self._pump.stop()
+        self._hide_board()
         self._drop_staged()
         self.link.close()
         if self._view is not None:

@@ -21,8 +21,10 @@ the first square, x along the printed columns, y along the rows, z into the boar
 
 Boards
     patient   the 5 x 5 board of the marker holder; squares and markers from marker_pose.BOARD
-    sheet     the A4 calibration board of calibrate_charuco.py (11 x 8), square as measured with the caliper: a sheet
-              of paper is enough to try the page without the bench
+    sheet     the calibration board of calibrate_charuco.py: shown on a monitor (screen_board.py: as many squares as
+              the monitor holds, square from its pixel pitch) or printed on A4 (11 x 8, square as measured with the
+              caliper); either is enough to try the page without the bench. squares and marker_mm give the layout of
+              the one on a monitor; without them it is the A4 one
 A pose is used with at least MIN_CORNERS corners and a reprojection RMS under the limit: 1 px with intrinsics
 calibrated for the stream (ai_design.md, module 1), 3 px with the nominal ones, which leave out the lens distortion.
 
@@ -42,17 +44,20 @@ decimated again to LIVE_TRIANGLES (quadric edge collapse) and kept in LIVE_MODEL
 
 For the app:
     ar = LiveAR(board="sheet", square_mm=24.0)       # one per process: its compose thread owns the OpenGL context
+                                                     # (squares=(14, 7), marker_mm=... for the board on a monitor)
     ar.start()                                       # closes the camera app, opens the stream (a few seconds)
     jpeg, n = ar.next_jpeg(after=n)                  # newest composed frame
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
-    ar.configure(board=..., square_mm=..., face=..., mandible=..., axes=...); ar.set_registration(path or None)
+    ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...)
+    ar.set_registration(path or None)
     ar.set_tracking(hold_s=..., ...)                 # TRACKING overrides
     ar.stop(); ar.shutdown()
     MjpegServer(ar).url                              # the frames for an <img>, on 127.0.0.1
     phone_view.ViewServer(ar)                        # the frames for the phone's screen (cable, Wi-Fi, network)
 
-    python live_ar.py view  [--board patient|sheet] [--square MM] [--registration FILE] [--mandible]
+    python live_ar.py view  [--board patient|sheet] [--square MM [--squares NXxNY --marker MM]] [--registration FILE]
+                            [--mandible]
                             [--synthetic | --replay VIDEO_OR_FOLDER] [--intrinsics FILE]
     python live_ar.py bench [--synthetic | --replay CLIP.h264] [--seconds S] [--still S]
                             rate, time per stage, jitter while still, frames without a pose, blinks of the overlay
@@ -141,8 +146,9 @@ class LiveARError(RuntimeError):
 
 
 # ── boards, intrinsics, registration, models ─────────────────────────────────
-def make_board(name, square_mm=None):
-    """(cv2 CharucoBoard, description) of the patient board or of the A4 calibration sheet."""
+def make_board(name, square_mm=None, squares=None, marker_mm=None):
+    """(cv2 CharucoBoard, description) of the patient board or of the calibration board (sheet): the A4 one, or with
+    squares and marker_mm the one on a monitor (screen_board.py)."""
     if name == "patient":
         b = marker_pose.BOARD
         board = marker_pose.make_board(b)
@@ -151,8 +157,8 @@ def make_board(name, square_mm=None):
                 "dictionary": b["dictionary"]}
     elif name == "sheet":
         sq = float(square_mm or calibrate_charuco.BOARD["square"])
-        board = calibrate_charuco.make_board(sq)
-        nx, ny = calibrate_charuco.BOARD["squares"]
+        board = calibrate_charuco.make_board(sq, squares, marker_mm)
+        nx, ny = board.getChessboardSize()
         spec = {"name": name, "squares": [nx, ny], "square_mm": sq, "marker_mm": float(board.getMarkerLength()),
                 "dictionary": calibrate_charuco.BOARD["dictionary"]}
     else:
@@ -511,7 +517,7 @@ class SyntheticStream(_Frames):
             self._noise.append((np.clip(z, 0, 255).astype(np.uint8), np.clip(-z, 0, 255).astype(np.uint8)))
         self._tex = None
         if board is not None:
-            ppm = 12.0 if spec["name"] == "sheet" else 24.0
+            ppm = calibrate_charuco.texture_ppm(board, 12.0) if spec["name"] == "sheet" else 24.0
             if spec["name"] == "sheet":
                 page, origin = calibrate_charuco.page_image(board, ppm)
             else:
@@ -721,7 +727,7 @@ class LiveAR:
     def __init__(self, board="sheet", square_mm=None, registration=None, face=True, mandible=False, axes=True,
                  intrinsics=STREAM_INTRINSICS, synthetic=False, serial=None, size="1920x1440", fps=30,
                  display_width=DISPLAY_WIDTH, colors=None, log=None, replay=None, replay_truth=None, tracking=None,
-                 script=None, exposure_s=0.0):
+                 script=None, exposure_s=0.0, squares=None, marker_mm=None):
         if board not in BOARDS:
             raise LiveARError(f"unknown board {board}")
         self.intrinsics_path = Path(intrinsics) if intrinsics else None
@@ -738,6 +744,8 @@ class LiveAR:
         self._found_cv = threading.Condition(self._lock)
         self._apply_lock = threading.Lock()
         self._want = {"board": board, "square_mm": float(square_mm or calibrate_charuco.BOARD["square"]),
+                      "squares": [int(n) for n in squares] if squares else None,
+                      "marker_mm": float(marker_mm) if marker_mm else None,
                       "registration": str(registration) if registration else "", "face": bool(face),
                       "mandible": bool(mandible), "axes": bool(axes), "version": 1}
         self._tracking_version = 1
@@ -844,23 +852,30 @@ class LiveAR:
             th.join(timeout=2.0)
 
     def configure(self, **kw):
-        """board, square_mm, face, mandible, axes: applied by the worker from the next frame."""
+        """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
+        mandible, axes: applied by the worker from the next frame."""
         if kw.get("board") is not None and kw["board"] not in BOARDS:
             raise LiveARError(f"unknown board {kw['board']}")
         with self._lock:
+            before = {k: self._want[k] for k in ("board", "square_mm", "squares", "marker_mm")}
             if kw.get("board") is not None:
                 self._want["board"] = kw["board"]
             if kw.get("square_mm") is not None:
                 self._want["square_mm"] = float(kw["square_mm"])
+            if "squares" in kw:
+                self._want["squares"] = [int(n) for n in kw["squares"]] if kw["squares"] else None
+            if "marker_mm" in kw:
+                self._want["marker_mm"] = float(kw["marker_mm"]) if kw["marker_mm"] else None
             for k in ("face", "mandible", "axes"):
                 if kw.get(k) is not None:
                     self._want[k] = bool(kw[k])
             self._want["version"] += 1
             want = dict(self._want)
+        board_changed = before != {k: want[k] for k in before}
         if not self.running:
             self._apply(want)
-        elif self.synthetic and want["board"] != self._spec["name"]:
-            self._apply(want)
+        elif self.synthetic and board_changed and (want["board"] != self._spec["name"] or want["board"] == "sheet"):
+            self._apply(want)       # the synthetic stream films the board it was made with: a new one for a new board
             self.stop()
             self.start()
 
@@ -931,7 +946,7 @@ class LiveAR:
         return self._stream
 
     def settings(self):
-        """The settings asked for: board, square_mm, registration, face, mandible, axes."""
+        """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes."""
         with self._lock:
             return {k: v for k, v in self._want.items() if k != "version"}
 
@@ -988,7 +1003,7 @@ class LiveAR:
             if want["version"] == self._applied and self._setup is not None:
                 return
             old = self._setup
-            board, spec = make_board(want["board"], want["square_mm"])
+            board, spec = make_board(want["board"], want["square_mm"], want["squares"], want["marker_mm"])
             if old is not None and spec == old["spec"]:
                 board, finder = old["board"], old["finder"]
             else:
@@ -1567,7 +1582,7 @@ def print_bench(out, title):
 # ── command line ─────────────────────────────────────────────────────────────
 def cmd_view(a):
     ar = LiveAR(a.board, a.square, a.registration, mandible=a.mandible, synthetic=a.synthetic, log=print,
-                replay=a.replay, intrinsics=a.intrinsics or STREAM_INTRINSICS)
+                replay=a.replay, intrinsics=a.intrinsics or STREAM_INTRINSICS, squares=a.squares, marker_mm=a.marker)
     try:
         ar.start()
         n = 0
@@ -1632,10 +1647,11 @@ def make_clip(out, board="sheet", square_mm=24.0, seconds=24.0, fps=30, exposure
 
 def cmd_bench(a):
     """Numbers of the live AR on the synthetic session (bench_script) or on a recorded clip."""
-    board, spec = make_board(a.board, a.square)
+    board, spec = make_board(a.board, a.square, a.squares, a.marker)
     replay = a.replay
     ar = LiveAR(a.board, a.square, a.registration, mandible=a.mandible, synthetic=replay is None, replay=replay,
-                intrinsics=a.intrinsics or STREAM_INTRINSICS, script=bench_script(spec), exposure_s=0.008, log=print)
+                intrinsics=a.intrinsics or STREAM_INTRINSICS, script=bench_script(spec), exposure_s=0.008, log=print,
+                squares=a.squares, marker_mm=a.marker)
     if replay is not None:
         ar.fps = 30
     try:
@@ -1903,7 +1919,11 @@ def main():
     ap.add_argument("command", choices=["view", "test", "bench", "clip"])
     ap.add_argument("out", nargs="?", help="clip: the file to write (OUT.h264, OUT_times.npy, OUT_truth.npz)")
     ap.add_argument("--board", choices=BOARDS, default="sheet")
-    ap.add_argument("--square", type=float, default=None, help="measured square of the A4 sheet, mm")
+    ap.add_argument("--square", type=float, default=None, help="square of the calibration board, mm (the A4 "
+                                                               "sheet's as measured, or the one on a monitor)")
+    ap.add_argument("--squares", type=lambda v: [int(n) for n in v.lower().split("x")], default=None,
+                    help="squares of the board on a monitor, e.g. 14x7 (default: the A4 sheet's 11x8)")
+    ap.add_argument("--marker", type=float, default=None, help="marker of the board on a monitor, mm")
     ap.add_argument("--registration", help="JSON file with T_M_B (default: the demo registration)")
     ap.add_argument("--mandible", action="store_true")
     ap.add_argument("--synthetic", action="store_true", help="a synthetic stream instead of the phone")
