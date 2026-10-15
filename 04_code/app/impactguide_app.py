@@ -1134,10 +1134,10 @@ def build(args):
     backend = Backend(roots, prefs, lang=args.lang, replay=args.replay)
     page = prepare_page((roots.simulate or LOCAL) / "page")
     title = APP_NAME + (" (simulation)" if roots.simulate else "")
-    # the band the window draws before the page has one shows the mark as a button when the page will:
-    # away from home, the trial guide (ui/01-shell.js, showHome)
+    # the band the window draws before the page has one shows the mark as a button, as the page
+    # always does (ui/01-shell.js, showHome)
     win = Window(page, bridge=backend, title=title, palette=PALETTE, size=(1440, 900), min_size=(1180, 700),
-                 logo=mark_file(), brand_action=prefs["page"] != "trials")
+                 logo=mark_file(), brand_action=True)
     win.setIcon(app_icon())
     app.aboutToQuit.connect(backend.shutdown)
     starting, ready = splash_words(backend.lang)

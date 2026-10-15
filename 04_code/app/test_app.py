@@ -401,8 +401,8 @@ def test_ui(work, shots):
            f"window: drape trial {rows[-1]['trial'] if rows else '?'} run with the page's buttons, nothing missing")
     expect(errors in ("errors []", "errors none"), f"window: no script errors ({errors})")
     home = next((x for x in log if x.startswith("home")), "home ?")
-    expect(home == 'home ["trials","guide",false]',
-           f"window: the mark on the band leads back to the trial guide, and is a plain mark there ({home})")
+    expect(home == 'home ["trials","guide",true]',
+           f"window: the mark on the band leads back to the trial guide and stays a raised button there ({home})")
     live = next((x for x in log if x.startswith("live")), "live ?")
     expect(live == "live [true,false]",
            f"window: live view started from the page, board tracked, stopped when the page is left ({live})")

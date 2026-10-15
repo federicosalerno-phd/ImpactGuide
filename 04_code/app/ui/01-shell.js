@@ -141,9 +141,10 @@ function goHome() {
   trialsView = 'guide';
   go('trials');
 }
+// The way home is always there, raised and pressable, on the home page too (Federico, 15/10):
+// there a press brings the guide back to its start.
 function showHome() {
-  const home = page === 'trials' && trialsView === 'guide';
-  setBrandAction(home ? null : goHome, T('win.home.hint'));
+  setBrandAction(goHome, T('win.home.hint'));
 }
 
 function go(p) {
