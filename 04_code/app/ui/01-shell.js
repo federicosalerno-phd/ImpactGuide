@@ -53,10 +53,17 @@ function placeIcons(root) {
 
 // ── the answers of the backend ─────────────────────────────────────────────
 // Every slot answers JSON; a failure carries `error`, a cause the page names.
+// A cause of the link to the phone (phone_link.py) has its own plain words and
+// never shows adb's text.
+function sayError(code, message) {
+  if (hasT('err.' + code)) return T('err.' + code, message || '');
+  if (hasT('link.cause.' + code)) return T('link.cause.' + code);
+  return T('err.generic', code + (message ? ': ' + message : ''));
+}
+
 function failed(a) {
   if (!a || !a.error) return false;
-  const key = 'err.' + a.error;
-  toast(hasT(key) ? T(key, a.message || '') : T('err.generic', a.error + (a.message ? ': ' + a.message : '')), 4200);
+  toast(a.cause && hasT('link.cause.' + a.cause) ? T('link.cause.' + a.cause) : sayError(a.error, a.message), 4200);
   return true;
 }
 
@@ -85,12 +92,15 @@ function setStatus(kind, text) {
   $('st').textContent = text;
 }
 
-let PHONE = { ok: false, cause: 'unknown' };
+let PHONE = { ok: false, cause: 'unknown', link: 'usb' };
 let working = 0;
+// The pill says whether the phone is there, on the link chosen; a Wi-Fi link
+// coming back pulses, as work does.
 function showPhone() {
   if (working) return;
-  if (PHONE.ok) setStatus('ok', T('pill.phone.ok'));
-  else setStatus('warn', T('pill.phone.' + (hasT('pill.phone.' + PHONE.cause) ? PHONE.cause : 'none')));
+  if (PHONE.ok) setStatus('ok', T(PHONE.link === 'wifi' ? 'pill.phone.ok.wifi' : 'pill.phone.ok'));
+  else setStatus(PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
+                 T('pill.phone.' + (hasT('pill.phone.' + PHONE.cause) ? PHONE.cause : 'none')));
 }
 function work(on, text) {
   working = Math.max(0, working + (on ? 1 : -1));

@@ -6,7 +6,10 @@ backend   the slots the page calls, without a window: a trial from the first
           resumed, a drape trial with photos and video with and without the
           drape, a correction of a logged value, a void trial, a new
           configuration, the completeness check of trials.py, the live AR view
-          on a synthetic stream (both boards, a photo that stops it), the
+          on a synthetic stream (both boards, a photo that stops it), the link
+          to a simulated phone (cable, Wi-Fi paired with the code and the QR
+          code, a drop and the reconnection, plain words for each failure, the
+          live view on the phone's screen and its added latency), the
           calibration and the session check on synthetic board photos.
 --ui DIR  the same through the real window: the page's own buttons are
           pressed, one trial is run to its log row, the other views are opened,
@@ -245,7 +248,10 @@ def test_backend(app, work, calibration=True):
            "live view: a photo from the phone stops it first, then the photo is taken")
     d.call("live_settings", json.dumps({"board": "sheet", "mandible": False}))
 
-    # 10. the calibration and the session check, on synthetic photos of the board
+    # 10. the link to the phone: cable or Wi-Fi, pairing, a drop and its return, the phone's own screen
+    test_link(d)
+
+    # 11. the calibration and the session check, on synthetic photos of the board
     if calibration:
         s = d.call("calib_folder_new", "photo")
         folder = work / "raw" / "calibration" / s["folder"]
@@ -273,6 +279,112 @@ def test_backend(app, work, calibration=True):
         expect(e is not None and e["ok"] and len(checks) == 1 and checks[0]["ok"] == "1",
                "session check: the stored calibration is still valid, logged in session_checks.csv")
     d.backend.shutdown()
+
+
+def test_link(d):
+    """The Phone pane against the simulated phone (phone_link.SimulatedAdb): one place for the serial, pairing with
+    the code and the QR code, a Wi-Fi drop and the reconnection, plain words for every failure, the live view sent
+    to the phone's browser and its added latency."""
+    import re
+    import threading
+    import live
+    import phone_link
+    import phone_view
+    b = d.backend
+    sim = b.link.run
+
+    def act(fn, kind, action=None, timeout=20):
+        """Calls fn and waits for an event of that kind (and action); the event, or None."""
+        n = len(d.events)
+        fn()
+
+        def hit():
+            return next((e for e in d.events[n:] if e["type"] == kind and (action is None or e.get("action") == action)),
+                        None)
+        return hit() if d.wait(lambda: hit() is not None, timeout) else None
+
+    ok = d.wait(lambda: d.call("link_state")["state"] == "ready", 10)
+    s = d.call("link_state")
+    expect(ok and s["mode"] == "usb" and b.link.serial() == sim.phone_id == live.pick_serial(),
+           "link: cable at first, the simulated phone ready on USB; the stream asks the same link for its serial")
+
+    # Wi-Fi chosen, not paired yet: plain words in the pill and on a photo
+    n = len(d.events)
+    d.call("link_mode", "wifi")
+    ok = d.wait(lambda: any(x["type"] == "phone" and x.get("cause") == "wifi_none" and x.get("link") == "wifi"
+                            for x in d.events[n:]), 15)
+    expect(ok and b.prefs["phone"]["link"] == "wifi", "link: Wi-Fi chosen and kept; not paired yet, the pill says so")
+    folder = d.call("calib_folder_new", "check_photo")["folder"]
+    e = act(lambda: d.call("calib_shoot", folder), "acquire_failed")
+    expect(e is not None and e["error"] == "wifi_none", f"a photo with no phone on Wi-Fi: refused in plain words "
+                                                        f"({e and e['error']})")
+
+    # pairing with a wrong code, then with the right one
+    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", "000000"), "link", "failed")
+    expect(e is not None and e["cause"] == "pair_code", f"pairing with a wrong code: said as such ({e and e['cause']})")
+    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", sim.code), "link", "paired")
+    s = d.call("link_state")
+    expect(e is not None and s["state"] == "ready" and phone_link.transport_of(s["serial"]) == "wifi"
+           and live.pick_serial() == s["serial"] and b.prefs["phone"]["phone_id"] == sim.phone_id,
+           f"pairing with the code: connected over Wi-Fi ({s['serial']}), the same serial for stream and photos")
+    e = act(lambda: d.call("calib_shoot", folder), "calib_photo")
+    expect(e is not None, "a photo over Wi-Fi")
+
+    # the Wi-Fi drops and comes back by itself
+    e = act(sim.drop, "phone", timeout=10)
+    f = act(lambda: d.call("calib_shoot", folder), "acquire_failed")
+    expect(e is not None and e.get("state") == "reconnecting" and f is not None and f["error"] == "wifi_reconnecting",
+           f"Wi-Fi dropped: the pill says reconnecting, a photo is refused in plain words ({f and f['error']})")
+    e = act(sim.back, "link", "state", timeout=25)
+    ok = d.wait(lambda: d.call("link_state")["state"] == "ready", 25)
+    s = d.call("link_state")
+    expect(ok and s["reconnects"] >= 1 and s["drops"] >= 1, f"Wi-Fi back: reconnected by itself "
+                                                           f"({s['drops']} drop, {s['reconnects']} reconnection)")
+
+    # pairing with the QR code: the simulated phone scans it after 2 s
+    n = len(d.events)
+    s = d.call("link_qr")
+    shown = s["qr"].startswith("<svg") and s["qr_waiting"]
+    ok = d.wait(lambda: any(x["type"] == "link" and x.get("action") == "paired" for x in d.events[n:]), 20)
+    expect(shown and ok and d.call("link_state")["state"] == "ready",
+           "pairing with the QR code: the code shown, scanned, paired and connected")
+
+    # the live view on the phone's own screen
+    d.call("live_start")
+    d.wait(lambda: d.call("live_state").get("fps_ar", 0) > 0, 30)
+    e = act(lambda: d.call("view_open"), "view", timeout=15)
+    v = d.call("link_state")["view"]
+    port = b.view().port
+    expect(e is not None and e["action"] == "opened" and sim.opened[-1:] == [v["url_phone"]]
+           and f"tcp:{port}" in sim.reversed and v["url_phone"].startswith(f"http://127.0.0.1:{port}/v/"),
+           "Open on the phone: the tunnel through adb, then the phone's browser on the page")
+    th = threading.Thread(target=phone_view.client, args=(v["url_phone"], 5.0), daemon=True)
+    th.start()
+    d.wait(lambda: not th.is_alive(), 20)
+    v = d.call("link_state")["view"]
+    expect(v["viewers"] == 1 and v["fps"] > 10 and v["added_ms"] is not None,
+           f"the phone's page on the live AR (a client in its place): {v['fps']} fps, added latency median "
+           f"{v['added_ms']} ms (95th {v['added_p95_ms']} ms), {v['kb']} kB per frame, {v['mbit_s']} Mbit/s")
+    d.call("live_stop")
+    d.call("link_mode", "usb")
+    expect(d.wait(lambda: d.call("link_state")["state"] == "ready", 10) and live.pick_serial() == sim.phone_id,
+           "back to the cable: the USB serial again")
+
+    # the words: every cause in the six languages, every language with every key and the same placeholders
+    strings = {c: json.loads((ig.APP / "ui" / "strings" / f"{c}.json").read_text(encoding="utf-8")) for c in ig.LANGS}
+    keys = set(strings["en"])
+    missing = [f"{c}:link.cause.{k}" for c in ig.LANGS for k in phone_link.CAUSES if f"link.cause.{k}" not in strings[c]]
+    differ = [c for c in ig.LANGS if set(strings[c]) != keys]
+    marks = [f"{c}:{k}" for c in ig.LANGS for k in keys & set(strings[c])
+             if sorted(re.findall(r"\{\d\}", strings[c][k])) != sorted(re.findall(r"\{\d\}", strings["en"][k]))]
+    used = set()
+    for f in sorted((ig.APP / "ui").glob("*.js")) + [ig.APP / "ui.html"]:
+        used |= set(re.findall(r"""(?:T\(|data-t(?:-title|-ph)?=)['"]((?:link|view|pill\.phone|live)\.[\w.]+)['"]""",
+                               f.read_text(encoding="utf-8")))
+    unknown = sorted(k for k in used if k not in keys and not k.endswith("."))   # a prefix with its end added
+    expect(not missing and not differ and not marks and not unknown,
+           f"words: {len(keys)} keys in each of the six languages, every link cause said, same placeholders "
+           f"({missing or differ or marks or unknown or 'all there'})")
 
 
 # ── the real window ──────────────────────────────────────────────────────────
@@ -359,6 +471,15 @@ def test_ui(work, shots):
             ("ui_14_live_patient", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
                                    "LIVE.settings({board: 'patient', mandible: true})", 4000),
             ("ui_15_live_left", "window.__live = LIVE.state && LIVE.state.tracked; go('trials')", 1500),
+            # the Phone pane: the cable, then Wi-Fi paired with the QR code the simulated phone scans
+            ("ui_16_phone_cable", "$('lkBtn').click()", 2000),
+            ("ui_17_phone_wifi_qr", "LINK.setMode('wifi'); setTimeout(function () { $('lkQrBtn').click(); }, 800)",
+             2200),
+            ("ui_18_phone_wifi_paired", "", 4500),
+            ("ui_19_phone_live", "go('live'); $('lvStart').click(); window.__wifi = LINK.state && LINK.state.mode"
+                                 " === 'wifi' && LINK.state.state === 'ready'", 6000),
+            ("ui_20_phone_it", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change'));", 2000),
+            ("ui_21_phone_closed", "LINK.setMode('usb'); $('lkClose').click(); go('trials')", 2000),
         ]
 
         def nxt():
@@ -368,6 +489,8 @@ def test_ui(work, shots):
             if not steps:
                 js("JSON.stringify([!!window.__live, !!(LIVE.state && LIVE.state.running)])",
                    lambda v: log.append("live " + str(v)))
+                js("JSON.stringify([!!window.__wifi, LINK.open, LINK.state && LINK.state.mode])",
+                   lambda v: log.append("phone " + str(v)))
                 js("JSON.stringify(window.__errs||[])", lambda v: (log.append("errors " + str(v)), app.quit()))
                 return
             name, script, wait = steps.pop(0)
@@ -406,6 +529,9 @@ def test_ui(work, shots):
     live = next((x for x in log if x.startswith("live")), "live ?")
     expect(live == "live [true,false]",
            f"window: live view started from the page, board tracked, stopped when the page is left ({live})")
+    phone = next((x for x in log if x.startswith("phone")), "phone ?")
+    expect(phone == 'phone [true,false,"usb"]',
+           f"window: Phone pane opened from the rail, Wi-Fi paired with the QR code, back to the cable, closed ({phone})")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
     print("page actions: " + ", ".join(log[:-1]), flush=True)
 

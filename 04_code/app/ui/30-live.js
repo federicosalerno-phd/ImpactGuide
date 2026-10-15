@@ -42,9 +42,11 @@ const LIVE = {
   name: function (path) { return String(path || '').split(/[\\/]/).pop(); },
 
   // the stream's own error text (often a Java stack from the phone) stays in the log;
-  // the operator reads what to do
-  plainError: function (msg) {
-    return T(/camera|in use|disconnect/i.test(String(msg || '')) ? 'live.err.busy' : 'live.err.generic');
+  // the operator reads what to do: the link's cause when the link is why
+  plainError: function (msg, cause) {
+    if (cause && hasT('link.cause.' + cause)) return T('link.cause.' + cause);
+    if (/camera|in use|disconnect/i.test(String(msg || ''))) return T('live.err.busy');
+    return T(PHONE.link === 'wifi' ? 'live.err.wifi' : 'live.err.generic');
   },
 
   render: function (s) {
@@ -56,26 +58,26 @@ const LIVE = {
     $('lvIdle').classList.toggle('hidden', on);
     $('lvIdleWait').classList.toggle('hidden', !starting);
     $('lvIdleTitle').textContent = T(starting ? 'live.idle.title.starting' : 'live.idle.title');
-    $('lvIdleText').textContent = s.error && s.running ? LIVE.plainError(s.error)
+    $('lvIdleText').textContent = s.error && s.running ? LIVE.plainError(s.error, s.cause)
       : T(s.simulate ? 'live.idle.text.sim' : 'live.idle.text');
     const size = s.intrinsics.size;
     $('where').textContent = T(s.synthetic ? 'live.where.sim' : 'live.where', size[0], size[1]);
 
-    // over the picture: what is not real yet, the light, the pace
+    // over the picture: a link that dropped, what is not real yet, the light, the pace
     const reg = s.registration, tags = [];
-    if (!s.models.face) tags.push(T('live.tag.nomodel'));
-    else if (reg.source === 'demo') tags.push(T('live.tag.demo.' + reg.demo));
-    else tags.push(T('live.tag.file', LIVE.name(reg.path)));
-    if (s.intrinsics.source === 'nominal') tags.push(T('live.tag.nominal'));
-    if (s.synthetic) tags.push(T(s.replay ? 'live.tag.replay' : 'live.tag.synthetic'));
-    $('lvTags').replaceChildren.apply($('lvTags'), tags.map(function (t, i) {
-      return E('div', i === 0 && reg.source === 'demo' ? 'live-demo' : null, t);
-    }));
+    if (s.link_waiting) tags.push([T('live.waiting'), true]);
+    if (!s.models.face) tags.push([T('live.tag.nomodel')]);
+    else if (reg.source === 'demo') tags.push([T('live.tag.demo.' + reg.demo), true]);
+    else tags.push([T('live.tag.file', LIVE.name(reg.path))]);
+    if (s.intrinsics.source === 'nominal') tags.push([T('live.tag.nominal')]);
+    if (s.synthetic) tags.push([T(s.replay ? 'live.tag.replay' : 'live.tag.synthetic')]);
+    $('lvTags').replaceChildren.apply($('lvTags'), tags.map(function (t) { return E('div', t[1] ? 'live-demo' : null, t[0]); }));
     const word = s.tracked ? T('live.light.tracked') : T(s.corners ? 'live.light.weak' : 'live.light.none');
     $('lvDot').className = 'live-dot' + (on && s.tracked ? ' ok' : '');
     $('lvLight').textContent = word;
     const lat = s.latency || {};
-    $('lvRate').textContent = on && s.fps_ar ? T('live.rate', cifre(s.fps_ar, 0), cifre(lat.total_ms || 0, 0)) : '';
+    const measured = lat.stream_ms !== null && lat.stream_ms !== undefined;
+    $('lvRate').textContent = on && s.fps_ar ? T(measured ? 'live.rate' : 'live.rate.pc', cifre(s.fps_ar, 0), cifre(lat.total_ms || 0, 0)) : '';
 
     // the panel: the board
     $('lvStDot').className = 'live-dot' + (on && s.tracked ? ' ok' : '');
@@ -107,6 +109,7 @@ const LIVE = {
                  piRow(T('live.f.pose'), T('live.f.ms', cifre((tm.detect_ms || 0) + (tm.pose_ms || 0), 0))),
                  piRow(T('live.f.drawing'), T('live.f.ms', cifre((tm.render_ms || 0) + (tm.draw_ms || 0), 0))));
       $('lvLatency').textContent = s.synthetic ? T('live.f.latency.note.sim', cifre(lat.processing_ms || 0, 0))
+        : !measured ? T('live.f.latency.note.wifi', cifre(lat.processing_ms || 0, 0))
         : T('live.f.latency.note', cifre(lat.stream_ms || 0, 0), cifre(lat.processing_ms || 0, 0));
     } else {
       $('lvLatency').textContent = '';
@@ -132,6 +135,15 @@ const LIVE = {
       $('lvCamNote').textContent = T('live.cam.nominal', cifre(c.f, 0), c.size[0], c.size[1]);
       $('lvCamPath').textContent = s.intrinsics_file;
     }
+
+    // the panel: the phone, its link and its own screen
+    const ln = s.phone_link || {}, pv = s.phone_view || {}, ph = [];
+    const lw = T('link.btn.' + (ln.mode === 'wifi' ? 'wifi' : 'usb'));
+    ph.push(piRow(T('live.f.link'), ln.state === 'ready'
+      ? (ln.rtt_ms === null || ln.rtt_ms === undefined ? lw : T('live.f.link.v', lw, cifre(ln.rtt_ms, 0)))
+      : lw + ' · ' + T('link.state.' + (hasT('link.state.' + ln.state) ? ln.state : 'unknown'))));
+    if (pv.viewers) ph.push(piRow(T('view.f.fps'), T('live.f.fps', cifre(pv.fps || 0, 1))));
+    $('lvPhone').replaceChildren.apply($('lvPhone'), ph);
 
     // the toolbar and the footer
     document.querySelectorAll('.layer-btn').forEach(function (btn) {
@@ -168,7 +180,7 @@ const LIVE = {
       else ask('live_stop');      // the page was left while the stream was opening
     } else if (e.action === 'failed') {
       work(false);
-      toast(LIVE.plainError(e.message || e.error), 6000);
+      toast(LIVE.plainError(e.message || e.error, e.cause), 6000);
     } else if (e.action === 'stopped' && e.reason === 'photo') {
       toast(T('live.said.stopped.photo'), 3500);
     }
@@ -189,5 +201,6 @@ const LIVE = {
     $('lvStop').onclick = LIVE.stop;
     $('lvRegLoad').onclick = function () { ask('live_registration_load', function (s) { if (s) LIVE.render(s); }); };
     $('lvRegDemo').onclick = function () { ask('live_registration_demo', function (s) { if (s) LIVE.render(s); }); };
+    $('lvPhoneBtn').onclick = function () { if (!LINK.open) LINK.show(); };
   },
 };

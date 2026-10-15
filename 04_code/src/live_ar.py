@@ -44,11 +44,13 @@ For the app:
     ar = LiveAR(board="sheet", square_mm=24.0)       # one per process: its compose thread owns the OpenGL context
     ar.start()                                       # closes the camera app, opens the stream (a few seconds)
     jpeg, n = ar.next_jpeg(after=n)                  # newest composed frame
+    jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
     ar.configure(board=..., square_mm=..., face=..., mandible=..., axes=...); ar.set_registration(path or None)
     ar.set_tracking(hold_s=..., ...)                 # TRACKING overrides
     ar.stop(); ar.shutdown()
     MjpegServer(ar).url                              # the frames for an <img>, on 127.0.0.1
+    phone_view.ViewServer(ar)                        # the frames for the phone's screen (cable, Wi-Fi, network)
 
     python live_ar.py view  [--board patient|sheet] [--square MM] [--registration FILE] [--mandible]
                             [--synthetic | --replay VIDEO_OR_FOLDER] [--intrinsics FILE]
@@ -92,7 +94,9 @@ LIVE_MODELS = WORK / "live_models"                              # the models dec
 LIVE_TRIANGLES = {"face": 4000, "mandible": 6000}
 CAMERA_APP = acquisition.CAMERA_APP     # the phone's camera app holds the camera while it is open
 NOMINAL_F = 3070.0 / 3072.0             # focal length over the height of the 4:3 sensor field (synth_twin.NOMINAL)
-STREAM_LATENCY_MS = 195.0               # camera to decoded frame, median of live.py latency (15/10)
+# camera to decoded frame on each link, median of live.py latency: cable 15/10; Wi-Fi not measured yet (None: the
+# page says so and counts only the processing)
+STREAM_LATENCY_MS = {"usb": 195.0, "wifi": None}
 MIN_CORNERS = 8
 MAX_RMS = {"calibrated": 1.0, "nominal": 3.0}
 DISPLAY_WIDTH = 1280
@@ -739,7 +743,8 @@ class LiveAR:
         self._tracking_version = 1
         self._stream = None
         self._starting = False
-        self._jpeg, self._jpeg_n, self._bgr = None, 0, None
+        self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = None, 0, None, None
+        self._link = None               # the link of the phone's stream (usb, wifi); None for the stand-ins
         self._reset_run()
         self._status = {}
         self._error = ""
@@ -808,6 +813,7 @@ class LiveAR:
         """Works on a stream opened elsewhere (anything with latest, wait_frame, stats, alive, error, close)."""
         with self._lock:
             self._stream = stream
+            self._link = getattr(stream, "link", None)
             self._status = {}
             self._reset_run()               # nothing of the stream before
             self._cam_size = None           # intrinsics read again: a calibration may have been saved meanwhile
@@ -891,6 +897,16 @@ class LiveAR:
                 return None, after
             return self._jpeg, self._jpeg_n
 
+    def next_frame(self, after=0, timeout=1.0):
+        """As next_jpeg, with the time.perf_counter() when the frame was composed: (JPEG, counter, time), or
+        (None, after, None)."""
+        with self._frame_ready:
+            self._frame_ready.wait_for(lambda: (self._jpeg is not None and self._jpeg_n != after) or self._quit.is_set(),
+                                       timeout=timeout)
+            if self._jpeg is None or self._jpeg_n == after:
+                return None, after, None
+            return self._jpeg, self._jpeg_n, self._jpeg_t
+
     def note_served(self, ms):
         """The MJPEG server wrote a frame to the page in `ms`."""
         with self._lock:
@@ -940,6 +956,8 @@ class LiveAR:
         s = stream.stats()
         st["fps_stream"] = round(s["fps"], 1)
         st["frames"] = s["frames"]
+        gap = s.get("interval_p95_ms")
+        st["gap_p95_ms"] = round(gap, 1) if gap == gap and gap is not None else None   # not NaN
         tm = dict(st.get("timings", {}))
         if s.get("decode_ms") == s.get("decode_ms"):     # not NaN
             tm["decode_ms"] = round(s["decode_ms"], 1)
@@ -951,8 +969,12 @@ class LiveAR:
         st["timings"] = tm
         if stream.error:
             st["stream_error"] = stream.error
+        st["link"] = s.get("link")
+        st["link_waiting"] = bool(s.get("waiting"))     # the link dropped: the stream waits for it to come back
+        st["link_drops"] = s.get("link_drops", 0)
         if not stream.alive:
             st["error"] = stream.error or "stream stopped"
+            st["cause"] = getattr(stream, "cause", "")
         return st
 
     def _size_wh(self):
@@ -1238,7 +1260,7 @@ class LiveAR:
             if kind == "measured":
                 self._masks = (n, masks)
             if ok:
-                self._jpeg, self._jpeg_n, self._bgr = buf.tobytes(), self._jpeg_n + 1, img
+                self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = buf.tobytes(), self._jpeg_n + 1, img, t5
             if self.trace is not None:
                 self.trace.append({"what": "shown", "n": n, "t": t_dec, "t_done": t5, "kind": kind, "state": state,
                                    "vis": vis, "T": T, "verdict": None if own is None else own["verdict"],
@@ -1272,9 +1294,9 @@ class LiveAR:
             centre = np.array([nx, ny, 0.0]) * [spec["square_mm"], spec["square_mm"], 0] / 2
             st["distance_mm"] = round(float(np.linalg.norm(marker_pose.transform(T, centre[None])[0])), 1)
             st["tilt_deg"] = round(float(np.degrees(np.arccos(abs(T[2, 2])))), 1)
-        stream_ms = 0.0 if self.synthetic or self.replay is not None else STREAM_LATENCY_MS
+        stream_ms = 0.0 if self.synthetic or self.replay is not None else STREAM_LATENCY_MS.get(self._link)
         st["latency"] = {"stream_ms": stream_ms, "processing_ms": round(processing * 1e3, 1),
-                         "total_ms": round(stream_ms + processing * 1e3, 1)}
+                         "total_ms": round((stream_ms or 0.0) + processing * 1e3, 1), "link": self._link}
         return st
 
     def _failed(self, stream, e):

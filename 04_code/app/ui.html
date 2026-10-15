@@ -44,6 +44,8 @@
     <div class="tb-gap"></div>
     <div class="tb-r">
       <div class="picker" id="lang" tabindex="0" data-t-title="win.lang.hint"></div>
+      <!-- the link to the phone, cable or Wi-Fi: the button says which and opens the Phone pane -->
+      <button class="btn btn-2 btn-sm" id="lkBtn" type="button" data-t-title="link.btn.hint"><span data-icon="phone"></span><span class="btn-label" id="lkBtnL"></span></button>
       <div class="stpill" id="pill"><div class="sd" id="sd"></div><span id="st"></span></div>
     </div>
   </div>
@@ -282,6 +284,9 @@
           <div class="sec-lbl" data-t="live.cam.sec"></div>
           <div class="note" id="lvCamNote"></div>
           <div class="note note-path" id="lvCamPath"></div>
+          <div class="sec-lbl" data-t="live.phone.sec"></div>
+          <div id="lvPhone"></div>
+          <button class="btn btn-2 btn-wide" id="lvPhoneBtn"><span data-icon="phone"></span><span class="btn-label" data-t="live.phone.open"></span></button>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide hidden" id="lvStop"><span data-icon="stop"></span><span class="btn-label" data-t="live.stop"></span></button>
@@ -454,6 +459,69 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- The phone: the link (cable or Wi-Fi) with its pairing steps, its state and its quality, and the
+     live view on the phone's own screen. SlantUI's pane docked down the side of the work area,
+     opened from the Phone button on the rail (ui/40-phone.js). -->
+<div class="sheet sheet-side" id="lkSheet" role="dialog" aria-labelledby="lkTitle">
+  <div class="sheet-hd">
+    <div class="sheet-title" id="lkTitle" data-t="link.title"></div>
+    <button class="ct" type="button" id="lkClose" data-t-title="link.close.hint"><span data-icon="win-close"></span></button>
+  </div>
+  <div class="sheet-body">
+    <div class="stack">
+      <div class="sec-lbl" data-t="link.mode.sec"></div>
+      <div class="mlist" id="lkModes">
+        <div class="mitem" data-mode="usb" tabindex="0" role="button"><span class="mitem-name"><span data-t="link.mode.usb"></span> <span class="mitem-det" data-t="link.mode.usb.det"></span></span><span class="mbadge">USB</span></div>
+        <div class="mitem" data-mode="wifi" tabindex="0" role="button"><span class="mitem-name"><span data-t="link.mode.wifi"></span> <span class="mitem-det" data-t="link.mode.wifi.det"></span></span><span class="mbadge">WI-FI</span></div>
+      </div>
+      <div class="live-state"><span class="live-dot" id="lkDot"></span><span id="lkWord"></span></div>
+      <div class="note" id="lkWhy"></div>
+      <div id="lkRows"></div>
+      <div class="note" id="lkNote"></div>
+
+      <!-- Wi-Fi, not connected: pairing, once per PC -->
+      <div class="stack" id="lkPair">
+        <div class="sec-lbl" data-t="link.pair.sec"></div>
+        <div class="lk-step"><span class="tn">1</span><span data-t="link.pair.s1"></span></div>
+        <div class="lk-step"><span class="tn">2</span><span data-t="link.pair.s2"></span></div>
+        <div class="lk-step"><span class="tn">3</span><span data-t="link.pair.s3"></span></div>
+        <div class="lk-qr-row">
+          <div class="lk-qr" id="lkQr"></div>
+          <div class="lk-qr-side">
+            <div class="row hidden" id="lkQrWait"><span class="spinner spinner-sm"></span><span class="note" data-t="link.pair.qr.wait"></span></div>
+            <button class="btn btn-2" id="lkQrBtn"><span class="btn-label" id="lkQrBtnL"></span></button>
+          </div>
+        </div>
+        <div class="lk-step"><span class="tn">4</span><span data-t="link.pair.or"></span></div>
+        <div class="cfg-pair">
+          <input class="input" type="text" id="lkPairAddr" data-t-ph="link.pair.addr.ph"/>
+          <input class="input" type="text" id="lkPairCode" inputmode="numeric" maxlength="7" data-t-ph="link.pair.code.ph"/>
+        </div>
+        <button class="btn btn-2 btn-wide" id="lkPairBtn"><span class="btn-label" data-t="link.pair.action"></span></button>
+        <div class="note" data-t="link.connect.note"></div>
+        <div class="row">
+          <input class="input grow" type="text" id="lkAddr" data-t-ph="link.connect.ph"/>
+          <button class="btn btn-2" id="lkConnect"><span class="btn-label" data-t="link.connect.action"></span></button>
+        </div>
+      </div>
+
+      <!-- the live view on the phone's own screen -->
+      <div class="sec-lbl" data-t="view.sec"></div>
+      <div class="note" data-t="view.note"></div>
+      <button class="btn btn-primary btn-wide" id="vwOpen"><span data-icon="play"></span><span class="btn-label" data-t="view.open"></span></button>
+      <div id="vwRows"></div>
+      <div class="lk-qr-row">
+        <div class="lk-qr" id="vwQr"></div>
+        <div class="lk-qr-side">
+          <div class="note" data-t="view.qr.note"></div>
+          <div class="note note-path" id="vwUrl"></div>
+          <div class="note" data-t="view.firewall"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="scrim" id="busy">
   <div class="busy-card">
     <div class="spinner"></div>
@@ -479,6 +547,7 @@
 <script src="ui/10-calibration.js"></script>
 <script src="ui/20-trials.js"></script>
 <script src="ui/30-live.js"></script>
+<script src="ui/40-phone.js"></script>
 <script src="ui/90-boot.js"></script>
 </body>
 </html>

@@ -4,15 +4,13 @@ function onEvent(raw) {
   let e = null;
   try { e = JSON.parse(raw); } catch (err) { return; }
   if (!e) return;
-  if (e.type === 'phone') { PHONE = e; showPhone(); return; }
-  if (e.type === 'acquire_failed') {
-    const key = 'err.' + e.error;
-    toast(hasT(key) ? T(key, e.message || '') : T('err.generic', e.error + (e.message ? ': ' + e.message : '')), 5000);
-  }
+  if (e.type === 'phone') { PHONE = e; showPhone(); LINK.onEvent(e); return; }
+  if (e.type === 'acquire_failed') toast(sayError(e.error, e.message), 5000);
   if (e.type === 'error') toast(T('err.generic', e.message || ''), 6000);
   CAL.onEvent(e);
   TRIALS.onEvent(e);
   LIVE.onEvent(e);
+  LINK.onEvent(e);
 }
 
 function boot() {
@@ -30,6 +28,7 @@ function boot() {
     CAL.wire();
     TRIALS.wire();
     LIVE.wire();
+    LINK.wire();
     showPhone();
   };
   beJson('app_info', function (info) {
@@ -46,6 +45,8 @@ function boot() {
       go(page);
     };
     $('simChip').classList.toggle('hidden', !info.simulate);
+    PHONE.link = info.link;
+    LINK.btn();
     go(info.page);
   });
 }

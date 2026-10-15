@@ -1,4 +1,4 @@
-"""Raw files during a trial: the phone over USB (ADB) and the scanner's export folder (T20.1).
+"""Raw files during a trial: the phone over ADB, by cable or Wi-Fi, and the scanner's export folder (T20.1).
 
 Phone. The camera app stays open on the phone in its cradle and the phone is
 never touched: a key event sent over ADB is the shutter (the volume key, set
@@ -9,6 +9,9 @@ the name the phone gave it. ImpactGuide then files it under the trial name
 operator keeps it. For the video the same key starts and stops the recording;
 with switch_modes the camera app is first moved to its video mode and back to
 its photo mode afterwards through the standard Android camera intents.
+Which phone, on which link (cable or Wi-Fi), is phone_link.py's to say: every
+operation asks it for the serial first, so a Wi-Fi link that came back on a
+new port is followed, and a link that is down is said as such (wifi_lost).
 
 The camera serves one at a time: the live view of ImpactGuide (live_ar.py)
 closes the camera app before it opens the stream, and ImpactGuide stops the
@@ -31,13 +34,14 @@ Usage:
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+
+import phone_link
 
 PHOTO_SUFFIXES = (".jpg", ".jpeg")
 VIDEO_SUFFIXES = (".mp4",)
@@ -52,7 +56,7 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW: no console
 
 class AcquisitionError(RuntimeError):
     """A failure with a cause the interface can name: no_adb, no_device, unauthorized, many_devices,
-    adb_failed, timeout, not_found."""
+    adb_failed, timeout, not_found, and the causes of the link (phone_link.CAUSES)."""
 
     def __init__(self, cause, detail=""):
         super().__init__(f"{cause}: {detail}" if detail else cause)
@@ -60,23 +64,9 @@ class AcquisitionError(RuntimeError):
 
 
 def find_adb():
-    """The adb executable: IMPACTGUIDE_ADB, the PATH, the one shipped with scrcpy (the live stream's,
-    live.py: one adb for the whole app), the one bundled with the adbutils package, the Android SDK.
-    None if there is none."""
-    candidates = [os.environ.get("IMPACTGUIDE_ADB"), shutil.which("adb")]
-    try:
-        from live import find_scrcpy
-        candidates.append(str(find_scrcpy() / ("adb.exe" if os.name == "nt" else "adb")))
-    except Exception:  # noqa: BLE001  no scrcpy, or live.py's libraries missing
-        pass
-    try:
-        import adbutils
-        candidates.append(str(Path(adbutils.__file__).parent / "binaries" / ("adb.exe" if os.name == "nt" else "adb")))
-    except ImportError:
-        pass
-    sdk = os.environ.get("ANDROID_HOME") or os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk")
-    candidates.append(os.path.join(sdk, "platform-tools", "adb.exe" if os.name == "nt" else "adb"))
-    return next((c for c in candidates if c and Path(c).is_file()), None)
+    """The adb executable of the whole app (phone_link.find_adb: IMPACTGUIDE_ADB, the one shipped with
+    scrcpy, the PATH, adbutils, the Android SDK). None if there is none."""
+    return phone_link.find_adb()
 
 
 def new_stable_file(listing, before, sizes, suffixes):
@@ -95,10 +85,13 @@ def new_stable_file(listing, before, sizes, suffixes):
 
 
 class Phone:
-    """The phone in the cradle, over ADB."""
+    """The phone in the cradle, over ADB, on the link chosen in the app (phone_link)."""
 
-    def __init__(self, serial=None, camera_dir=CAMERA_DIR, shutter="volume_down", switch_modes=True, adb=None):
+    def __init__(self, serial=None, camera_dir=CAMERA_DIR, shutter="volume_down", switch_modes=True, adb=None,
+                 link=None):
         self.serial, self.camera_dir, self.shutter, self.switch_modes = serial, camera_dir, shutter, switch_modes
+        self.fixed = serial         # given by hand: used as it is
+        self.link = link or phone_link.get()
         self.adb = adb or find_adb()
         self._before_video = None
 
@@ -112,45 +105,44 @@ class Phone:
         except subprocess.TimeoutExpired:
             raise AcquisitionError("timeout", " ".join(args))
         if r.returncode != 0:
-            raise AcquisitionError("adb_failed", (r.stderr or r.stdout).strip()[-300:])
+            detail = (r.stderr or r.stdout).strip()[-300:]
+            if device and not self.fixed and not self.link.ready():
+                # the phone went away in the middle: said as the link's state, not as adb's text
+                raise AcquisitionError("wifi_lost" if self.link.mode == phone_link.WIFI else "no_device", detail)
+            raise AcquisitionError("adb_failed", detail)
         return r.stdout
 
     def devices(self):
-        """[{serial, state, model}] of what adb sees; starts the adb server if needed."""
-        out = self._run("devices", "-l", timeout=30, device=False)
-        found = []
-        for line in out.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 2:
-                model = next((p.split(":", 1)[1] for p in parts[2:] if p.startswith("model:")), "")
-                found.append({"serial": parts[0], "state": parts[1], "model": model.replace("_", " ")})
-        return found
+        """[{serial, state, model, link}] of what adb sees; starts the adb server if needed."""
+        try:
+            return [{"serial": d["serial"], "state": d["state"], "model": d["model"], "link": d["transport"]}
+                    for d in self.link.devices()]
+        except phone_link.LinkError as e:
+            raise AcquisitionError(e.cause, e.detail)
 
     def connect(self):
-        """Picks the one phone that is ready; the serial, or AcquisitionError with the cause."""
-        found = self.devices()
-        ready = [d for d in found if d["state"] == "device"]
-        if self.serial and any(d["serial"] == self.serial for d in ready):
+        """The phone on the chosen link (phone_link); the serial, or AcquisitionError with the cause."""
+        if self.fixed:
+            if not any(d["serial"] == self.fixed and d["state"] == "device" for d in self.devices()):
+                raise AcquisitionError("no_device", self.fixed)
+            self.serial = self.fixed
             return self.serial
-        if not found:
-            raise AcquisitionError("no_device")
-        if not ready:
-            raise AcquisitionError("unauthorized" if any(d["state"] == "unauthorized" for d in found) else "no_device",
-                                   found[0]["state"])
-        if len(ready) > 1:
-            raise AcquisitionError("many_devices", ", ".join(d["serial"] for d in ready))
-        self.serial = ready[0]["serial"]
+        try:
+            self.serial = self.link.serial()
+        except phone_link.LinkError as e:
+            raise AcquisitionError(e.cause, e.detail)
         return self.serial
 
     def status(self):
-        """{ok, cause, serial, model, foreground}: never raises."""
+        """{ok, cause, serial, model, foreground, link}: never raises."""
         try:
             self.connect()
             model = next((d["model"] for d in self.devices() if d["serial"] == self.serial), "")
-            return {"ok": True, "cause": "", "serial": self.serial, "model": model, "foreground": self.foreground()}
+            return {"ok": True, "cause": "", "serial": self.serial, "model": model, "foreground": self.foreground(),
+                    "link": self.link.mode}
         except AcquisitionError as e:
             return {"ok": False, "cause": e.cause, "detail": e.detail, "serial": self.serial or "", "model": "",
-                    "foreground": ""}
+                    "foreground": "", "link": self.link.mode}
 
     def foreground(self):
         """Package of the app on screen ('' if unknown)."""
@@ -228,6 +220,7 @@ class Phone:
         """Stops the recording started by start_video and pulls the video into out_dir."""
         if self._before_video is None:
             raise AcquisitionError("not_found", "no recording started")
+        self.connect()          # over Wi-Fi the serial may have changed while recording
         self.press()
         try:
             return self.pull(self._wait(self._before_video, VIDEO_SUFFIXES, timeout), out_dir)
@@ -241,23 +234,38 @@ class Phone:
 
 class FakePhone:
     """Writes stand-in files the way the phone names them: a grey photo at the photo size with
-    the time written on it, and an 8 s video."""
+    the time written on it, and an 8 s video. With a link (a simulated one, phone_link.SimulatedAdb)
+    it answers only while the phone is there on the chosen link, with the link's cause otherwise."""
 
-    def __init__(self, photo_px=(4080, 3072), video_s=8.0):
-        self.photo_px, self.video_s = photo_px, video_s
+    def __init__(self, photo_px=(4080, 3072), video_s=8.0, link=None):
+        self.photo_px, self.video_s, self.link = photo_px, video_s, link
         self._recording = False
         self._n = 0
+
+    def _check(self):
+        if self.link is not None:
+            try:
+                self.link.serial()
+            except phone_link.LinkError as e:
+                raise AcquisitionError(e.cause, e.detail)
 
     def _name(self, prefix, suffix):
         self._n += 1
         return f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}_{self._n:03d}{suffix}"
 
     def status(self):
-        return {"ok": True, "cause": "", "serial": "simulated", "model": "simulated phone", "foreground": "simulated"}
+        mode = self.link.mode if self.link is not None else phone_link.USB
+        try:
+            self._check()
+        except AcquisitionError as e:
+            return {"ok": False, "cause": e.cause, "serial": "", "model": "", "foreground": "", "link": mode}
+        return {"ok": True, "cause": "", "serial": "simulated", "model": "simulated phone", "foreground": "simulated",
+                "link": mode}
 
     def shoot(self, out_dir, timeout=20):
         import cv2
         import numpy as np
+        self._check()
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         w, h = self.photo_px
@@ -269,11 +277,13 @@ class FakePhone:
         return path
 
     def start_video(self):
+        self._check()
         self._recording = True
 
     def stop_video(self, out_dir, timeout=60):
         import cv2
         import numpy as np
+        self._check()
         if not self._recording:
             raise AcquisitionError("not_found", "no recording started")
         self._recording = False
@@ -370,6 +380,26 @@ def run_test():
         w2 = ExportWatch(export)
         expect(w2.poll() is None, "export folder: files already there are not new")
 
+    # the link decides: a simulated phone on Wi-Fi that drops in the middle
+    sim = phone_link.SimulatedAdb(auto_connect=False)
+    link = phone_link.Link(phone_link.WIFI, runner=sim)
+    link.pair_code(f"{sim.ip}:{sim.pair_port}", sim.code)
+    with tempfile.TemporaryDirectory() as tmp:
+        phone = FakePhone(photo_px=(64, 48), link=link)
+        ok_photo = phone.shoot(Path(tmp)).is_file()
+        sim.drop()
+        link.check()
+        try:
+            phone.shoot(Path(tmp))
+            cause = ""
+        except AcquisitionError as e:
+            cause = e.cause
+    expect(ok_photo and cause == "wifi_reconnecting" and phone.status()["cause"] == "wifi_reconnecting",
+           f"photo over Wi-Fi, then the link drops: refused with a plain cause ({cause})")
+    sim.back()
+    serial = link.wait_ready(10)
+    expect(serial and Phone(link=link).connect() == serial == link.serial(),
+           f"the phone over ADB asks the link for its serial: {serial}")
     expect(find_adb() is not None, f"adb found: {find_adb()}")
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed")
     return 1 if fails else 0

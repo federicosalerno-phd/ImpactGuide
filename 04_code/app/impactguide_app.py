@@ -6,14 +6,19 @@ what the bench produces: the phone calibration, the live AR view and the
 impact trials today; scans, analysis, charts and the dataset are the next pages.
 
 This file is the host: the window, the bridge, the background jobs. The logic
-is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py),
-which the host only calls; everything there also runs without the app. The
-live frames reach the page as MJPEG from 127.0.0.1 (live_ar.MjpegServer).
+is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py,
+phone_link.py, phone_view.py), which the host only calls; everything there also
+runs without the app. The live frames reach the page as MJPEG from 127.0.0.1
+(live_ar.MjpegServer), and the phone's own screen from a port of this PC
+(phone_view.ViewServer). The link to the phone, cable or Wi-Fi, is chosen on
+the Phone pane and kept by phone_link, which every part asks for the serial.
 
     python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it|fr|es|de|zh] [--page NAME]
 
 --simulate keeps every file under DIR and stands in for the phone and the
-scanner, for trying the app without the bench and for test_app.py. --replay
+scanner (a simulated phone on the cable that can also be paired on Wi-Fi with
+the code 123456 or the QR code), for trying the app without the bench and for
+test_app.py. --replay
 gives the live page recorded frames (a video of the phone, a folder of images,
 the frames of the digital twin) in place of the phone's stream.
 """
@@ -50,6 +55,8 @@ from slantui.tokens import PALETTES  # noqa: E402
 import acquisition  # noqa: E402
 import calibrate_charuco  # noqa: E402
 import live_ar  # noqa: E402
+import phone_link  # noqa: E402
+import phone_view  # noqa: E402
 import trials  # noqa: E402
 
 APP_NAME = "ImpactGuide"
@@ -98,7 +105,8 @@ class Prefs:
 
     DEFAULTS = {"lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "", "square_mm": 24.0,
                 "calib_mode": "photo", "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down",
-                                                  "switch_modes": True},
+                                                  "switch_modes": True, "link": phone_link.USB, "wifi_address": "",
+                                                  "phone_id": ""},
                 "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": ""}}
 
     def __init__(self, path):
@@ -161,10 +169,17 @@ class Backend(Bridge):
         self._watch = None
         self._live = None
         self._live_server = None
+        self._view = None           # the live AR for the phone's screen (phone_view.ViewServer), made at first use
+        self._view_opened = False   # opened on the phone through adb: its tunnel is laid again after a reconnection
+        self._qr = ""               # the pairing QR code on show, while it waits for the phone
+        self._svgs = {}
+        self._link_was = {}
+        self.link = self._make_link()
         self._pump = QTimer(self)
         self._pump.setInterval(150)
         self._pump.timeout.connect(self._drain)
         self._pump.start()
+        self.link.watch(self._on_link)
 
     # ── background jobs ──────────────────────────────────────────────────
     def _spawn(self, name, fn, done):
@@ -209,10 +224,15 @@ class Backend(Bridge):
 
     @staticmethod
     def _err(e, cause=None):
+        if isinstance(e, phone_link.LinkError):
+            return {"error": e.cause, "cause": e.cause, "message": ""}
         if isinstance(e, acquisition.AcquisitionError):
             return {"error": e.cause, "message": e.detail}
         if isinstance(e, SystemExit):
             return {"error": cause or "failed", "message": str(e.code)}
+        link_cause = getattr(e, "cause", "")      # live.LiveError: the link is why
+        if link_cause in phone_link.CAUSES:
+            return {"error": cause or link_cause, "cause": link_cause, "message": ""}
         return {"error": cause or type(e).__name__, "message": str(e)}
 
     def _answer(self, fn):
@@ -230,13 +250,16 @@ class Backend(Bridge):
         return json.dumps({"name": APP_NAME, "version": APP_VERSION, "lang": self.lang,
                            "langs": [{"code": c, "native": n, "flag": f} for c, n, f in LANGUAGES],
                            "page": self.prefs["page"] if self.prefs["page"] in PAGES else "trials",
-                           "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5"})
+                           "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5",
+                           "link": self.link.mode})
 
     @pyqtSlot(str)
     def set_lang(self, code):
         if code in LANGS:
             self.lang = code
             self.prefs.set("lang", code)
+            if self._view is not None:
+                self._view.words, self._view.lang = view_words(code), code
 
     @pyqtSlot(str)
     def set_page(self, page):
@@ -257,23 +280,185 @@ class Backend(Bridge):
     def phone(self):
         if self._phone is None:
             if self.roots.simulate:
-                self._phone = acquisition.FakePhone(photo_px=self.run().config.photo_px)
+                self._phone = acquisition.FakePhone(photo_px=self.run().config.photo_px, link=self.link)
             else:
                 p = self.prefs["phone"]
                 self._phone = acquisition.Phone(camera_dir=p["camera_dir"], shutter=p["shutter"],
-                                                switch_modes=bool(p["switch_modes"]))
+                                                switch_modes=bool(p["switch_modes"]), link=self.link)
         return self._phone
 
     @pyqtSlot()
     def phone_refresh(self):
         def done(status, error):
             self.phone_status = status if status else {"ok": False, **self._err(error)}
+            self.phone_status["link"] = self.link.mode
             self._emit({"type": "phone", **self.phone_status})
         self._spawn("phone_status", lambda: self.phone().status(), done)
 
     @pyqtSlot(result=str)
     def phone_prefs(self):
         return json.dumps({**self.prefs["phone"], "adb": acquisition.find_adb() or "", "status": self.phone_status})
+
+    # ── the link: cable or Wi-Fi ─────────────────────────────────────────
+    def _make_link(self):
+        """The process's link (phone_link.get()), set as the operator left it; in simulation a simulated phone
+        on the cable that pairs on Wi-Fi with the code 123456 or the QR code."""
+        p = self.prefs["phone"]
+        if self.roots.simulate:
+            link = phone_link.set_default(phone_link.Link(runner=phone_link.SimulatedAdb()))
+        else:
+            link = phone_link.get()
+        return link.configure(mode=p.get("link") if p.get("link") in phone_link.MODES else phone_link.USB,
+                              address=p.get("wifi_address", ""), phone_id=p.get("phone_id", ""))
+
+    def _on_link(self, status):
+        """From the link's own thread: handed to the GUI thread through the pump."""
+        self._jobs.put(("", self._link_changed, status, None))
+
+    def _link_changed(self, st, _error):
+        was, self._link_was = self._link_was, st
+        if self.link.remembered() != {k: self.prefs["phone"].get(k) for k in ("link", "wifi_address", "phone_id")}:
+            self.prefs.set("phone", {**self.prefs["phone"], **self.link.remembered()})
+        self.phone_status = {**self.phone_status, "ok": st["ok"], "cause": st["cause"] or ("" if st["ok"] else "unknown"),
+                             "link": st["mode"], "state": st["state"], "model": st["model"], "serial": st["serial"]}
+        self._emit({"type": "phone", **self.phone_status})
+        back = st["ok"] and was.get("state") in ("reconnecting", "lost") and was.get("mode") == st["mode"]
+        self._emit({"type": "link", "action": "state", "back": back, **st})
+        if back and self._view_opened and self._view is not None:
+            # adb drops its tunnels with the link: the phone's page goes on once the tunnel is laid again
+            port = self._view.port
+            self._spawn("view_tunnel", lambda: self.link.reverse(port), lambda r, e: None)
+
+    def _link_state(self):
+        st = self.link.status()
+        live = self._live.status() if self._live is not None and self._live.running else {}
+        st["stream"] = {"running": bool(live), "fps": live.get("fps_stream", 0.0),
+                        "gap_p95_ms": live.get("gap_p95_ms"), "waiting": live.get("link_waiting", False),
+                        "link": live.get("link")}
+        st["latency_ms"] = live_ar.STREAM_LATENCY_MS.get(st["mode"])
+        st["qr"] = self._svg(self._qr) if self._qr and st["qr_waiting"] else ""
+        st["busy"] = sorted(self._busy & {"link", "pair", "qr", "connect", "view_open"})
+        st["simulate"] = bool(self.roots.simulate)
+        st["view"] = self._view_state()
+        return st
+
+    @pyqtSlot(result=str)
+    def link_state(self):
+        return self._answer(self._link_state)
+
+    @pyqtSlot(str, result=str)
+    def link_mode(self, mode):
+        """Cable or Wi-Fi, kept for the next session. A live view running on the other link stops."""
+        def go():
+            if mode not in phone_link.MODES:
+                return {"error": "bad_value", "message": "link"}
+            if mode != self.link.mode:
+                if self._live is not None and self._live.running and not self._live.synthetic:
+                    self._live.stop()
+                    self._emit({"type": "live", "action": "stopped", "reason": "link"})
+                self.link.configure(mode=mode)
+                self.prefs.set("phone", {**self.prefs["phone"], **self.link.remembered()})
+                self._phone = None
+                self._spawn("link", self.link.check, lambda r, e: None)
+            return self._link_state()
+        return self._answer(go)
+
+    def _link_job(self, name, fn):
+        def done(_, error):
+            if error is not None:
+                self._emit({"type": "link", "action": "failed", "job": name, **self._err(error, "pair_failed")})
+            else:
+                self.prefs.set("phone", {**self.prefs["phone"], **self.link.remembered()})
+                self._emit({"type": "link", "action": "paired" if name in ("pair", "qr") else "connected"})
+        return self._spawn(name, fn, done)
+
+    @pyqtSlot(str, str, result=str)
+    def link_pair(self, address, code):
+        """Pairing with the code and the address the phone shows, then the connection; 'link' events say how."""
+        def go():
+            if not self._link_job("pair", lambda: self.link.pair_code(address, code)):
+                return {"error": "busy"}
+            return self._link_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def link_qr(self):
+        """A new pairing QR code; the phone that scans it is paired and connected in the background."""
+        def go():
+            self._qr = self.link.qr_start()     # a job already waiting goes on with the new code
+
+            def done(result, error):
+                self._qr = ""
+                if error is not None:
+                    self._emit({"type": "link", "action": "failed", "job": "qr", **self._err(error, "pair_failed")})
+                elif result == "ready":
+                    self.prefs.set("phone", {**self.prefs["phone"], **self.link.remembered()})
+                    self._emit({"type": "link", "action": "paired"})
+            if "qr" not in self._busy:
+                self._spawn("qr", self.link.qr_wait, done)
+            return self._link_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def link_qr_cancel(self):
+        def go():
+            self._qr = ""
+            self.link.qr_cancel()
+            return self._link_state()
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def link_connect(self, address):
+        """adb connect to the address the phone shows under IP address & Port (empty: the one it announces)."""
+        def go():
+            if not self._link_job("connect", lambda: self.link.connect(address)):
+                return {"error": "busy"}
+            return self._link_state()
+        return self._answer(go)
+
+    # ── the live view on the phone's own screen ──────────────────────────
+    def _svg(self, text):
+        """A QR code as SVG, kept: the pane asks for its state every second."""
+        if text not in self._svgs:
+            if len(self._svgs) > 8:
+                self._svgs.clear()
+            self._svgs[text] = phone_view.qr_svg(text)
+        return self._svgs[text]
+
+    def view(self):
+        """The server of the phone's screen, made at first use (Windows may then ask once about its firewall)."""
+        if self._view is None:
+            # in simulation only this PC: the tests never wake the firewall
+            self._view = phone_view.ViewServer(LiveFrames(self), host="127.0.0.1" if self.roots.simulate else "0.0.0.0",
+                                               words=view_words(self.lang), colors=dict(PALETTES[PALETTE].values),
+                                               lang=self.lang)
+        return self._view
+
+    def _view_state(self):
+        view = self.view()
+        url = view.url_lan(phone_view.lan_ip(self.link.status()["phone_ip"]))
+        live = self._live.status() if self._live is not None and self._live.running else {}
+        lat = live.get("latency") or {}
+        return {"url_lan": url, "qr": self._svg(url), "url_phone": view.url_phone, "opened": self._view_opened,
+                "live": bool(live), "pc_ms": lat.get("total_ms"), "camera_ms": lat.get("stream_ms"),
+                "synthetic": bool(live.get("synthetic")), **view.stats()}
+
+    @pyqtSlot(result=str)
+    def view_open(self):
+        """The live view in the phone's browser, through adb (the phone's 127.0.0.1 is this PC's)."""
+        def go():
+            view = self.view()
+
+            def done(_, error):
+                if error is not None:
+                    self._emit({"type": "view", "action": "failed", **self._err(error, "unreachable")})
+                else:
+                    self._view_opened = True
+                    self._emit({"type": "view", "action": "opened"})
+            if not self._spawn("view_open", lambda: self.link.open_url(view.url_phone, view.port), done):
+                return {"error": "busy"}
+            return self._link_state()
+        return self._answer(go)
 
     @pyqtSlot(str, result=str)
     def set_phone_prefs(self, payload):
@@ -948,9 +1133,12 @@ class Backend(Bridge):
         square = float(self.prefs["square_mm"])
         if ar.settings()["square_mm"] != square:      # changed on the Calibration page
             ar.configure(square_mm=square)
+        ln = self.link.status()
         return {**ar.status(), "url": self._live_server.url, "prefs": self.prefs["live"], "phone": self.phone_status,
                 "busy": sorted(self._busy), "simulate": bool(self.roots.simulate),
-                "intrinsics_file": str(self.roots.calib_out / "intrinsics_stream.json")}
+                "intrinsics_file": str(self.roots.calib_out / "intrinsics_stream.json"),
+                "phone_link": {k: ln[k] for k in ("mode", "state", "cause", "rtt_ms", "model")},
+                "phone_view": self._view.stats() if self._view is not None else None}
 
     @pyqtSlot(result=str)
     def live_state(self):
@@ -1028,10 +1216,40 @@ class Backend(Bridge):
     def shutdown(self):
         self._pump.stop()
         self._drop_staged()
+        self.link.close()
+        if self._view is not None:
+            self._view.close()
         if self._live_server is not None:
             self._live_server.close()
         if self._live is not None:
             self._live.shutdown()
+
+
+class LiveFrames:
+    """The phone's screen reads the live AR's frames through this, so the server can be up before the live AR is
+    made (and while it is off)."""
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def next_frame(self, after=0, timeout=1.0):
+        ar = self.backend._live
+        if ar is None:
+            threading.Event().wait(timeout)
+            return None, after, None
+        return ar.next_frame(after, timeout)
+
+
+def view_words(lang):
+    """The words of the page on the phone's screen, in the app's language (English where one is missing)."""
+    words = {}
+    for code in ("en", lang):
+        try:
+            d = json.loads((APP / "ui" / "strings" / f"{code}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        words.update({k[len("view.page."):]: v for k, v in d.items() if k.startswith("view.page.")})
+    return words
 
 
 # ── the window ───────────────────────────────────────────────────────────────

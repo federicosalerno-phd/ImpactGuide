@@ -1,8 +1,11 @@
-"""Live video from the phone camera to the PC over USB, for the live AR page of ImpactGuide (T20.3, ex T5.5).
+"""Live video from the phone camera to the PC, by cable or Wi-Fi, for the live AR page of ImpactGuide (T20.3, ex T5.5).
 
 The phone runs the scrcpy server (shipped with scrcpy, which also brings adb) with the back camera as video source;
 the stream comes over an adb tunnel as raw H.264 (no scrcpy metadata), is decoded here with PyAV and only the newest
-frame is kept, with the time it was decoded. Nothing is installed on the phone and it needs no app: USB debugging only.
+frame is kept, with the time it was decoded. Nothing is installed on the phone and it needs no app: USB debugging, or
+wireless debugging for Wi-Fi. Which phone, on which link, is phone_link.py's to say (one place for the serial); over
+Wi-Fi the bit rate is lower, and when the link drops the stream waits for phone_link to bring it back (up to
+LINK_WAIT_S) and starts again on the serial the phone has then.
 
 For the app page:
     s = open_stream(size="1920x1440", fps=30)    # starts the server, returns once the first frame is in
@@ -14,7 +17,7 @@ For the app page:
 Latency (camera to decoded frame) is measured with `latency`: the PC screen flashes, the phone looks at it, and the
 time from each flash to the first frame that sees it is taken (includes the screen's own delay, a few ms).
 
-    python live.py devices                       phones seen over adb
+    python live.py devices                       phones seen over adb, by link
     python live.py cameras                       cameras of the phone and their sizes (scrcpy --list-camera-sizes)
     python live.py view [--size WxH] [--fps N]   window with the stream, fps and ChArUco corners
     python live.py latency [--size WxH]          flashes the screen, the phone films it
@@ -23,13 +26,14 @@ time from each flash to the first frame that sees it is taken (includes the scre
                                                  frame (OUT_times.npy), to replay the live AR on it
                                                  (live_ar.py view --replay OUT.h264, live_ar.py bench --replay ...)
 
+Every command takes --link usb|wifi (default usb; wifi: the phone paired in ImpactGuide, connected again at its last
+address or the one it announces) or --serial.
+
 Environment: IMPACTGUIDE_SCRCPY = folder with scrcpy-server and adb.exe (default: found on the PATH or in the WinGet
 packages folder).
 """
 import argparse
-import glob
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -41,34 +45,40 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import phone_link
+
 SERVER_REMOTE = "/data/local/tmp/scrcpy-server.jar"
 SCRCPY_VERSION = "4.1"          # the server refuses a client of another version
 PORT = 27183
 BIT_RATE = 20_000_000           # high, so that compression does not move the ChArUco corners
-RESTARTS = 3                    # server restarts after the stream broke while running
+# per link: over Wi-Fi the camera stream shares the air with the AR view sent back to the phone (phone_view.py)
+BIT_RATES = {phone_link.USB: BIT_RATE, phone_link.WIFI: 12_000_000}
+RESTARTS = 3                    # server restarts after the stream broke while the link was up
+LINK_WAIT_S = 60.0              # after the link dropped, the stream waits this long for it to come back
+STALL_S = 3.0                   # no data from the phone this long: the stream is broken (a Wi-Fi link can die silently)
+GOOD_RUN_S = 60.0               # a stream that ran this long since its last restart gets its restarts back
 
 
 class LiveError(RuntimeError):
-    pass
+    """A failure of the stream; `cause` is a link cause (phone_link.CAUSES) when the link is why."""
+
+    def __init__(self, msg, cause=""):
+        super().__init__(msg)
+        self.cause = cause
 
 
 def find_scrcpy():
     """Folder holding scrcpy-server and adb.exe."""
-    cands = [os.environ.get("IMPACTGUIDE_SCRCPY")]
-    exe = shutil.which("scrcpy")
-    if exe:
-        cands.append(str(Path(exe).resolve().parent))
-    local = os.environ.get("LOCALAPPDATA", "")
-    cands += sorted(glob.glob(os.path.join(local, "Microsoft", "WinGet", "Packages", "Genymobile.scrcpy*", "scrcpy-win64-*")),
-                    reverse=True)
-    for c in cands:
-        if c and (Path(c) / "scrcpy-server").is_file() and (Path(c) / "adb.exe").is_file():
-            return Path(c)
-    raise LiveError("scrcpy not found: winget install Genymobile.scrcpy, or set IMPACTGUIDE_SCRCPY")
+    d = phone_link.scrcpy_dir()
+    if d is None:
+        raise LiveError("scrcpy not found: winget install Genymobile.scrcpy, or set IMPACTGUIDE_SCRCPY", "no_adb")
+    return d
 
 
 def adb(*args, serial=None, timeout=30, check=True):
-    cmd = [str(find_scrcpy() / "adb.exe")] + (["-s", serial] if serial else []) + list(args)
+    """adb of the whole app (phone_link.find_adb: the one shipped with scrcpy)."""
+    exe = phone_link.find_adb() or str(find_scrcpy() / "adb.exe")
+    cmd = [exe] + (["-s", serial] if serial else []) + list(args)
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if check and r.returncode != 0:
@@ -77,25 +87,22 @@ def adb(*args, serial=None, timeout=30, check=True):
 
 
 def devices():
-    """[(serial, state, model)] of the phones adb sees (state "device" = ready, "unauthorized" = accept on the phone)."""
-    out = []
-    for line in adb("devices", "-l").splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 2:
-            model = next((p.split(":", 1)[1] for p in parts[2:] if p.startswith("model:")), "")
-            out.append((parts[0], parts[1], model))
-    return out
+    """[(serial, state, model, link)] of the phones adb sees (state "device" = ready, "unauthorized" = accept on the
+    phone; link usb or wifi)."""
+    try:
+        return [(d["serial"], d["state"], d["model"], d["transport"]) for d in phone_link.get().devices()]
+    except phone_link.LinkError as e:
+        raise LiveError(f"adb: {e.cause}", e.cause)
 
 
 def pick_serial(serial=None):
-    ready = [d for d in devices() if d[1] == "device"]
+    """`serial` if given, else the phone on the link chosen in the app (phone_link: the one place that knows)."""
     if serial:
         return serial
-    if not ready:
-        raise LiveError("no phone ready over adb (cable, USB debugging, authorisation on the phone)")
-    if len(ready) > 1:
-        raise LiveError(f"more than one phone: {[d[0] for d in ready]}")
-    return ready[0][0]
+    try:
+        return phone_link.get().serial()
+    except phone_link.LinkError as e:
+        raise LiveError(f"no phone ready on the {phone_link.get().mode} link: {e.cause}", e.cause)
 
 
 def list_cameras(serial=None):
@@ -107,15 +114,21 @@ def list_cameras(serial=None):
 
 
 class PhoneStream:
-    """Back camera of the phone over USB; a reader thread decodes and keeps only the newest frame."""
+    """Back camera of the phone, by cable or Wi-Fi; a reader thread decodes and keeps only the newest frame."""
 
-    def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=BIT_RATE, camera_id=None, port=PORT,
+    def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=None, camera_id=None, port=PORT,
                  restarts=RESTARTS, log=None, record=None):
+        self.fixed = serial             # given by hand (command line): no link to follow
         self.serial = pick_serial(serial)
+        self.link = phone_link.transport_of(self.serial)
         self.record = record            # an open binary file that gets the raw H.264 (`record`)
         self.frame_times = []           # decoding time of every frame while recording
+        bit_rate = bit_rate or BIT_RATES.get(self.link, BIT_RATE)
         self.size, self.fps, self.bit_rate, self.camera_id, self.port = size, fps, bit_rate, camera_id, port
         self.max_restarts, self.restarts = restarts, 0
+        self.waiting = False            # the link dropped: waiting for it to come back
+        self.link_drops = 0             # times the stream waited for the link and went on
+        self.cause = ""                 # the link cause when the stream gave up because of the link
         self.scid = int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
         self.log = log or (lambda msg: None)
         self._lock = threading.Lock()
@@ -129,8 +142,6 @@ class PhoneStream:
 
     # -- start and stop
     def start(self, timeout=15.0):
-        name = f"scrcpy_{self.scid:08x}"
-        adb("forward", f"tcp:{self.port}", f"localabstract:{name}", serial=self.serial)
         self._launch()
         self.thread = threading.Thread(target=self._read, args=(timeout,), daemon=True)
         self.thread.start()
@@ -161,9 +172,10 @@ class PhoneStream:
             pass
 
     def _launch(self):
-        """Copy the server to the phone (cleanup=true deletes it when the previous server exits) and start it; it
-        lives as long as this adb shell."""
+        """The tunnel (again after a reconnection: adb drops it with the link), the server copied to the phone
+        (cleanup=true deletes it when the previous server exits) and started; it lives as long as this adb shell."""
         d = find_scrcpy()
+        adb("forward", f"tcp:{self.port}", f"localabstract:scrcpy_{self.scid:08x}", serial=self.serial)
         adb("push", str(d / "scrcpy-server"), SERVER_REMOTE, serial=self.serial)
         args = [f"scid={self.scid:08x}", "log_level=info", "video_source=camera", "audio=false", "control=false",
                 "tunnel_forward=true", "raw_stream=true", "video_codec=h264", f"video_bit_rate={self.bit_rate}",
@@ -202,17 +214,19 @@ class PhoneStream:
 
     def stats(self):
         """Measured fps over the last frames, mean and 95th percentile of the decode interval (ms), mean time to
-        decode and convert a frame (ms), frame count."""
+        decode and convert a frame (ms), frame count, link, restarts, waits for the link."""
         with self._lock:
             t = np.array(self._times)
             n = self._n
             dec = float(np.mean(self._decode_ms)) if self._decode_ms else float("nan")
+        more = {"link": self.link, "restarts": self.restarts, "link_drops": self.link_drops, "waiting": self.waiting,
+                "bit_rate": self.bit_rate}
         if len(t) < 2:
             return {"fps": 0.0, "interval_ms": float("nan"), "interval_p95_ms": float("nan"), "decode_ms": dec,
-                    "frames": n}
+                    "frames": n, **more}
         dt = np.diff(t) * 1e3
         return {"fps": float((len(t) - 1) / (t[-1] - t[0])), "interval_ms": float(dt.mean()),
-                "interval_p95_ms": float(np.percentile(dt, 95)), "decode_ms": dec, "frames": n}
+                "interval_p95_ms": float(np.percentile(dt, 95)), "decode_ms": dec, "frames": n, **more}
 
     # -- threads
     def _server_log(self, server):
@@ -238,14 +252,33 @@ class PhoneStream:
             time.sleep(0.1)
         raise LiveError("no stream from the server")
 
+    def _link_up(self):
+        """The phone answers on its link (adb lists it and a round trip comes back)."""
+        if self.fixed:
+            try:
+                return any(d[0] == self.fixed and d[1] == "device" for d in devices())
+            except LiveError:
+                return False
+        return phone_link.get().reachable()
+
     def _read(self, timeout):
-        """Decode until stopped. When the stream breaks after it has run (another app took the camera, the server
-        died) the server is started again, at most max_restarts times; .error holds the last failure."""
+        """Decode until stopped. When the stream breaks after it has run: if the link dropped (Wi-Fi out of reach),
+        wait for it to come back (LINK_WAIT_S, not counted as a restart); otherwise (another app took the camera, the
+        server died) start the server again, at most max_restarts times. Then on the serial the phone has now (over
+        Wi-Fi its port may have changed). .error holds the last failure, .cause the link's when it gave up."""
         import av
+        relaunch = False
+        ran_from = time.perf_counter()
         while not self._stop.is_set():
             try:
+                if relaunch:
+                    relaunch = False
+                    self.serial = pick_serial(self.fixed)
+                    self._launch()
                 self.sock, data = self._connect(timeout)
-                self.sock.settimeout(None)
+                self.sock.settimeout(STALL_S)
+                self.waiting = False
+                ran_from = time.perf_counter()
                 codec = av.CodecContext.create("h264", "r")
                 codec.flags |= av.codec.context.Flags.low_delay
                 while not self._stop.is_set():
@@ -271,18 +304,31 @@ class PhoneStream:
                 if self._stop.is_set():
                     return
                 self.error = f"{type(e).__name__}: {e}; server: {' | '.join(self.server_lines[-3:])}"
-                if self._frame is None or self.restarts >= self.max_restarts:
+                if self._frame is None:
                     return
-                self.restarts += 1
-                self.log(f"restart {self.restarts}: {self.error}")
                 try:
                     self.sock.close()
                 except (OSError, AttributeError):
                     pass
-                if self.server.poll() is None:
+                if self.server is not None and self.server.poll() is None:
                     self.server.terminate()
+                if time.perf_counter() - ran_from > GOOD_RUN_S:
+                    self.restarts = 0
+                if self._link_up():
+                    if self.restarts >= self.max_restarts:
+                        return
+                    self.restarts += 1
+                    self.log(f"restart {self.restarts}: {self.error}")
+                else:
+                    self.waiting = True
+                    self.log(f"link down, waiting up to {LINK_WAIT_S:.0f} s: {self.error}")
+                    if self.fixed or phone_link.get().wait_ready(LINK_WAIT_S, stop=self._stop) is None:
+                        if not self._stop.is_set():
+                            self.cause = phone_link.get().status()["cause"] or "wifi_lost"
+                        return
+                    self.link_drops += 1
                 time.sleep(0.5)
-                self._launch()
+                relaunch = True
 
 
 def open_stream(serial=None, size="1920x1440", fps=30, **kw):
@@ -398,15 +444,32 @@ def cmd_latency(a, flashes=12, period=0.8):
           f"over {len(lat)} flashes (contrast {np.median(levels[1]) - np.median(levels[0]):.0f} grey levels)")
 
 
+def saved_wifi():
+    """The Wi-Fi address and phone id ImpactGuide keeps (preferences.json in LOCALAPPDATA/ImpactGuide), if any."""
+    import json
+    try:
+        prefs = json.loads((Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ImpactGuide" / "preferences.json")
+                           .read_text(encoding="utf-8"))
+        return {"address": prefs["phone"].get("wifi_address", ""), "phone_id": prefs["phone"].get("phone_id", "")}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=["devices", "cameras", "view", "bench", "latency", "record"])
     ap.add_argument("out", nargs="?", help="record: the file to write (OUT.h264 and OUT_times.npy)")
     ap.add_argument("--serial")
+    ap.add_argument("--link", choices=phone_link.MODES, default=phone_link.USB,
+                    help="cable or Wi-Fi (the last Wi-Fi address is read from ImpactGuide's preferences)")
     ap.add_argument("--size", default="1920x1440")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args()
+    if a.link == phone_link.WIFI:
+        phone_link.get().configure(mode=phone_link.WIFI, **saved_wifi())
+        if not a.serial and phone_link.get().wait_ready(20) is None:
+            sys.exit(f"live: no phone on Wi-Fi ({phone_link.get().status()['cause']})")
     try:
         if a.command == "devices":
             for d in devices():
