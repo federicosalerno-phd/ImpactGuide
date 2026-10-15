@@ -41,6 +41,12 @@ const LIVE = {
 
   name: function (path) { return String(path || '').split(/[\\/]/).pop(); },
 
+  // the stream's own error text (often a Java stack from the phone) stays in the log;
+  // the operator reads what to do
+  plainError: function (msg) {
+    return T(/camera|in use|disconnect/i.test(String(msg || '')) ? 'live.err.busy' : 'live.err.generic');
+  },
+
   render: function (s) {
     LIVE.state = s;
     const on = s.running && !s.error;
@@ -50,7 +56,7 @@ const LIVE = {
     $('lvIdle').classList.toggle('hidden', on);
     $('lvIdleWait').classList.toggle('hidden', !starting);
     $('lvIdleTitle').textContent = T(starting ? 'live.idle.title.starting' : 'live.idle.title');
-    $('lvIdleText').textContent = s.error && s.running ? T('live.f.error', s.error)
+    $('lvIdleText').textContent = s.error && s.running ? LIVE.plainError(s.error)
       : T(s.simulate ? 'live.idle.text.sim' : 'live.idle.text');
     const size = s.intrinsics.size;
     $('where').textContent = T(s.synthetic ? 'live.where.sim' : 'live.where', size[0], size[1]);
@@ -160,7 +166,7 @@ const LIVE = {
       else ask('live_stop');      // the page was left while the stream was opening
     } else if (e.action === 'failed') {
       work(false);
-      toast(T('err.live_failed', e.message || e.error), 6000);
+      toast(LIVE.plainError(e.message || e.error), 6000);
     } else if (e.action === 'stopped' && e.reason === 'photo') {
       toast(T('live.said.stopped.photo'), 3500);
     }

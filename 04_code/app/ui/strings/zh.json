@@ -134,6 +134,8 @@
 
   "pill.live.starting": "正在启动视频流",
   "err.live_failed": "实时视图未能启动：{0}",
+  "live.err.busy": "手机相机被占用，通常是相机应用处于打开状态：请关闭它，保持手机解锁，然后重新开始。",
+  "live.err.generic": "实时画面未能启动：请检查手机已连接、已解锁并允许 USB 调试，然后重新开始。",
   "err.live_starting": "请等待实时视图启动",
   "err.bad_registration": "{0} 不含有效的 T_M_B",
   "live.hint": "将手机对准标定板：跟踪到标定板时指示灯变绿",

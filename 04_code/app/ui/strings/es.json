@@ -134,6 +134,8 @@
 
   "pill.live.starting": "Iniciando el flujo",
   "err.live_failed": "La vista en vivo no se ha iniciado: {0}",
+  "live.err.busy": "La cámara del teléfono está ocupada, normalmente por la app Cámara abierta: ciérrala, mantén el teléfono desbloqueado y vuelve a empezar.",
+  "live.err.generic": "La vista en directo no se ha iniciado: comprueba que el teléfono esté conectado, desbloqueado y con la depuración USB permitida, y vuelve a empezar.",
   "err.live_starting": "Espera a que se inicie la vista en vivo",
   "err.bad_registration": "{0} no contiene una T_M_B válida",
   "live.hint": "Apunta el teléfono al tablero: la luz se pone verde mientras se sigue el tablero",

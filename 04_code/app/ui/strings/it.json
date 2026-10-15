@@ -134,6 +134,8 @@
 
   "pill.live.starting": "Avvio del flusso",
   "err.live_failed": "La vista dal vivo non è partita: {0}",
+  "live.err.busy": "La camera del telefono è occupata, di solito dall'app Fotocamera aperta: chiudila, tieni il telefono sbloccato e riavvia.",
+  "live.err.generic": "La vista dal vivo non è partita: controlla che il telefono sia collegato, sbloccato e con il debug USB consentito, poi riavvia.",
   "err.live_starting": "Aspetta che la vista dal vivo parta",
   "err.bad_registration": "{0} non contiene una T_M_B valida",
   "live.hint": "Inquadra la tavola con il telefono: la luce diventa verde quando la tavola è agganciata",

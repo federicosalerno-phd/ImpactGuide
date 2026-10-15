@@ -107,6 +107,7 @@ def write_board(out, square):
     fig.savefig(out / f"{stem}.pdf", metadata={"CreationDate": None})
     plt.close(fig)
     print(f"board: {out / stem}.pdf, .png")
+    return out / f"{stem}.pdf"
 
 
 def rotation(axis_angle):

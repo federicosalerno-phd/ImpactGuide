@@ -134,6 +134,8 @@
 
   "pill.live.starting": "Démarrage du flux",
   "err.live_failed": "La vue en direct n'a pas démarré : {0}",
+  "live.err.busy": "La caméra du téléphone est occupée, en général par l'application Appareil photo ouverte : fermez-la, gardez le téléphone déverrouillé et relancez.",
+  "live.err.generic": "La vue en direct n'a pas démarré : vérifiez que le téléphone est branché, déverrouillé et autorisé pour le débogage USB, puis relancez.",
   "err.live_starting": "Attendez que la vue en direct démarre",
   "err.bad_registration": "{0} ne contient aucune T_M_B valide",
   "live.hint": "Pointez le téléphone vers la mire : le voyant passe au vert tant que la mire est suivie",

@@ -791,8 +791,12 @@ class Backend(Bridge):
     def calib_board(self):
         def go():
             with contextlib.redirect_stdout(io.StringIO()):
-                calibrate_charuco.write_board(self.roots.board, float(self.prefs["square_mm"]))
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.roots.board)))
+                pdf = calibrate_charuco.write_board(self.roots.board, float(self.prefs["square_mm"]))
+            # the PDF itself, not its folder: a folder window opens behind this frameless window
+            if hasattr(os, "startfile"):
+                os.startfile(str(pdf))
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf)))
             return self._calib_state()
         return self._answer(go)
 

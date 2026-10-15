@@ -134,6 +134,8 @@
 
   "pill.live.starting": "Starting the stream",
   "err.live_failed": "The live view did not start: {0}",
+  "live.err.busy": "The phone camera is busy, usually because the Camera app is open: close it, keep the phone unlocked and start again.",
+  "live.err.generic": "The live view did not start: check that the phone is connected, unlocked and allowed for USB debugging, then start again.",
   "err.live_starting": "Wait for the live view to start",
   "err.bad_registration": "{0} holds no valid T_M_B",
   "live.hint": "Point the phone at the board: the light turns green while the board is tracked",

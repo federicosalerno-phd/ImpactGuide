@@ -134,6 +134,8 @@
 
   "pill.live.starting": "Stream wird gestartet",
   "err.live_failed": "Die Live-Ansicht ist nicht gestartet: {0}",
+  "live.err.busy": "Die Kamera des Telefons ist belegt, meist durch die geöffnete Kamera-App: schließen, Telefon entsperrt lassen und neu starten.",
+  "live.err.generic": "Die Live-Ansicht ist nicht gestartet: prüfen, ob das Telefon verbunden, entsperrt und für USB-Debugging freigegeben ist, dann neu starten.",
   "err.live_starting": "Warten, bis die Live-Ansicht gestartet ist",
   "err.bad_registration": "{0} enthält keine gültige T_M_B",
   "live.hint": "Das Smartphone auf die Tafel richten: Die Leuchte wird grün, solange die Tafel verfolgt wird",
