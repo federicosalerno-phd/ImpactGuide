@@ -88,6 +88,33 @@
 .cfg-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .cfg-pair>.col>*+*{margin-top:4px}
 
+/* ── the live view ────────────────────────────────────────────────────────
+   The stream fills the stage at its own 4:3; what is not real yet, the light
+   and the pace sit on it on the overlay role, as SlantUI's on-stage chrome. */
+.view.live-view{padding:12px 16px 16px;overflow:hidden}
+.live-stage{height:100%;display:flex;align-items:center;justify-content:center;container-type:size}
+.live-frame{position:relative;width:min(100cqw,calc(100cqh * 4 / 3));height:min(100cqh,calc(100cqw * 3 / 4));
+            background:var(--surface-0);border-radius:var(--r-md);overflow:hidden}
+.live-img{display:block;width:100%;height:100%;object-fit:contain}
+.live-tags{color:var(--text-2)}
+.live-tags .live-demo{color:var(--warn-text);font-weight:var(--w-strong);letter-spacing:.4px}
+.live-lights{left:auto;right:10px;color:var(--text-1)}
+.live-light{display:flex;align-items:center;gap:9px;white-space:nowrap}
+.live-light.live-later{color:var(--text-3)}
+.live-dot{width:11px;height:11px;border-radius:50%;background:var(--text-4);flex:none}
+.live-dot.ok{background:var(--ok)}
+.live-dot.off{background:var(--control-hover)}
+.live-idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
+.live-idle .done-card{max-width:560px}
+.live-idle .trial-id{font-size:24px;white-space:normal}
+
+/* The light in the panel, larger, and the one still to come beside its note. */
+.live-state{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--surface-3);
+            border-radius:var(--r-xs);font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1)}
+.live-state .live-dot{width:14px;height:14px}
+.live-state.live-later{align-items:flex-start;font-size:var(--fs);font-weight:normal;background:var(--surface-2)}
+.live-state.live-later .live-dot{margin-top:3px}
+
 /* The edits of a logged value: one card each. */
 .edit-card{background:var(--surface-3);border-radius:var(--r-md);padding:7px 10px;font-size:var(--fs-sm);
            color:var(--text-2);line-height:var(--lh)}

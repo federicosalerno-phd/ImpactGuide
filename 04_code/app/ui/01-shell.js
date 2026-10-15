@@ -4,7 +4,7 @@
 // The pages of the rail and whether they are built. A page not built yet opens
 // and says which part of the work will bring it.
 const PAGES = ['calibration', 'live', 'trials', 'scans', 'analysis', 'charts', 'dataset'];
-const BUILT = { calibration: true, trials: true };
+const BUILT = { calibration: true, live: true, trials: true };
 
 // The signs this application adds to SlantUI's set, on the same 24 grid.
 ICONS.camera = { s: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9'
@@ -148,6 +148,7 @@ function showHome() {
 
 function go(p) {
   if (PAGES.indexOf(p) < 0) p = 'trials';
+  if (page === 'live' && p !== 'live') LIVE.leave();
   page = p;
   document.querySelectorAll('#rail .tab').forEach(function (t) {
     t.classList.toggle('active', t.dataset.page === p);
@@ -157,6 +158,7 @@ function go(p) {
   be('set_page', p);
   showHome();
   if (p === 'calibration') { showView('calibration'); showPanel('calibration'); $('hint').textContent = T('cal.hint'); CAL.enter(); return; }
+  if (p === 'live') { showView('live'); showPanel('live'); $('hint').textContent = T('live.hint'); LIVE.enter(); return; }
   if (p === 'trials') { TRIALS.enter(); return; }
   showView('soon');
   showPanel('soon');

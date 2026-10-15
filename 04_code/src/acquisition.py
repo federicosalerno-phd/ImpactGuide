@@ -10,6 +10,11 @@ operator keeps it. For the video the same key starts and stops the recording;
 with switch_modes the camera app is first moved to its video mode and back to
 its photo mode afterwards through the standard Android camera intents.
 
+The camera serves one at a time: the live view of ImpactGuide (live_ar.py)
+closes the camera app before it opens the stream, and ImpactGuide stops the
+live view before a photo or a video; the camera app is then started again
+here when another app is on screen.
+
 Scanner. The scanner software exports into a folder; ExportWatch reports the
 first scan file that appears there (or is written again) after it started,
 once its size has stopped growing.
@@ -39,6 +44,8 @@ VIDEO_SUFFIXES = (".mp4",)
 SCAN_SUFFIXES = (".ply", ".stl", ".obj", ".asc")
 KEYCODES = {"volume_down": 25, "volume_up": 24, "camera": 27}
 CAMERA_DIR = "/sdcard/DCIM/Camera"
+CAMERA_APP = "com.android.camera"  # the camera app of the Poco X7 Pro (HyperOS)
+OPEN_S = 2.0                       # the camera app ready after it was started
 POLL_S = 0.4
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW: no console flash under pythonw
 
@@ -53,9 +60,15 @@ class AcquisitionError(RuntimeError):
 
 
 def find_adb():
-    """The adb executable: IMPACTGUIDE_ADB, the PATH, the one bundled with the adbutils package,
-    the Android SDK. None if there is none."""
+    """The adb executable: IMPACTGUIDE_ADB, the PATH, the one shipped with scrcpy (the live stream's,
+    live.py: one adb for the whole app), the one bundled with the adbutils package, the Android SDK.
+    None if there is none."""
     candidates = [os.environ.get("IMPACTGUIDE_ADB"), shutil.which("adb")]
+    try:
+        from live import find_scrcpy
+        candidates.append(str(find_scrcpy() / ("adb.exe" if os.name == "nt" else "adb")))
+    except Exception:  # noqa: BLE001  no scrcpy, or live.py's libraries missing
+        pass
     try:
         import adbutils
         candidates.append(str(Path(adbutils.__file__).parent / "binaries" / ("adb.exe" if os.name == "nt" else "adb")))
@@ -162,6 +175,17 @@ class Phone:
         self._run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
         self._run("shell", "input", "keyevent", str(KEYCODES.get(self.shutter, self.shutter)))
 
+    def open_camera(self):
+        """Brings the camera app back when another app is on screen: the live view of ImpactGuide
+        closes it to free the camera (live_ar.py). Left alone when the app on screen is unknown."""
+        self._run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+        front = self.foreground()
+        if front and front != CAMERA_APP:
+            self._run("shell", "am", "start", "-a", "android.media.action.STILL_IMAGE_CAMERA")
+            time.sleep(OPEN_S)
+            return True
+        return False
+
     def _mode(self, action):
         if self.switch_modes:
             self._run("shell", "am", "start", "-a", f"android.media.action.{action}")
@@ -188,12 +212,14 @@ class Phone:
     def shoot(self, out_dir, timeout=20):
         """One photo: shutter, wait for the file, pull it into out_dir. Returns the local path."""
         self.connect()
+        self.open_camera()
         before = self.listing()
         self.press()
         return self.pull(self._wait(before, PHOTO_SUFFIXES, timeout), out_dir)
 
     def start_video(self):
         self.connect()
+        self.open_camera()
         self._mode("VIDEO_CAMERA")
         self._before_video = self.listing()
         self.press()

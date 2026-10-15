@@ -5,12 +5,13 @@ backend   the slots the page calls, without a window: a trial from the first
           reposition that follows, the app closed in the middle of a trial and
           resumed, a drape trial with photos and video with and without the
           drape, a correction of a logged value, a void trial, a new
-          configuration, the calibration and the session check on synthetic
-          board photos; then the completeness check of trials.py.
+          configuration, the completeness check of trials.py, the live AR view
+          on a synthetic stream (both boards, a photo that stops it), the
+          calibration and the session check on synthetic board photos.
 --ui DIR  the same through the real window: the page's own buttons are
-          pressed, one trial is run to its log row, the other views are opened
-          and the window is grabbed into DIR at each stage, in English and in
-          Italian.
+          pressed, one trial is run to its log row, the other views are opened,
+          the live view is started from its page and left, and the window is
+          grabbed into DIR at each stage, in English and in Italian.
 
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
@@ -218,7 +219,33 @@ def test_backend(app, work, calibration=True):
     expect(not problems and not R["orphans"] and R["extra"] == [t4],
            f"completeness: no problems, no stray folders, outside the matrix {R['extra']}")
 
-    # 9. the calibration and the session check, on synthetic photos of the board
+    # 9. live AR on the synthetic stream: on, board tracked, the other board, a photo stops it first
+    s = d.call("live_state")
+    expect(not s["running"] and s["registration"]["source"] == "demo" and s["intrinsics"]["source"] == "nominal",
+           "live view: off at the start, demo registration, nominal intrinsics")
+    d.call("live_start")
+    e = d.wait_event("live", timeout=30)
+    tracked = d.wait(lambda: (lambda x: x.get("tracked") and x.get("fps_ar", 0) > 0)(d.call("live_state")), 15)
+    s = d.call("live_state")
+    expect(e is not None and e["action"] == "started" and tracked and s["fps_ar"] > 0
+           and s["corners"] == s["board"]["corners"] and s["drawn_px"].get("face", 0) > 0,
+           f"live view: started, sheet tracked ({s.get('corners')} corners, RMS {s.get('rms_px')} px), "
+           f"face drawn, {s.get('fps_ar')} fps")
+    d.call("live_settings", json.dumps({"board": "patient", "mandible": True}))
+    tracked = d.wait(lambda: (lambda x: x.get("tracked") and x["board"]["name"] == "patient")(d.call("live_state")), 15)
+    s = d.call("live_state")
+    expect(tracked and s["registration"]["demo"] == "design" and s["layers"]["mandible"],
+           f"live view: patient board tracked after the switch, bench design registration, mandible on")
+    folder = d.call("calib_folder_new", "check_video")["folder"]
+    n = len(d.events)
+    d.call("calib_shoot", folder)
+    stopped = d.wait(lambda: any(x["type"] == "live" and x.get("action") == "stopped" for x in d.events[n:]), 10)
+    got = d.wait_event("calib_photo", timeout=20)
+    expect(stopped and got is not None and not d.call("live_state")["running"],
+           "live view: a photo from the phone stops it first, then the photo is taken")
+    d.call("live_settings", json.dumps({"board": "sheet", "mandible": False}))
+
+    # 10. the calibration and the session check, on synthetic photos of the board
     if calibration:
         s = d.call("calib_folder_new", "photo")
         folder = work / "raw" / "calibration" / s["folder"]
@@ -327,6 +354,11 @@ def test_ui(work, shots):
             ("ui_09_calibration", "go('calibration')", 1500),
             ("ui_10_it_guide", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change')); go('trials'); TRIALS.setView('guide')", 1800),
             ("ui_11_it_calibration", "go('calibration')", 1500),
+            ("ui_12_it_live", "go('live')", 1500),
+            ("ui_13_it_live_on", "$('lvStart').click()", 7000),
+            ("ui_14_live_patient", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
+                                   "LIVE.settings({board: 'patient', mandible: true})", 4000),
+            ("ui_15_live_left", "window.__live = LIVE.state && LIVE.state.tracked; go('trials')", 1500),
         ]
 
         def nxt():
@@ -334,6 +366,8 @@ def test_ui(work, shots):
                 js("JSON.stringify([page, trialsView, !!document.querySelector('.tbar-logo-btn')])",
                    lambda v: log.append("home " + str(v)))
             if not steps:
+                js("JSON.stringify([!!window.__live, !!(LIVE.state && LIVE.state.running)])",
+                   lambda v: log.append("live " + str(v)))
                 js("JSON.stringify(window.__errs||[])", lambda v: (log.append("errors " + str(v)), app.quit()))
                 return
             name, script, wait = steps.pop(0)
@@ -369,6 +403,9 @@ def test_ui(work, shots):
     home = next((x for x in log if x.startswith("home")), "home ?")
     expect(home == 'home ["trials","guide",false]',
            f"window: the mark on the band leads back to the trial guide, and is a plain mark there ({home})")
+    live = next((x for x in log if x.startswith("live")), "live ?")
+    expect(live == "live [true,false]",
+           f"window: live view started from the page, board tracked, stopped when the page is left ({live})")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
     print("page actions: " + ", ".join(log[:-1]), flush=True)
 

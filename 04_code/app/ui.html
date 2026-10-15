@@ -53,6 +53,11 @@
 
       <!-- One toolbar for every page; each page shows its own group. -->
       <div class="toolbar">
+        <div class="tool-group" data-for="live">
+          <button class="btn btn-2 btn-sm layer-btn" data-layer="face" data-t="live.layer.face"></button>
+          <button class="btn btn-2 btn-sm layer-btn" data-layer="mandible" data-t="live.layer.mandible"></button>
+          <button class="btn btn-2 btn-sm layer-btn" data-layer="axes" data-t="live.layer.axes"></button>
+        </div>
         <div class="tool-group" data-for="trials">
           <button class="btn btn-2 btn-sm view-btn" data-view="guide" data-t="trials.view.guide"></button>
           <button class="btn btn-2 btn-sm view-btn" data-view="log" data-t="trials.view.log"></button>
@@ -88,6 +93,29 @@
             <div class="sec-lbl" data-t="cal.folders.sec"></div>
             <div class="mlist slim" id="calFolders"></div>
             <div class="note" id="calFoldersNote"></div>
+          </div>
+        </div>
+
+        <!-- ── live AR: the stream as the backend composes it, at its 4:3,
+             with what is not real yet and the status light laid over it ── -->
+        <div class="view live-view" data-view="live">
+          <div class="live-stage">
+            <div class="live-frame">
+              <img class="live-img hidden" id="lvImg" alt=""/>
+              <div class="covl live-tags hidden" id="lvTags"></div>
+              <div class="covl live-lights hidden" id="lvLights">
+                <div class="live-light"><span class="live-dot" id="lvDot"></span><span id="lvLight"></span></div>
+                <div class="live-light live-later"><span class="live-dot off"></span><span data-t="live.light.check"></span></div>
+              </div>
+              <div class="czoom hidden" id="lvRate"></div>
+              <div class="live-idle" id="lvIdle">
+                <div class="done-card card col">
+                  <div class="trial-id" id="lvIdleTitle"></div>
+                  <div class="note" id="lvIdleText"></div>
+                  <div class="row" id="lvIdleWait"><span class="spinner spinner-sm"></span><span class="note" data-t="live.idle.starting"></span></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -224,6 +252,39 @@
           <button class="btn btn-2 btn-wide" id="calCheck"><span class="btn-label" data-t="cal.check.action"></span></button>
           <button class="btn btn-2 btn-wide hidden" id="calSave"><span class="btn-label" data-t="cal.save.action"></span></button>
           <button class="btn btn-primary btn-wide" id="calRun"><span class="btn-label" data-t="cal.run.action"></span></button>
+        </div>
+      </div>
+
+      <!-- live AR -->
+      <div class="rp-page" data-panel="live">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="page.live.title"></div>
+          <div class="rp-sub" data-t="page.live.sub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div class="sec-lbl" data-t="live.status.sec"></div>
+          <div class="live-state"><span class="live-dot" id="lvStDot"></span><span id="lvStWord"></span></div>
+          <div id="lvStatus"></div>
+          <div class="note" id="lvWhy"></div>
+          <div class="sec-lbl" data-t="live.check.sec"></div>
+          <div class="live-state live-later"><span class="live-dot off"></span><span class="note" data-t="live.check.note"></span></div>
+          <div class="sec-lbl" id="lvSpeedLbl" data-t="live.speed.sec"></div>
+          <div id="lvSpeed"></div>
+          <div class="note" id="lvLatency"></div>
+          <div class="sec-lbl" data-t="live.board.sec"></div>
+          <div class="combo" id="lvBoard" tabindex="0" role="button"><span class="combo-v"></span></div>
+          <div class="note" id="lvBoardNote"></div>
+          <div class="sec-lbl" data-t="live.reg.sec"></div>
+          <div class="note" id="lvRegNote"></div>
+          <button class="btn btn-2 btn-wide" id="lvRegLoad"><span data-icon="open"></span><span class="btn-label" data-t="live.reg.load"></span></button>
+          <button class="btn btn-2 btn-wide" id="lvRegDemo"><span class="btn-label" data-t="live.reg.demo"></span></button>
+          <div class="sec-lbl" data-t="live.cam.sec"></div>
+          <div class="note" id="lvCamNote"></div>
+          <div class="note note-path" id="lvCamPath"></div>
+        </div>
+        <div class="rp-foot">
+          <button class="btn btn-2 btn-wide hidden" id="lvStop"><span data-icon="stop"></span><span class="btn-label" data-t="live.stop"></span></button>
+          <button class="btn btn-primary btn-wide" id="lvStart"><span data-icon="play"></span><span class="btn-label" data-t="live.start"></span></button>
         </div>
       </div>
 
@@ -416,6 +477,7 @@
 <script src="ui/01-shell.js"></script>
 <script src="ui/10-calibration.js"></script>
 <script src="ui/20-trials.js"></script>
+<script src="ui/30-live.js"></script>
 <script src="ui/90-boot.js"></script>
 </body>
 </html>

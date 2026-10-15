@@ -12,6 +12,7 @@ function onEvent(raw) {
   if (e.type === 'error') toast(T('err.generic', e.message || ''), 6000);
   CAL.onEvent(e);
   TRIALS.onEvent(e);
+  LIVE.onEvent(e);
 }
 
 function inlineMark() {
@@ -38,6 +39,7 @@ function boot() {
     wireRail();
     CAL.wire();
     TRIALS.wire();
+    LIVE.wire();
     showPhone();
   };
   beJson('app_info', function (info) {

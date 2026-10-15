@@ -2,17 +2,20 @@
 
 A frameless SlantUI window hosting a page (ui.html and ui/) that talks to this
 backend over QWebChannel. The app guides the protocol step by step and keeps
-what the bench produces: the phone calibration and the impact trials today;
-live AR, scans, analysis, charts and the dataset are the next pages.
+what the bench produces: the phone calibration, the live AR view and the
+impact trials today; scans, analysis, charts and the dataset are the next pages.
 
 This file is the host: the window, the bridge, the background jobs. The logic
-is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py), which the
-host only calls; everything there also runs without the app.
+is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py),
+which the host only calls; everything there also runs without the app. The
+live frames reach the page as MJPEG from 127.0.0.1 (live_ar.MjpegServer).
 
-    python impactguide_app.py [--simulate DIR] [--lang en|it] [--page NAME]
+    python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it] [--page NAME]
 
 --simulate keeps every file under DIR and stands in for the phone and the
-scanner, for trying the app without the bench and for test_app.py.
+scanner, for trying the app without the bench and for test_app.py. --replay
+gives the live page recorded frames (a video of the phone, a folder of images,
+the frames of the digital twin) in place of the phone's stream.
 """
 import os
 import sys
@@ -46,6 +49,7 @@ from slantui.tokens import PALETTES  # noqa: E402
 
 import acquisition  # noqa: E402
 import calibrate_charuco  # noqa: E402
+import live_ar  # noqa: E402
 import trials  # noqa: E402
 
 APP_NAME = "ImpactGuide"
@@ -88,7 +92,8 @@ class Prefs:
 
     DEFAULTS = {"lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "", "square_mm": 24.0,
                 "calib_mode": "photo", "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down",
-                                                  "switch_modes": True}}
+                                                  "switch_modes": True},
+                "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": ""}}
 
     def __init__(self, path):
         self.path = Path(path)
@@ -142,9 +147,10 @@ class Backend(Bridge):
 
     happened = pyqtSignal(str)  # results of background jobs: {"type": ..., ...}
 
-    def __init__(self, roots, prefs, lang=None):
+    def __init__(self, roots, prefs, lang=None, replay=None):
         super().__init__()
         self.roots, self.prefs = roots, prefs
+        self.replay = replay        # recorded frames for the live page in place of the phone
         self.lang = lang if lang in LANGS else (prefs["lang"] if prefs["lang"] in LANGS else system_lang())
         self.on_page_ready = None
         self._runs = {}
@@ -156,6 +162,8 @@ class Backend(Bridge):
         self.phone_status = {"ok": False, "cause": "unknown"}
         self._pending_cal = {}
         self._watch = None
+        self._live = None
+        self._live_server = None
         self._pump = QTimer(self)
         self._pump.setInterval(150)
         self._pump.timeout.connect(self._drain)
@@ -526,6 +534,9 @@ class Backend(Bridge):
     def step_shoot(self, key):
         def go():
             run, row, steps, i = self._current(key)
+            blocked = self._free_camera()
+            if blocked:
+                return blocked
             out = self.roots.staging / row["trial"]
 
             def done(path, error):
@@ -545,6 +556,10 @@ class Backend(Bridge):
             run, row, steps, i = self._current(key)
             out = self.roots.staging / row["trial"]
             if action == "start":
+                blocked = self._free_camera()
+                if blocked:
+                    return blocked
+
                 def started(_, error):
                     if error is not None:
                         self.cur["recording"] = ""
@@ -797,6 +812,9 @@ class Backend(Bridge):
         """A photo from the phone into the folder, under the name the phone gave it."""
         def go():
             d = self._calib_dir(name)
+            blocked = self._free_camera()
+            if blocked:
+                return blocked
 
             def done(path, error):
                 if error is not None:
@@ -898,15 +916,131 @@ class Backend(Bridge):
             return {"ok": started} if started else {"error": "busy"}
         return self._answer(go)
 
+    # ── live AR ──────────────────────────────────────────────────────────
+    def live(self):
+        """The live AR, made at first use and kept for the session: its overlay thread owns the OpenGL
+        context (live_ar.py). In simulation a synthetic board stands in for the phone."""
+        if self._live is None:
+            p = self.prefs["live"]
+            self._live = live_ar.LiveAR(board=p["board"] if p["board"] in live_ar.BOARDS else "sheet",
+                                        square_mm=float(self.prefs["square_mm"]), registration=p["registration"] or None,
+                                        face=p["face"], mandible=p["mandible"], axes=p["axes"],
+                                        intrinsics=self.roots.calib_out / "intrinsics_stream.json",
+                                        synthetic=bool(self.roots.simulate), colors=live_colors(),
+                                        replay=self.replay)
+            self._live_server = live_ar.MjpegServer(self._live)
+        return self._live
+
+    def _free_camera(self):
+        """The phone's camera serves one at a time: a photo or a video stops the live view first (the
+        acquisition then brings the camera app back). An error while the live view is still starting."""
+        if "live" in self._busy:
+            return {"error": "live_starting"}
+        if self._live is not None and self._live.running:
+            self._live.stop()
+            self._emit({"type": "live", "action": "stopped", "reason": "photo"})
+        return None
+
+    def _live_state(self):
+        ar = self.live()
+        square = float(self.prefs["square_mm"])
+        if ar.settings()["square_mm"] != square:      # changed on the Calibration page
+            ar.configure(square_mm=square)
+        return {**ar.status(), "url": self._live_server.url, "prefs": self.prefs["live"], "phone": self.phone_status,
+                "busy": sorted(self._busy), "simulate": bool(self.roots.simulate),
+                "intrinsics_file": str(self.roots.calib_out / "intrinsics_stream.json")}
+
+    @pyqtSlot(result=str)
+    def live_state(self):
+        return self._answer(self._live_state)
+
+    @pyqtSlot(result=str)
+    def live_start(self):
+        """Closes the camera app and opens the stream in the background; 'live' events say how it went."""
+        def go():
+            ar = self.live()
+            if ar.running:
+                return self._live_state()
+            if "phone" in self._busy or self.cur.get("recording"):
+                return {"error": "busy"}
+
+            def done(_, error):
+                if error is not None:
+                    self._emit({"type": "live", "action": "failed", **self._err(error, "live_failed")})
+                else:
+                    self._emit({"type": "live", "action": "started"})
+            if not self._spawn("live", ar.start, done):
+                return {"error": "live_starting"}
+            return self._live_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def live_stop(self):
+        def go():
+            if self._live is not None:
+                self._live.stop()
+            return self._live_state()
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def live_settings(self, payload):
+        """{board, face, mandible, axes}, kept for the next session too."""
+        def go():
+            given = {k: v for k, v in json.loads(payload).items() if k in ("board", "face", "mandible", "axes")}
+            p = {**self.prefs["live"], **given}
+            if p["board"] not in live_ar.BOARDS:
+                return {"error": "bad_value", "message": "board"}
+            for k in ("face", "mandible", "axes"):
+                p[k] = bool(p[k])
+            self.prefs.set("live", p)
+            self.live().configure(board=p["board"], face=p["face"], mandible=p["mandible"], axes=p["axes"])
+            return self._live_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def live_registration_load(self):
+        """A registration file (JSON with T_M_B, as ground_truth.py writes it) in place of the demo."""
+        def go():
+            last = self.prefs["live"]["registration"]
+            start = str(Path(last).parent) if last else str(self.roots.processed)
+            path, _ = QFileDialog.getOpenFileName(None, "ImpactGuide", start, "registration (*.json)")
+            if not path:
+                return self._live_state()
+            try:
+                self.live().set_registration(path)
+            except (live_ar.LiveARError, OSError, ValueError, KeyError, TypeError):
+                return {"error": "bad_registration", "message": Path(path).name}
+            self.prefs.set("live", {**self.prefs["live"], "registration": path})
+            return self._live_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def live_registration_demo(self):
+        def go():
+            self.live().set_registration(None)
+            self.prefs.set("live", {**self.prefs["live"], "registration": ""})
+            return self._live_state()
+        return self._answer(go)
+
     # ── the window is closing ────────────────────────────────────────────
     def shutdown(self):
         self._pump.stop()
         self._drop_staged()
+        if self._live_server is not None:
+            self._live_server.close()
+        if self._live is not None:
+            self._live.shutdown()
 
 
 # ── the window ───────────────────────────────────────────────────────────────
 def role(name):
     return PALETTES[PALETTE][name]
+
+
+def live_colors():
+    """The colours the live overlay is drawn in, from the palette's roles."""
+    return {"face": role("accent"), "mandible": role("text-1"), "corners": role("ok-text"),
+            "reprojected": role("text-1")}
 
 
 def prepare_page(dest):
@@ -1003,7 +1137,7 @@ def build(args):
         prefs.set("page", args.page)
     app = Application(APP_NAME, app_id=APP_ID)
     app.setWindowIcon(app_icon())
-    backend = Backend(roots, prefs, lang=args.lang)
+    backend = Backend(roots, prefs, lang=args.lang, replay=args.replay)
     page = prepare_page((roots.simulate or LOCAL) / "page")
     title = APP_NAME + (" (simulation)" if roots.simulate else "")
     # the band the window draws before the page has one shows the mark as a button when the page will:
@@ -1032,6 +1166,8 @@ def parse(argv=None):
     p.add_argument("--simulate", type=Path, help="keep every file under this folder, with a stand-in phone and scanner")
     p.add_argument("--lang", choices=LANGS)
     p.add_argument("--page", choices=PAGES)
+    p.add_argument("--replay", type=Path, help="the live page plays these recorded frames (a video or a folder of "
+                                               "images) instead of the phone's stream")
     return p.parse_args(argv)
 
 
