@@ -18,6 +18,10 @@ Commands
              candidate positions on the bone hidden from the phone and seen by the scanner
     render   the dataset: sessions x registrations x states x (4 photos + video frames); resumable, one state at a time
 
+Head spheres. The head spheres and their frame (gt_sphere_mandible_*, gt_frame_mandible*) are left out of the images
+and of the drape simulation unless --head-spheres is given: on the bench they are in sight of the phone (S1), and a
+network trained on the twin must never learn to use them. session.json and every frame record the choice.
+
 Frames (ai_design.md, Notazione). B = frame of the bench scene, mm. Camera C as in OpenCV (x right, y down, z forward,
 pixel centres at integer coordinates); board M as cv2.aruco.CharucoBoard (origin at the outer corner of the first
 square, x along the printed columns, y along the rows, z into the board). T_C_B camera from B, T_M_B board from B
@@ -46,7 +50,7 @@ every registration is before the impact (dT = I).
 
 Typical runs (small batches: the GPU is shared; each run reopens the copy, about 10 s):
     ... -- meshes ; ... -- drapes --count 24 ; ... -- s1
-    ... -- render --sessions 0:10 [--registrations 4 --states 3 --video 16]
+    ... -- render --sessions 0:10 [--registrations 4 --states 3 --video 16]     (dataset: sessions below 900)
     ... -- render --sessions 900:901 --registrations 2 --states 2 --video 2 --model-mask   (check set, synth_data.py)
 """
 import argparse
@@ -94,7 +98,9 @@ PANELS = ("light_panel_1_diffuser", "light_panel_2_diffuser")
 ROOM = ("sun_key", "sun_fill")
 HIDDEN = ("smartphone", "phone_cradle", "phone_usb_plug", "face_screws", "tmp_cam", "marker_ghost")  # prefixes
 HEAD_SPHERES = "gt_sphere_mandible_"
+HEAD_REF = (HEAD_SPHERES, "gt_frame_mandible")   # head spheres and their frame: hidden unless --head-spheres
 CAP = "surgical_cap"    # green surgical cap on the head (prefix), when the scene has it
+CAP_RAY_MM = 15.0       # skin is under the cap when the cap is within this distance along the vertex normal
 DRAPE = "synth_drape"
 DRAPE_CLEAR = ("marker_", "gt_sphere", "gt_frame", "a1_", "b1_")   # the drape keeps 5 mm from these
 LABELS = {"background": 0, "face": 1, "marker": 2, "drape": 3, "interface": 4, "head_spheres": 5, "head": 6,
@@ -311,7 +317,7 @@ class Twin:
             return LABELS["marker"]
         if n == SPLINT or n.startswith(("a1_", "b1_")):
             return LABELS["interface"]
-        if n.startswith((HEAD_SPHERES, "gt_frame_mandible")):
+        if n.startswith(HEAD_REF):
             return LABELS["head_spheres"]
         if n in (SKULL, MANDIBLE, "connector_skull") or n.startswith(("screw_", "washer_", "face_screws")):
             return LABELS["head"]
@@ -531,6 +537,13 @@ class Twin:
         for ob in self.hidden:
             ob.hide_render = hide
 
+    def show_head_spheres(self, show):
+        """Head spheres and their frame in the images or not. The dataset hides them (T13.2): on the bench they are
+        still in sight of the phone (S1), and a network must never learn to use them."""
+        for ob in self.objs:
+            if ob.name.startswith(HEAD_REF):
+                ob.hide_render = not show
+
     def rgb_mode(self, samples):
         sc = self.sc
         sc.render.engine = "BLENDER_EEVEE"
@@ -664,12 +677,25 @@ def surface_distance(points, vertices, faces):
     return np.array([(bvh.find_nearest(Vector(p))[3]) for p in points])
 
 
+def cap_mesh(tw):
+    """World vertices and triangles of the surgical cap (all its mesh objects), or None."""
+    obs = [ob for ob in tw.objs if ob.name.startswith(CAP) and ob.type == "MESH" and ob.name in tw.vl.objects]
+    if not obs:
+        return None
+    parts = [world_mesh(ob) for ob in obs]
+    offs = np.cumsum([0] + [len(v) for v, _ in parts[:-1]])
+    return np.concatenate([v for v, _ in parts]), np.concatenate([f + o for (_, f), o in zip(parts, offs)])
+
+
 def face_weights(tw, out):
     path = out / "meshes" / "face_weights.npz"
     n = len(tw.face_w0)
+    cap = cap_mesh(tw)
+    cap_sig = np.r_[len(cap[0]), cap[0].sum(0)] if cap is not None else np.zeros(4)
     if path.exists():
         z = np.load(path)
-        if int(z["vertex_count"]) == n and np.allclose(z["probe"], tw.face_w0[:: max(n // 50, 1)], atol=1e-4):
+        if (int(z["vertex_count"]) == n and np.allclose(z["probe"], tw.face_w0[:: max(n // 50, 1)], atol=1e-4)
+                and "cap_sig" in z and np.allclose(z["cap_sig"], cap_sig, atol=1e-2)):
             return z["w"]
     sv, sf = world_mesh(tw.objs[SPLINT])
     bvh = BVHTree.FromPolygons(sv.tolist(), sf.tolist())
@@ -694,12 +720,22 @@ def face_weights(tw, out):
         return np.array([kd.find(p)[2] for p in tw.face_w0])
 
     d_mouth, d_border = dist_to(near), dist_to(border)
-    w = fm.weights(tw.face_w0, tw.face_n0, inside, d_mouth, d_border)
+    # skin under the surgical cap: the cap sits a few mm above the silicone (in places the silicone crosses its inner
+    # surface), so the skin there must not move, or it shows through the cap
+    covered = np.zeros(n, bool)
+    if cap is not None:
+        cbvh = BVHTree.FromPolygons(cap[0].tolist(), cap[1].tolist())
+        for i in np.flatnonzero(outer):
+            p, nrm = tw.face_w0[i], tw.face_n0[i]
+            covered[i] = cbvh.ray_cast(Vector(p - nrm * 0.05), Vector(nrm), CAP_RAY_MM)[0] is not None
+    d_cap = dist_to(covered) if covered.any() else None
+    w = fm.weights(tw.face_w0, tw.face_n0, inside, d_mouth, d_border, d_cap)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, w=w, d_mouth=d_mouth.astype(np.float32), d_border=d_border.astype(np.float32),
-                        vertex_count=n, probe=tw.face_w0[:: max(n // 50, 1)])
+                        covered=covered, vertex_count=n, probe=tw.face_w0[:: max(n // 50, 1)], cap_sig=cap_sig)
     print(json.dumps({"weights": {"mouth_vertices": int(near.sum()), "border_vertices": int(border.sum()),
-                                  "outer_vertices": int(outer.sum()), "weight_mean": round(float(w.mean()), 3), "weight_zero": round(float((w == 0).mean()), 3)}}))
+                                  "outer_vertices": int(outer.sum()), "under_cap_vertices": int(covered.sum()),
+                                  "weight_mean": round(float(w.mean()), 3), "weight_zero": round(float((w == 0).mean()), 3)}}))
     return w
 
 
@@ -858,6 +894,7 @@ def cmd_render(tw, args):
     targets, target_ids = load_targets()
     tw.setup_lights()
     tw.setup_albedo()
+    tw.show_head_spheres(args.head_spheres)
     modes = {m: intrinsics(m, args.scale) for m in ("photo", "video")}
     for K, _, _ in modes.values():          # check of the principal point convention (synth_data.py check)
         K[0, 2] += args.pp_offset[0]
@@ -873,12 +910,21 @@ def cmd_render(tw, args):
         fl = sdir / "frames.jsonl"
         if fl.exists():
             done = {json.loads(line)["state_key"] for line in fl.read_text(encoding="utf-8").splitlines() if line}
+        if done and (sdir / "session.json").exists():     # resume only what was started with the same settings
+            prev = json.loads((sdir / "session.json").read_text(encoding="utf-8"))
+            changed = [k for k in ("face", "split", "video") if prev.get(k) != sess[k]]
+            if str(prev.get("head_spheres", "shown")).startswith("shown") != bool(args.head_spheres):
+                changed.append("head_spheres")
+            if changed:
+                raise SystemExit(f"s{i:04d} was rendered with other {changed} (new face bank?): delete it or render "
+                                 f"new session indices")
         tw.face_shape = bank[sess["face"]]["displacement"] if sess["face"] != "phantom" else None
         tw.face_state = None
         tw.set_pendulum(sess["pendulum_deg"])
         info = dict(sess, intrinsics={m: {"K": lst(K), "size": s, "source": src} for m, (K, s, src) in modes.items()},
                     labels=LABELS, targets=target_ids, ball_centre=lst(tw.c, 4), face_centroid=lst(tw.o, 4), board=tw.board,
                     scale=args.scale, samples=args.samples, blender=bpy.app.version_string,
+                    head_spheres="shown" if args.head_spheres else "hidden (spheres and frame left out of the images)",
                     scene_mtime=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(SCENE.stat().st_mtime)))
         (sdir / "session.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
         for r in range(args.registrations):
@@ -956,7 +1002,7 @@ def cmd_render(tw, args):
                         "motion": st["motion"], "target_shift_mm": target_mm, "arm_deg": round(v["arm_deg"], 4), "tilt_deg": round(v["tilt_deg"], 4),
                         "face": sess["face"], "deformation": dpar, "drape": None if st["drape"] is None else drapes[st["drape"]]["name"],
                         "light": st["light"], "albedo": st["albedo"], "pendulum_deg": sess["pendulum_deg"],
-                        "pixels": cnt, "ms": {"rgb": round((t2 - t1) / n * 1e3), "label": round((t3 - t2) / n * 1e3),
+                        "head_spheres": bool(args.head_spheres), "pixels": cnt, "ms": {"rgb": round((t2 - t1) / n * 1e3), "label": round((t3 - t2) / n * 1e3),
                                               "model": round((t4 - t3) / n * 1e3), "setup": round((t1 - t0) * 1e3)}})
                 with fl.open("a", encoding="utf-8") as fh:
                     fh.write("".join(json.dumps(line) + "\n" for line in lines))
@@ -1083,9 +1129,10 @@ def s1_candidates(tw, poses, modes, r=7.5, reach=30.0, step=6.0):
     bb = np.concatenate([world_mesh(ob, evaluated=False)[0] for ob in bone])
     lo, hi = bb.min(0) - r - reach, bb.max(0) + r + reach
     others = []
+    in_layer = set(ob.name for ob in tw.vl.objects)       # alternatives in excluded collections are not there
     for ob in o:
-        if (ob.type != "MESH" or ob.hide_render or ob in bone or ob.name.startswith(HIDDEN)
-                or ob.name.startswith((HEAD_SPHERES, "gt_frame_mandible"))):
+        if (ob.type != "MESH" or ob.hide_render or ob.name not in in_layer or ob in bone or ob.name.startswith(HIDDEN)
+                or ob.name.startswith(HEAD_REF)):
             continue
         v = world_mesh(ob, evaluated=False)[0]
         if len(v) and (v.max(0) >= lo).all() and (v.min(0) <= hi).all():
@@ -1156,14 +1203,20 @@ def cmd_drapes(tw, args):
     proxies = {}
     names = [FACE, SKULL, MANDIBLE, SPLINT, "connector_skull", "phantom_post", "gt_frame_mandible", "marker_holder",
              "marker_plate", "base_board"] + [ob.name for ob in o if ob.name.startswith(CAP) and ob.type == "MESH"]
+    if not args.head_spheres:        # drapes made for images without the head spheres do not rest on them
+        names = [n for n in names if not n.startswith(HEAD_REF)]
+    tw.show_head_spheres(args.head_spheres)
     for name in names:
         if name in o:
             v, f = world_mesh(o[name])
-            if len(f) > 30000:
-                v, f = decimate(v, f, 30000)
+            limit = 30000 if name == FACE else 12000     # collision proxies (the cloth rests on the surgical cap)
+            if len(f) > limit:
+                v, f = decimate(v, f, limit)
             proxies[name] = (v, f)
     clear = []
     for ob in o:
+        if not args.head_spheres and ob.name.startswith(HEAD_REF):
+            continue
         if ob.type == "MESH" and not ob.hide_render and ob.name.startswith(DRAPE_CLEAR):
             v, f = world_mesh(ob)
             clear.append(BVHTree.FromPolygons(v.tolist(), f.tolist()))
@@ -1177,8 +1230,13 @@ def cmd_drapes(tw, args):
         sim.collection.objects.link(ob)
         mod = ob.modifiers.new("collision", "COLLISION")
         ob.collision.thickness_outer, ob.collision.cloth_friction = 0.002, 40.0
+        # double-sided: cap, mask and skull are thin shells whose inner faces look inwards; single-sided collision
+        # pushed the cloth through them towards those faces
+        ob.collision.use_culling = False
     face_v = proxies[FACE][0]
-    top = max(p[0][:, 2].max() for k, p in proxies.items() if k in (FACE, SKULL))
+    # the cloth starts 4 mm above the highest point of the head (cap included: starting inside the collision
+    # distance of the cap lets the cloth slip through the head)
+    top = max(p[0][:, 2].max() for k, p in proxies.items() if k in (FACE, SKULL) or k.startswith(CAP))
     rng = np.random.default_rng(args.seed)
     kept, tries = 0, 0
     views = [(phi, 0.0) for phi in tw.sa["arm_deg"]]
@@ -1190,6 +1248,12 @@ def cmd_drapes(tw, args):
         hv.append(proxies[k][0] * 1e-3)
         hf.append(proxies[k][1] + sum(len(x) for x in hv[:-1]))
     head_bvh = BVHTree.FromPolygons(np.concatenate(hv).tolist(), np.concatenate(hf).tolist())
+    full = [world_mesh(o[k]) for k in [FACE, SKULL] + [n for n in proxies if n.startswith(CAP)]]   # mm, not decimated
+    offs = np.cumsum([0] + [len(x) for x, _ in full[:-1]])
+    head_full = BVHTree.FromPolygons(np.concatenate([x for x, _ in full]).tolist(),
+                                     np.concatenate([f + k for (_, f), k in zip(full, offs)]).tolist())
+    sk = world_mesh(o[SKULL], evaluated=False)[0]
+    head_centre = (sk.min(0) + sk.max(0)) / 2
     while kept < args.count and tries < args.count * 6:
         tries += 1
         lx, ly = rng.uniform(0.10, 0.22), rng.uniform(0.07, 0.15)
@@ -1198,9 +1262,9 @@ def cmd_drapes(tw, args):
         verts = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], 1)
         idx = np.arange(gx.size).reshape(nx + 1, ny + 1)
         quads = np.stack([idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]], -1).reshape(-1, 4)
-        # one edge rests on the top of the head (pinned on the scalp: the drape stays where it is laid), the rest
-        # hangs towards the face, to the front or to the phone side
-        pin = np.array([rng.uniform(-20, 50), rng.uniform(35, 95), top + 4.0])
+        # one edge rests on the top of the head (pinned on the front of the surgical cap or on the forehead: the drape
+        # stays where it is laid), the rest hangs towards the face, to the front or to the phone side
+        pin = np.array([rng.uniform(-20, 50), rng.uniform(20, 70), top + 4.0])
         th = math.radians(rng.uniform(-15, 70))
         d = np.array([math.sin(th), -math.cos(th), 0.0])          # from the pinned edge to the free edge
         centre = pin + d * (ly * 1e3 / 2 - 5.0)
@@ -1215,7 +1279,7 @@ def cmd_drapes(tw, args):
                 world[j, 2] = hit[0].z + 0.002
                 pinned.append(int(j))
         if len(pinned) < 4:
-            print(json.dumps({"try": tries, "rejected": "pinned edge off the head"}))
+            print(json.dumps({"try": tries, "rejected": "pinned edge off the head"}), flush=True)
             continue
         me = bpy.data.meshes.new("synth_cloth")
         me.from_pydata(world.tolist(), [], quads.tolist())
@@ -1250,11 +1314,15 @@ def cmd_drapes(tw, args):
         bpy.data.objects.remove(cloth)
         bpy.data.meshes.remove(me)
         if not moved:
-            print(json.dumps({"try": tries, "rejected": "cloth did not move"}))
+            print(json.dumps({"try": tries, "rejected": "cloth did not move"}), flush=True)
+            continue
+        v, lifted, deep = lift_outside(v, head_full, head_centre)
+        if deep > 0.01 * len(v):
+            print(json.dumps({"try": tries, "rejected": "sank into the head", "lifted": lifted, "deep": deep}), flush=True)
             continue
         gap = min(min((t.find_nearest(Vector(p))[3] or 1e9) for p in v[::7]) for t in clear) if clear else 1e9
         if not np.isfinite(v).all() or v[:, 2].min() < face_v[:, 2].min() - 40 or gap < 5.0:
-            print(json.dumps({"try": tries, "rejected": "clearance" if gap < 5.0 else "fell", "gap_mm": round(gap, 1)}))
+            print(json.dumps({"try": tries, "rejected": "clearance" if gap < 5.0 else "fell", "gap_mm": round(gap, 1)}), flush=True)
             continue
         tw.set_drape({"vertices": v, "faces": f, "color": srgb_to_linear(DRAPE_SRGB).tolist()})
         cov = coverage_counts(tw, views, K, size, args.out)
@@ -1262,13 +1330,40 @@ def cmd_drapes(tw, args):
         frac = [1 - c / max(b, 1) for c, b in zip(cov, base)]
         ok = 0.10 <= float(np.mean(frac)) <= 0.40
         print(json.dumps({"try": tries, "sim_s": round(sim_s, 1), "cover": [round(x, 3) for x in frac], "kept": ok,
-                          "gap_mm": round(gap, 1), "box": [lst(v.min(0), 0), lst(v.max(0), 0)]}), flush=True)
+                          "gap_mm": round(gap, 1), "lifted": int(lifted), "box": [lst(v.min(0), 0), lst(v.max(0), 0)]}),
+              flush=True)
         if ok:
             np.savez_compressed(out / f"drape_{kept:02d}.npz", vertices=v.astype(np.float32), faces=f,
-                                cover=np.array(frac), size_m=np.array([lx, ly]), pin=pin, direction_deg=math.degrees(th))
+                                cover=np.array(frac), size_m=np.array([lx, ly]), pin=pin, direction_deg=math.degrees(th),
+                                lifted=lifted)
             kept += 1
     bpy.data.scenes.remove(sim)
     print(json.dumps({"drapes": kept, "tries": tries}))
+
+
+def lift_outside(v, bvh, centre, gap=1.0, reach=12.0, rounds=4, deep=2.5):
+    """Check after the cloth simulation: drape vertices that sank into the head (the cloth collides with decimated
+    proxies; cap, mask and skull are thin shells) are moved out along the ray from the head centre, to `gap` mm beyond
+    the surface they are under. A vertex is under a surface when the outward ray leaves it (normal along the ray) within `reach`.
+    Returns the vertices, how many were moved and how many by more than `deep` mm."""
+    v = np.array(v, np.float64)
+    v0 = v.copy()
+    lifted = np.zeros(len(v), bool)
+    todo = np.arange(len(v))
+    for _ in range(rounds):
+        nxt = []
+        for j in todo:
+            d = v[j] - centre
+            d /= np.linalg.norm(d)
+            loc, nrm, _, _ = bvh.ray_cast(Vector(v[j]), Vector(d), reach)
+            if loc is not None and np.dot(np.array(nrm), d) > 0:
+                v[j] = np.array(loc) + d * gap
+                lifted[j] = True
+                nxt.append(j)
+        todo = nxt
+        if not todo:
+            break
+    return v, int(lifted.sum()), int((np.linalg.norm(v - v0, axis=1) > deep).sum())
 
 
 def coverage_counts(tw, views, K, size, out):
@@ -1299,6 +1394,8 @@ def main(argv):
     p.add_argument("--seed", type=int, default=13)
     p.add_argument("--model-mask", action="store_true")
     p.add_argument("--depth", action="store_true")
+    p.add_argument("--head-spheres", action="store_true",
+                   help="show the head spheres and their frame (render, drapes); hidden by default")
     p.add_argument("--pp-offset", type=float, nargs=2, default=(0.0, 0.0), help="px added to cx, cy (checks)")
     p.add_argument("--count", type=int, default=24, help="drapes to keep")
     p.add_argument("--frames", type=int, default=60, help="cloth simulation frames")

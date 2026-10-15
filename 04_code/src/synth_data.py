@@ -1,7 +1,9 @@
 """Reader, augmentations and checks of the digital twin dataset written by synth_twin.py (T13.1, module 3a).
 
     python 04_code/src/synth_data.py index  [--root DIR]
-        OUT/index.csv: one row per image (session, split, face, interface, state, view, mode, motion, pixel counts)
+        OUT/index.csv: one row per image (session, split, face, interface, state, view, mode, motion, deformation,
+        head spheres shown or not, pixel counts); OUT/index.json: counts, splits, faces, distributions of displacements
+        and deformations, render time. Sessions 900 and above (check set) are left out.
     python 04_code/src/synth_data.py check  [--root DIR] [--sessions s0900] [--renderer numpy|gl|both]
         renderer of module 1 (mesh_overlay.py, and gl_overlay.py) against the exact masks of Blender: the decimated face
         rendered at the true pose T_C_B against <image>_model.png (undeformed face alone, same camera); IoU, outline
@@ -33,6 +35,7 @@ LABELS = {"background": 0, "face": 1, "marker": 2, "drape": 3, "interface": 4, "
           "pendulum": 7, "bench": 8, "cap": 9}
 CROP_MM = 200.0          # side of the crop on the face (ai_design.md, T12.0 proposals)
 CROP_PX = 256
+CHECK_FROM = 900         # sessions from here on are the check set of the renderer, left out of the index
 
 
 def sessions(root=OUT):
@@ -95,25 +98,73 @@ def crop_K(K, centre, side_px, out_px=CROP_PX):
     return Kc
 
 
+def spread(x):
+    x = np.asarray(x, np.float64)
+    if not len(x):
+        return None
+    p = np.percentile(x, [0, 5, 50, 95, 100])
+    return {"n": int(len(x)), "mean": round(float(x.mean()), 3), "min": round(float(p[0]), 3), "p5": round(float(p[1]), 3),
+            "median": round(float(p[2]), 3), "p95": round(float(p[3]), 3), "max": round(float(p[4]), 3)}
+
+
 def cmd_index(args):
-    rows = []
+    """index.csv (one row per image) and index.json (counts, splits, distributions of the samples, timing). Sessions
+    from CHECK_FROM on are the check set of the renderer (synth_data.py check), not the dataset."""
+    rows, states, ms = [], {}, []
     for sd in sessions(args.root):
+        if int(sd.name[1:]) >= CHECK_FROM:
+            continue
         for f in frames(sd):
+            shown = f.get("head_spheres", True)        # frames written before T13.2 always showed them
             rows.append({"session": f["session"], "split": f["split"], "face": f["face"], "interface": f["interface"],
                          "image": f"{sd.name}/{f['image']}", "registration": f["registration"], "state": f["state"],
                          "view": f["view"], "mode": f["mode"], "motion": f["motion"]["kind"],
                          "deg": round(f["motion"]["deg"], 3), "mm": round(f["motion"]["mm"], 3),
                          "target_mm": None if f.get("target_shift_mm") is None else f["target_shift_mm"]["mean"],
-                         "deform_mm": f["deformation"]["amp_mm"], "drape": f["drape"] or "",
+                         "deform_mm": f["deformation"]["amp_mm"], "deform_scale_mm": f["deformation"]["scale_mm"],
+                         "drape": f["drape"] or "", "pendulum_deg": f["pendulum_deg"], "head_spheres": int(bool(shown)),
                          **{f"px_{k}": v for k, v in f["pixels"].items()}})
+            states.setdefault((f["session"], f["registration"], f["state"]), f)
+            ms.append(f["ms"])
     if not rows:
         sys.exit("no sessions")
-    with (Path(args.root) / "index.csv").open("w", newline="", encoding="utf-8") as fh:
+    root = Path(args.root)
+    with (root / "index.csv").open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    print(json.dumps({"images": len(rows), "sessions": len({r["session"] for r in rows}),
-                      "splits": {s: sum(r["split"] == s for r in rows) for s in ("train", "val", "test")}}))
+    st = list(states.values())
+    post = [f for f in st if f["state"] > 0]
+    splits = ("train", "val", "test")
+    summary = {
+        "sessions": len({r["session"] for r in rows}), "samples": len(st), "images": len(rows),
+        "photos": sum(r["mode"] == "photo" for r in rows), "video_frames": sum(r["mode"] == "video" for r in rows),
+        "registrations": len({(f["session"], f["registration"]) for f in st}),
+        "registrations_by_interface": {i: len({(f["session"], f["registration"]) for f in st if f["interface"] == i})
+                                       for i in sorted({f["interface"] for f in st})},
+        "samples_before_impact": len(st) - len(post), "samples_after_impact": len(post),
+        "splits": {s: {"sessions": len({f["session"] for f in st if f["split"] == s}),
+                       "samples": sum(f["split"] == s for f in st), "images": sum(r["split"] == s for r in rows)}
+                   for s in splits},
+        "faces": {k: sum(f["face"] == k for f in st) for k in sorted({f["face"] for f in st})},
+        "head_spheres": ("hidden" if not any(r["head_spheres"] for r in rows) else
+                         "shown" if all(r["head_spheres"] for r in rows) else "mixed"),
+        "samples_with_drape": sum(f["drape"] is not None for f in st),
+        "pendulum_deg": {str(d): sum(f["pendulum_deg"] == d for f in st) for d in sorted({f["pendulum_deg"] for f in st})},
+        "after_impact": {
+            "a1_deg": spread([f["motion"]["deg"] for f in post if f["motion"]["kind"] == "a1"]),
+            "rigid_deg": spread([f["motion"]["deg"] for f in post if f["motion"]["kind"] == "rigid"]),
+            "rigid_mm": spread([f["motion"]["mm"] for f in post if f["motion"]["kind"] == "rigid"]),
+            "target_shift_mean_mm": spread([f["target_shift_mm"]["mean"] for f in post if f.get("target_shift_mm")]),
+            "target_shift_max_mm": spread([f["target_shift_mm"]["max"] for f in post if f.get("target_shift_mm")])},
+        "deformation": {"amp_mm": spread([f["deformation"]["amp_mm"] for f in st]),
+                        "scale_mm": spread([f["deformation"]["scale_mm"] for f in st])},
+        "face_pixels_photo": spread([r["px_face"] for r in rows if r["mode"] == "photo"]),
+        "ms_per_image": {k: round(statistics.mean(m[k] for m in ms), 1) for k in ("rgb", "label")},
+    }
+    (root / "index.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    print(json.dumps({k: summary[k] for k in ("sessions", "samples", "images", "registrations", "splits", "faces",
+                                              "head_spheres")}))
 
 
 def outline_distance(a, b):

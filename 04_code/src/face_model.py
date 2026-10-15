@@ -13,8 +13,8 @@ dataset by writing files of this form with save_face(); the generator needs noth
 
 Skin deformation. A smooth random field along the vertex normals: a Gaussian process with squared exponential kernel
 approximated by random Fourier features (length scale 20-40 mm), scaled so that its largest value on the weighted
-vertices is the sampled amplitude (0-4 mm). Weights go to zero at the lips on the splint, at the cut border of the mask
-and on the inner skin that rests on the skull. The registration stays the rigid one of the head: the deformation is a
+vertices is the sampled amplitude (0-4 mm). Weights go to zero at the lips on the splint, at the cut border of the mask,
+under the surgical cap and on the inner skin that rests on the skull. The registration stays the rigid one of the head: the deformation is a
 disturbance, and the modules always render the face without it.
 """
 from pathlib import Path
@@ -26,6 +26,7 @@ SCALE_MM = (20.0, 40.0)    # length scale of the field, uniform
 FEATURES = 96              # random Fourier features
 MOUTH_MM = (3.0, 15.0)     # weight 0 within 3 mm of the splint contact, 1 beyond 3 + 15 mm
 BORDER_MM = (2.0, 12.0)    # same from the cut border of the mask
+CAP_MM = (0.0, 10.0)       # same from the skin under the surgical cap
 
 
 def smoothstep(x):
@@ -38,10 +39,14 @@ def ramp(d, start_ramp):
     return smoothstep((np.asarray(d) - start) / width)
 
 
-def weights(points, normals, inside_point, d_mouth, d_border):
-    """Deformation weight per vertex: outer skin only (normal away from inside_point), damped near mouth and border."""
+def weights(points, normals, inside_point, d_mouth, d_border, d_cap=None):
+    """Deformation weight per vertex: outer skin only (normal away from inside_point), damped near mouth and border,
+    and near and under the surgical cap when d_cap (distance to the skin under the cap, 0 there) is given."""
     outer = np.sum(normals * (points - np.asarray(inside_point)), axis=1) > 0.0
-    return (outer * ramp(d_mouth, MOUTH_MM) * ramp(d_border, BORDER_MM)).astype(np.float32)
+    w = outer * ramp(d_mouth, MOUTH_MM) * ramp(d_border, BORDER_MM)
+    if d_cap is not None:
+        w = w * ramp(d_cap, CAP_MM)
+    return w.astype(np.float32)
 
 
 def rff_field(points, rng, scale_mm, n=FEATURES):
