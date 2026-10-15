@@ -63,7 +63,8 @@ LANGUAGES = (("en", "English", "gb"), ("it", "Italiano", "it"), ("fr", "Françai
              ("es", "Español", "es"), ("de", "Deutsch", "de"), ("zh", "中文", "cn"))
 LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "scans", "analysis", "charts", "dataset")
-ICON = APP / "ui" / "impactguide-icon.svg"  # the app icon, the same everywhere: desktop, taskbar, band, splash
+ICON = APP / "ui" / "impactguide-icon.svg"  # the round app icon: desktop, taskbar, window
+MARK = APP / "ui" / "impactguide-mark.svg"  # the same drawing without its disc, cut to fill the band's square
 CALIB_MODES = ("photo", "video")
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
@@ -1060,8 +1061,8 @@ def prepare_page(dest):
 
 
 def mark_file():
-    """The app icon, for the loading screen and the band before the page."""
-    return ICON
+    """The mark: the band (before and after the page) and the loading screen, at SlantUI's sizes."""
+    return MARK
 
 
 def _mark_pixmap(size, source=None):

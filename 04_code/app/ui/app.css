@@ -4,9 +4,11 @@
    own; the widgets themselves are the library's.
    ========================================================================== */
 
-/* The mark on the band takes the accent of the palette. */
-.tbar-logo{color:var(--accent);display:flex}
-.tbar-logo svg{width:var(--tbar-mark);height:var(--tbar-mark)}
+/* The mark on the band. The library gives .tbar-logo its size (the 22 px square of --tbar-mark,
+   with its radius) and, as a button, its disc; the page gives only the picture, the app icon,
+   as a background so it keeps its own colours and is fitted, never cropped (as in UniGuide): the
+   icon's drawing without its disc, cut tight, so it fills the square as SlantUI's own mark does. */
+#tbLogo{background:url(impactguide-mark.svg) center/contain no-repeat}
 
 /* A toolbar group per page; only the open page's is shown. */
 .tool-group{display:flex;align-items:center;gap:3px}

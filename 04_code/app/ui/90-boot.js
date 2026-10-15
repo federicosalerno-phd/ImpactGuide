@@ -15,19 +15,9 @@ function onEvent(raw) {
   LIVE.onEvent(e);
 }
 
-function inlineMark() {
-  try {
-    const x = new XMLHttpRequest();
-    x.open('GET', 'ui/impactguide-icon.svg', false);
-    x.send();
-    $('tbLogo').innerHTML = x.responseText;
-  } catch (e) { /* the band still has the name */ }
-}
-
 function boot() {
   Bridge.init();
   initSelects();
-  inlineMark();
   placeIcons(document);
   initTitlebar();
   Bridge.on('happened', onEvent);
