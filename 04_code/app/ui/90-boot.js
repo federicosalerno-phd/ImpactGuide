@@ -44,8 +44,12 @@ function boot() {
   };
   beJson('app_info', function (info) {
     speak(info.lang);
-    setPicker($('lang'), [{ code: 'en', tag: 'EN', label: 'English' }, { code: 'it', tag: 'IT', label: 'Italiano' }],
-              info.lang, { maxHeight: 200 });
+    // SlantUI's picker with flags: flag and tag on the button; flag, tag and the name in the
+    // language itself in the list, at most 300 px and then it scrolls. The list comes from
+    // the host (impactguide_app.py, LANGUAGES), the flags from ui/flags/ (flag-icons, MIT).
+    setPicker($('lang'), info.langs.map(function (l) {
+      return { code: l.code, tag: l.code.toUpperCase(), label: l.native, flag: 'ui/flags/' + l.flag + '.svg' };
+    }), info.lang, { maxHeight: 300 });
     $('lang').onchange = function () {
       be('set_lang', $('lang').value);
       speak($('lang').value);

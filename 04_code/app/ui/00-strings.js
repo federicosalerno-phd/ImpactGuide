@@ -1,13 +1,17 @@
 // ImpactGuide · the words. Loads first: every other part asks it for a string.
 // A plain script, not a module: the parts share one global scope.
 //
-// ui/strings/en.json is the reference, ui/strings/it.json its translation. A key
-// says where the string is (`cal.board.action`), not what it says. A key missing
-// in a language falls back to English, and a key missing everywhere shows itself.
+// ui/strings/en.json is the reference; it, fr, es, de and zh are its translations,
+// with the same keys and the same {0}, {1}... A key says where the string is
+// (`cal.board.action`), not what it says. A key missing in a language falls back
+// to English, and a key missing everywhere shows itself.
 // {0}, {1}... are the arguments of T().
 
 const STRINGS = {};
 let LANG = 'en';
+// How each language writes numbers and dates.
+const LOCALES = { en: 'en-GB', it: 'it-IT', fr: 'fr-FR', es: 'es-ES', de: 'de-DE', zh: 'zh-CN' };
+function locale() { return LOCALES[LANG] || 'en-GB'; }
 
 function loadLang(lang) {
   if (STRINGS[lang]) return true;
@@ -42,7 +46,7 @@ function T(key) {
 function cifre(v, n) {
   const x = Number(v);
   if (!isFinite(x)) return String(v);
-  return x.toLocaleString(LANG === 'it' ? 'it-IT' : 'en-GB',
+  return x.toLocaleString(locale(),
                           { minimumFractionDigits: n || 0, maximumFractionDigits: n || 0, useGrouping: false });
 }
 
@@ -52,8 +56,8 @@ function quando(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   const today = new Date().toDateString() === d.toDateString();
-  const hm = d.toLocaleTimeString(LANG === 'it' ? 'it-IT' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
-  return today ? hm : d.toLocaleDateString(LANG === 'it' ? 'it-IT' : 'en-GB', { day: 'numeric', month: 'short' }) + ' ' + hm;
+  const hm = d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
+  return today ? hm : d.toLocaleDateString(locale(), { day: 'numeric', month: 'short' }) + ' ' + hm;
 }
 
 function setLang(lang) {

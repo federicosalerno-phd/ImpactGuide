@@ -10,7 +10,7 @@ is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py),
 which the host only calls; everything there also runs without the app. The
 live frames reach the page as MJPEG from 127.0.0.1 (live_ar.MjpegServer).
 
-    python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it] [--page NAME]
+    python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it|fr|es|de|zh] [--page NAME]
 
 --simulate keeps every file under DIR and stands in for the phone and the
 scanner, for trying the app without the bench and for test_app.py. --replay
@@ -56,7 +56,12 @@ APP_NAME = "ImpactGuide"
 APP_VERSION = "0.1.0"
 APP_ID = "ImpactGuide.Bench"
 PALETTE = "gold-dark"
-LANGS = ("en", "it")
+# The languages of the interface, in the order the picker lists them (ui/90-boot.js): the code (the
+# file in ui/strings/), the name in the language itself, the flag (a file in ui/flags/, flag-icons:
+# English has the flag gb and Chinese, Simplified, the flag cn).
+LANGUAGES = (("en", "English", "gb"), ("it", "Italiano", "it"), ("fr", "Français", "fr"),
+             ("es", "Español", "es"), ("de", "Deutsch", "de"), ("zh", "中文", "cn"))
+LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "scans", "analysis", "charts", "dataset")
 MARK = APP / "ui" / "impactguide-mark.svg"
 CALIB_MODES = ("photo", "video")
@@ -230,7 +235,8 @@ class Backend(Bridge):
         if self.on_page_ready is not None:
             ready, self.on_page_ready = self.on_page_ready, None
             ready()
-        return json.dumps({"name": APP_NAME, "version": APP_VERSION, "lang": self.lang, "langs": LANGS,
+        return json.dumps({"name": APP_NAME, "version": APP_VERSION, "lang": self.lang,
+                           "langs": [{"code": c, "native": n, "flag": f} for c, n, f in LANGUAGES],
                            "page": self.prefs["page"] if self.prefs["page"] in PAGES else "trials",
                            "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5"})
 

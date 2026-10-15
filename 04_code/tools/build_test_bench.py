@@ -87,7 +87,7 @@ P = {
     "holder_boss": (16.0, 6.0),    # diameter, length
     "strike_post": (8.0, 24.0),    # vertical post on the holder edge where the pendulum strikes: core diameter, length
     "strike_cap": (14.0, 3.0, 21.0),  # replaceable solid PETG cap on the post: outer diameter, top, length
-    "charuco": {"squares": 5, "square": 9.0, "marker": 7.0, "dictionary": "DICT_4X4_50", "px_per_mm": 20},
+    "charuco": {"squares": 5, "square": 9.0, "marker": 6.0, "dictionary": "DICT_4X4_50", "px_per_mm": 20},   # 15/10: markers 6 (were 7)
     "arm_section": (12.0, 8.0),
     # Interfaces between pad and marker arm, all on the same pad pattern (three M3 holes at r 9 mm, 90, 210 and
     # 330 deg, and a 6.5 mm centre hole), so one splint takes every variant. A slips and stays (the AI corrects

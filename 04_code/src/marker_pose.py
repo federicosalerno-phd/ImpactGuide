@@ -1,6 +1,6 @@
 """Marker pose from one image: ChArUco corners and PnP (T5.4).
 
-The marker is a 5 x 5 ChArUco board (9 mm squares, 7 mm 4x4 markers, DICT_4X4_50) printed on a 50 mm aluminium plate,
+The marker is a 5 x 5 ChArUco board (9 mm squares, 6 mm 4x4 markers, DICT_4X4_50) printed on a 50 mm aluminium plate,
 as P["charuco"] in 04_code/tools/build_test_bench.py. Board frame as cv2.aruco.CharucoBoard: origin at the outer corner
 of the first square (top left of the printed image), x along the printed columns, y along the rows, z into the board.
 Poses are 4x4 matrices T_a_b (frame a from frame b) in mm.
@@ -8,7 +8,7 @@ Poses are 4x4 matrices T_a_b (frame a from frame b) in mm.
 import cv2
 import numpy as np
 
-BOARD = {"squares": 5, "square_mm": 9.0, "marker_mm": 7.0, "dictionary": "DICT_4X4_50"}
+BOARD = {"squares": 5, "square_mm": 9.0, "marker_mm": 6.0, "dictionary": "DICT_4X4_50"}
 
 
 def make_board(spec=BOARD):
