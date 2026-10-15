@@ -63,8 +63,7 @@ LANGUAGES = (("en", "English", "gb"), ("it", "Italiano", "it"), ("fr", "Françai
              ("es", "Español", "es"), ("de", "Deutsch", "de"), ("zh", "中文", "cn"))
 LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "scans", "analysis", "charts", "dataset")
-MARK = APP / "ui" / "impactguide-mark.svg"
-ICON = APP / "ui" / "impactguide-icon.svg"  # the full colour icon: desktop, taskbar, window
+ICON = APP / "ui" / "impactguide-icon.svg"  # the app icon, the same everywhere: desktop, taskbar, band, splash
 CALIB_MODES = ("photo", "video")
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
@@ -1057,20 +1056,12 @@ def prepare_page(dest):
     shutil.copy2(APP / "ui.html", dest / "ui.html")
     (dest / "ui" / "slantui.css").write_text(slantui_css.bundle(), encoding="utf-8")
     (dest / "ui" / "slantui.js").write_text(slantui_js.bundle(), encoding="utf-8")
-    mark = MARK.read_text(encoding="utf-8").replace("currentColor", role("accent"))
-    (dest / "ui" / "mark-accent.svg").write_text(mark, encoding="utf-8")
     return dest / "ui.html"
 
 
 def mark_file():
-    """The mark in the accent, for the icon, the loading screen and the band before the page."""
-    path = LOCAL / "mark-accent.svg"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(MARK.read_text(encoding="utf-8").replace("currentColor", role("accent")), encoding="utf-8")
-    except OSError:
-        pass
-    return path
+    """The app icon, for the loading screen and the band before the page."""
+    return ICON
 
 
 def _mark_pixmap(size, source=None):
@@ -1084,7 +1075,7 @@ def _mark_pixmap(size, source=None):
         from PyQt5.QtSvg import QSvgRenderer
     pm = QPixmap(size, size)
     pm.fill(QColor(0, 0, 0, 0))
-    r = QSvgRenderer(str(source or mark_file()))
+    r = QSvgRenderer(str(source or ICON))
     if r.isValid():
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)

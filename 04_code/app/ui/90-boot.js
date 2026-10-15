@@ -18,7 +18,7 @@ function onEvent(raw) {
 function inlineMark() {
   try {
     const x = new XMLHttpRequest();
-    x.open('GET', 'ui/impactguide-mark.svg', false);
+    x.open('GET', 'ui/impactguide-icon.svg', false);
     x.send();
     $('tbLogo').innerHTML = x.responseText;
   } catch (e) { /* the band still has the name */ }

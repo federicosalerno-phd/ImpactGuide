@@ -1,7 +1,7 @@
 """The two files the desktop launcher needs and cannot make for itself.
 
 icon.ico is what Windows shows on the shortcut and on the taskbar, drawn from
-ui/impactguide-mark.svg in the accent of the palette, the same mark the window
+ui/impactguide-icon.svg, the same icon the window
 carries in its title band. theme.json holds the few SlantUI roles the
 launcher's waiting window paints itself with. Both are written once, at
 install time, by install_shortcut.ps1, because the launcher has to work before
