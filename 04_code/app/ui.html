@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en" data-palette="gold-dark">
+<head>
+<meta charset="UTF-8"/>
+<title data-t="win.title"></title>
+<!-- SlantUI's stylesheets and scripts are written next to this page by
+     impactguide_app.py (prepare_page) in a local copy of it: the page is
+     loaded from file:// and can only link what sits beside it. -->
+<link rel="stylesheet" href="ui/slantui.css"/>
+<link rel="stylesheet" href="ui/app.css"/>
+</head>
+<body>
+<div class="app">
+
+  <!-- The title band. SlantUI's titlebar.js cuts it, writes the credit line
+       and wires the three buttons; the page gives the name and the mark,
+       which 90-boot.js reads from ui/impactguide-mark.svg. -->
+  <div class="titlebar">
+    <div class="tbar-band"></div>
+    <div class="tbar-brand">
+      <span class="tbar-logo" id="tbLogo"></span>
+      <span class="tbar-name"><b>Impact</b>Guide</span>
+    </div>
+    <div class="tbar-drag"></div>
+    <div class="tbar-btns">
+      <div class="wbtn wbtn-min" data-t-title="win.minimise.hint" data-icon="win-minimise"></div>
+      <div class="wbtn wbtn-max" data-icon="win-maximise"></div>
+      <div class="wbtn wbtn-close" data-t-title="win.close.hint" data-icon="win-close"></div>
+    </div>
+  </div>
+
+  <!-- The rail: the seven pages of the bench, in the order of the work. All of
+       them can be opened; the ones not built yet say so on their page. -->
+  <div class="topbar">
+    <div class="tabbar" id="rail">
+      <div class="tab" data-page="calibration"><div class="tn">1</div><span data-t="page.calibration.title"></span></div>
+      <div class="tab" data-page="live"><div class="tn">2</div><span data-t="page.live.title"></span></div>
+      <div class="tab" data-page="trials"><div class="tn">3</div><span data-t="page.trials.title"></span></div>
+      <div class="tab" data-page="scans"><div class="tn">4</div><span data-t="page.scans.title"></span></div>
+      <div class="tab" data-page="analysis"><div class="tn">5</div><span data-t="page.analysis.title"></span></div>
+      <div class="tab" data-page="charts"><div class="tn">6</div><span data-t="page.charts.title"></span></div>
+      <div class="tab" data-page="dataset"><div class="tn">7</div><span data-t="page.dataset.title"></span></div>
+    </div>
+    <div class="tb-gap"></div>
+    <div class="tb-r">
+      <div class="picker" id="lang" tabindex="0" data-t-title="win.lang.hint"></div>
+      <div class="stpill" id="pill"><div class="sd" id="sd"></div><span id="st"></span></div>
+    </div>
+  </div>
+
+  <div class="work">
+    <div class="main">
+
+      <!-- One toolbar for every page; each page shows its own group. -->
+      <div class="toolbar">
+        <div class="tool-group" data-for="trials">
+          <button class="btn btn-2 btn-sm view-btn" data-view="guide" data-t="trials.view.guide"></button>
+          <button class="btn btn-2 btn-sm view-btn" data-view="log" data-t="trials.view.log"></button>
+          <button class="btn btn-2 btn-sm view-btn" data-view="sequence" data-t="trials.view.sequence"></button>
+          <button class="btn btn-2 btn-sm view-btn" data-view="config" data-t="trials.view.config"></button>
+        </div>
+        <span class="cthint" id="hint"></span>
+        <span class="chip chip-warn hidden" id="simChip" data-t="win.simulation"></span>
+        <span class="ct-fname fit" id="where"></span>
+      </div>
+
+      <div class="stage">
+
+        <!-- ── calibration ─────────────────────────────────────────────── -->
+        <div class="view" data-view="calibration">
+          <div class="sheet-col">
+            <div class="cards2" id="calModes"></div>
+            <div class="cards2">
+              <div class="card col">
+                <div class="sec-lbl" data-t="cal.board.sec"></div>
+                <div id="calBoard"></div>
+                <div class="row">
+                  <button class="btn btn-2 grow" id="calBoardBtn"><span class="btn-label" data-t="cal.board.action"></span></button>
+                  <button class="btn btn-2 grow" id="calBoardOpen"><span class="btn-label" data-t="cal.board.open"></span></button>
+                </div>
+              </div>
+              <div class="card col">
+                <div class="sec-lbl" data-t="cal.last.sec"></div>
+                <div class="row" id="calLastHead"></div>
+                <div class="log tall" id="calLog"></div>
+              </div>
+            </div>
+            <div class="sec-lbl" data-t="cal.folders.sec"></div>
+            <div class="mlist slim" id="calFolders"></div>
+            <div class="note" id="calFoldersNote"></div>
+          </div>
+        </div>
+
+        <!-- ── trials: the guide ───────────────────────────────────────── -->
+        <div class="view" data-view="trials-guide">
+          <div class="sheet-col" id="guide">
+            <div class="trial-head">
+              <div class="trial-id" id="gId"></div>
+              <div class="col grow">
+                <div class="trial-sub" id="gSub"></div>
+                <div class="row wrap" id="gChips"></div>
+              </div>
+            </div>
+            <div class="tiles" id="gTiles"></div>
+            <div class="col" id="gWarn"></div>
+            <div class="now card" id="gNow">
+              <div class="now-n" id="gNowN"></div>
+              <div class="now-t" id="gNowT"></div>
+              <div class="now-x" id="gNowX"></div>
+              <div class="preview hidden" id="gPrev"></div>
+            </div>
+            <div class="sec-lbl" data-t="trials.steps.sec"></div>
+            <div class="mlist slim" id="gSteps"></div>
+          </div>
+          <div class="sheet-col hidden" id="guideDone">
+            <div class="done-card card col">
+              <div class="trial-id" data-t="trials.complete.title"></div>
+              <div class="note" data-t="trials.complete.sub"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── trials: the log ─────────────────────────────────────────── -->
+        <div class="view" data-view="trials-log">
+          <div class="sheet-col">
+            <div class="mlist slim" id="logList"></div>
+            <div class="note" id="logNote"></div>
+          </div>
+        </div>
+
+        <!-- ── trials: the sequence ────────────────────────────────────── -->
+        <div class="view" data-view="trials-sequence">
+          <div class="sheet-col">
+            <div class="seq-grid" id="seqList"></div>
+          </div>
+        </div>
+
+        <!-- ── trials: the configuration ───────────────────────────────── -->
+        <div class="view" data-view="trials-config">
+          <div class="sheet-col">
+            <div class="cards2">
+              <div class="card col">
+                <div class="sec-lbl" data-t="cfg.totals.sec"></div>
+                <div id="cfgTotals"></div>
+              </div>
+              <div class="card col">
+                <div class="sec-lbl" data-t="cfg.history.sec"></div>
+                <div id="cfgHistory"></div>
+              </div>
+            </div>
+            <div class="card col">
+              <div class="sec-lbl" data-t="cfg.check.sec"></div>
+              <div class="row">
+                <label class="toggle grow"><input type="checkbox" id="chkDeep"/><span data-t="cfg.check.deep"></span></label>
+                <button class="btn btn-2" id="chkRun"><span class="btn-label" data-t="cfg.check.action"></span></button>
+              </div>
+              <div class="log tall" id="chkLog"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── pages still to come ─────────────────────────────────────── -->
+        <div class="view" data-view="soon">
+          <div class="sheet-col">
+            <div class="done-card card col">
+              <div class="trial-id" id="soonTitle"></div>
+              <div class="note" id="soonText"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ side panel: one page per view, the current one carries .show ══ -->
+    <div class="rp">
+
+      <!-- calibration -->
+      <div class="rp-page" data-panel="calibration">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="page.calibration.title"></div>
+          <div class="rp-sub" data-t="page.calibration.sub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div class="sec-lbl" data-t="cal.mode.sec"></div>
+          <div class="combo" id="calMode" tabindex="0" role="button"><span class="combo-v"></span></div>
+          <div class="sec-lbl" data-t="cal.square.sec"></div>
+          <div class="row">
+            <input class="input" type="number" id="calSquare" min="5" max="100" step="0.01"/>
+            <span class="input-unit">mm</span>
+          </div>
+          <div class="sec-lbl" data-t="cal.folder.sec"></div>
+          <div class="note note-path" id="calFolder"></div>
+          <button class="btn btn-2 btn-wide" id="calNewCal"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.new"></span></button>
+          <button class="btn btn-2 btn-wide" id="calNewChk"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.check"></span></button>
+          <div class="sec-lbl" data-t="cal.photos.sec"></div>
+          <div class="pi-row"><span class="pi-l" data-t="cal.photos.count"></span><span id="calCount">0</span></div>
+          <button class="btn btn-2 btn-wide" id="calShoot"><span data-icon="camera"></span><span class="btn-label" data-t="cal.photos.shoot"></span></button>
+          <div class="row">
+            <button class="btn btn-2 grow" id="calImport"><span class="btn-label" data-t="cal.photos.import"></span></button>
+            <button class="btn btn-2 grow" id="calOpen"><span class="btn-label" data-t="cal.photos.open"></span></button>
+          </div>
+        </div>
+        <div class="rp-foot">
+          <button class="btn btn-2 btn-wide" id="calCheck"><span class="btn-label" data-t="cal.check.action"></span></button>
+          <button class="btn btn-2 btn-wide hidden" id="calSave"><span class="btn-label" data-t="cal.save.action"></span></button>
+          <button class="btn btn-primary btn-wide" id="calRun"><span class="btn-label" data-t="cal.run.action"></span></button>
+        </div>
+      </div>
+
+      <!-- trials: the next trial, before it starts -->
+      <div class="rp-page" data-panel="trials-plan">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="trials.plan.title"></div>
+          <div class="rp-sub" id="planSub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <label class="toggle"><input type="checkbox" id="planRef"/><span data-t="trials.plan.reference"></span>
+            <span class="aside" data-t="trials.plan.reference.aside"></span></label>
+          <div class="sec-lbl" data-t="trials.plan.mass.sec"></div>
+          <div class="row">
+            <input class="input" type="number" id="planMass" min="1" step="0.1"/>
+            <span class="input-unit">g</span>
+          </div>
+          <div class="sec-lbl" data-t="trials.plan.extra.sec"></div>
+          <div class="stack hidden" id="extraForm">
+            <div class="combo" id="exHolder" tabindex="0" role="button"><span class="combo-v"></span></div>
+            <div class="combo" id="exAngle" tabindex="0" role="button"><span class="combo-v"></span></div>
+            <div class="combo" id="exDir" tabindex="0" role="button"><span class="combo-v"></span></div>
+            <label class="toggle"><input type="checkbox" id="exDrape"/><span data-t="trials.tile.drape"></span></label>
+            <div class="row">
+              <button class="btn btn-2 grow" id="exApply"><span class="btn-label" data-t="trials.plan.extra.apply"></span></button>
+              <button class="btn btn-2 grow" id="exCancel"><span class="btn-label" data-t="trials.plan.extra.cancel"></span></button>
+            </div>
+          </div>
+          <button class="btn btn-2 btn-wide" id="extraBtn"><span class="btn-label" data-t="trials.plan.extra.action"></span></button>
+          <div class="sec-lbl" data-t="trials.scanner.sec"></div>
+          <div class="note note-path" id="planScanner"></div>
+          <button class="btn btn-2 btn-wide" id="planScannerBtn"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
+        </div>
+        <div class="rp-foot">
+          <button class="btn btn-primary btn-wide" id="planStart"><span data-icon="play"></span><span class="btn-label" id="planStartL"></span></button>
+        </div>
+      </div>
+
+      <!-- trials: a step of the open trial -->
+      <div class="rp-page" data-panel="trials-step">
+        <div class="rp-hd">
+          <div class="rp-title" id="stTitle"></div>
+          <div class="rp-sub" id="stSub"></div>
+        </div>
+        <div class="rp-scroll stack" id="stBody">
+          <div class="stack hidden" data-kind="photo">
+            <button class="btn btn-2 btn-wide" id="stShoot"><span data-icon="camera"></span><span class="btn-label" data-t="step.ctl.shoot"></span></button>
+          </div>
+          <div class="stack hidden" data-kind="video">
+            <button class="btn btn-2 btn-wide" id="stRec"><span data-icon="play"></span><span class="btn-label" id="stRecL"></span></button>
+          </div>
+          <div class="stack hidden" data-kind="scan">
+            <div class="row" id="stWait"><span class="spinner spinner-sm"></span><span class="note" data-t="step.ctl.waiting"></span></div>
+            <div class="note note-path" id="stScanner"></div>
+            <button class="btn btn-2 btn-wide" id="stScannerBtn"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
+          </div>
+          <div class="stack hidden" data-kind="file">
+            <button class="btn btn-2 btn-wide" id="stImport"><span class="btn-label" data-t="step.ctl.import"></span></button>
+            <button class="btn btn-2 btn-wide hidden" id="stDiscard"><span class="btn-label" data-t="step.ctl.discard"></span></button>
+          </div>
+          <div class="stack hidden" data-kind="spheres">
+            <label class="toggle"><input type="checkbox" id="stSpheres"/><span data-t="step.ctl.spheres"></span></label>
+            <div class="sec-lbl" data-t="step.ctl.capshift.sec"></div>
+            <div class="row">
+              <input class="input" type="number" id="stShift" min="0" step="0.01"/>
+              <span class="input-unit">mm</span>
+            </div>
+            <div class="note" data-t="step.ctl.capshift.note"></div>
+          </div>
+          <div class="stack hidden" data-kind="close">
+            <label class="toggle"><input type="checkbox" id="stSecond"/><span data-t="step.ctl.second"></span></label>
+            <label class="toggle"><input type="checkbox" id="stCap"/><span data-t="step.ctl.cap"></span></label>
+            <div class="sec-lbl" data-t="step.ctl.notes.sec"></div>
+            <textarea class="input" id="stNotes" rows="3"></textarea>
+          </div>
+          <div class="sec-lbl" data-t="step.ctl.void.sec"></div>
+          <input class="input" type="text" id="stVoidReason" data-t-ph="step.ctl.void.ph"/>
+          <button class="btn btn-danger btn-wide" id="stVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
+        </div>
+        <div class="rp-foot">
+          <div class="rp-nav">
+            <button class="btn btn-2 btn-sq" id="stBack" data-t-title="step.back.hint"><span data-icon="chevron-left"></span></button>
+            <button class="btn btn-primary btn-grow" id="stOk"><span class="btn-label" id="stOkL"></span><span data-icon="chevron-right"></span></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- trials: the log -->
+      <div class="rp-page" data-panel="trials-log">
+        <div class="rp-hd">
+          <div class="rp-title" id="lgTitle"></div>
+          <div class="rp-sub" id="lgSub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div id="lgFields"></div>
+          <div class="sec-lbl" data-t="log.edit.sec"></div>
+          <div class="combo" id="lgField" tabindex="0" role="button"><span class="combo-v"></span></div>
+          <input class="input" type="text" id="lgValue" data-t-ph="log.edit.value"/>
+          <input class="input" type="text" id="lgReason" data-t-ph="log.edit.reason"/>
+          <button class="btn btn-2 btn-wide" id="lgSave"><span class="btn-label" data-t="log.edit.action"></span></button>
+          <div class="sec-lbl" data-t="log.edits.sec"></div>
+          <div class="stack" id="lgEdits"></div>
+        </div>
+        <div class="rp-foot">
+          <button class="btn btn-2 btn-wide" id="lgOpen"><span data-icon="open"></span><span class="btn-label" data-t="log.open.action"></span></button>
+        </div>
+      </div>
+
+      <!-- trials: the sequence -->
+      <div class="rp-page" data-panel="trials-sequence">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="trials.view.sequence"></div>
+          <div class="rp-sub" data-t="seq.sub"></div>
+        </div>
+        <div class="rp-scroll stack" id="seqTotals"></div>
+      </div>
+
+      <!-- trials: the configuration -->
+      <div class="rp-page" data-panel="trials-config">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="trials.view.config"></div>
+          <div class="rp-sub" data-t="cfg.sub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div class="sec-lbl" data-t="cfg.phase"></div>
+          <div class="combo" id="cfgPhase" tabindex="0" role="button"><span class="combo-v"></span></div>
+          <div class="sec-lbl" data-t="cfg.holders"></div>
+          <input class="input" type="text" id="cfgHolders"/>
+          <div class="sec-lbl" data-t="cfg.angles"></div>
+          <input class="input" type="text" id="cfgAngles"/>
+          <div class="sec-lbl" data-t="cfg.directions"></div>
+          <input class="input" type="text" id="cfgDirections"/>
+          <div class="cfg-pair">
+            <div class="col"><div class="sec-lbl" data-t="cfg.repetitions"></div><input class="input" type="number" id="cfgReps" min="1" step="1"/></div>
+            <div class="col"><div class="sec-lbl" data-t="cfg.drape"></div><input class="input" type="number" id="cfgDrape" min="0" step="1"/></div>
+          </div>
+          <div class="sec-lbl" data-t="cfg.order"></div>
+          <div class="combo" id="cfgOrder" tabindex="0" role="button"><span class="combo-v"></span></div>
+          <div class="cfg-pair">
+            <div class="col"><div class="sec-lbl" data-t="cfg.run"></div><input class="input" type="number" id="cfgRun" min="1" step="1"/></div>
+            <div class="col"><div class="sec-lbl" data-t="cfg.seed"></div><input class="input" type="number" id="cfgSeed" step="1"/></div>
+          </div>
+          <div class="cfg-pair">
+            <div class="col"><div class="sec-lbl" data-t="cfg.washers"></div><input class="input" type="number" id="cfgWashers" min="0" step="1"/></div>
+            <div class="col"><div class="sec-lbl" data-t="cfg.reposition"></div><input class="input" type="number" id="cfgRepos" min="0.1" step="0.1"/></div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
+          <div class="note" id="cfgPreview"></div>
+        </div>
+        <div class="rp-foot">
+          <button class="btn btn-2 btn-wide" id="cfgReset"><span data-icon="reset"></span><span class="btn-label" data-t="cfg.reset"></span></button>
+          <button class="btn btn-primary btn-wide" id="cfgApply"><span class="btn-label" data-t="cfg.apply"></span></button>
+        </div>
+      </div>
+
+      <!-- pages still to come -->
+      <div class="rp-page" data-panel="soon">
+        <div class="rp-hd">
+          <div class="rp-title" id="soonPanelTitle"></div>
+          <div class="rp-sub" data-t="soon.sub"></div>
+        </div>
+        <div class="rp-scroll stack"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="scrim" id="busy">
+  <div class="busy-card">
+    <div class="spinner"></div>
+    <div class="busy-text" id="busyText"></div>
+  </div>
+</div>
+
+<div class="rz rz-n"  data-edge="n"></div>
+<div class="rz rz-s"  data-edge="s"></div>
+<div class="rz rz-w"  data-edge="w"></div>
+<div class="rz rz-e"  data-edge="e"></div>
+<div class="rz rz-nw" data-edge="nw"></div>
+<div class="rz rz-ne" data-edge="ne"></div>
+<div class="rz rz-sw" data-edge="sw"></div>
+<div class="rz rz-se" data-edge="se"></div>
+
+<!-- Qt serves the channel's script from its resources, before SlantUI's.
+     Then the page's parts, plain scripts sharing one scope, in this order. -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="ui/slantui.js"></script>
+<script src="ui/00-strings.js"></script>
+<script src="ui/01-shell.js"></script>
+<script src="ui/10-calibration.js"></script>
+<script src="ui/20-trials.js"></script>
+<script src="ui/90-boot.js"></script>
+</body>
+</html>
