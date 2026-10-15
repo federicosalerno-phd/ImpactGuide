@@ -64,6 +64,7 @@ LANGUAGES = (("en", "English", "gb"), ("it", "Italiano", "it"), ("fr", "Françai
 LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "scans", "analysis", "charts", "dataset")
 MARK = APP / "ui" / "impactguide-mark.svg"
+ICON = APP / "ui" / "impactguide-icon.svg"  # the full colour icon: desktop, taskbar, window
 CALIB_MODES = ("photo", "video")
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
@@ -1072,7 +1073,7 @@ def mark_file():
     return path
 
 
-def _mark_pixmap(size):
+def _mark_pixmap(size, source=None):
     if USE_QT6:
         from PyQt6.QtCore import QRectF
         from PyQt6.QtGui import QPainter, QPixmap
@@ -1083,7 +1084,7 @@ def _mark_pixmap(size):
         from PyQt5.QtSvg import QSvgRenderer
     pm = QPixmap(size, size)
     pm.fill(QColor(0, 0, 0, 0))
-    r = QSvgRenderer(str(mark_file()))
+    r = QSvgRenderer(str(source or mark_file()))
     if r.isValid():
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1099,7 +1100,7 @@ def app_icon():
         from PyQt5.QtGui import QIcon
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128, 256):
-        icon.addPixmap(_mark_pixmap(size))
+        icon.addPixmap(_mark_pixmap(size, ICON))
     return icon
 
 
