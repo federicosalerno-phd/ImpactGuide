@@ -55,10 +55,19 @@ function placeIcons(root) {
 // Every slot answers JSON; a failure carries `error`, a cause the page names.
 // A cause of the link to the phone (phone_link.py) has its own plain words and
 // never shows adb's text.
+// What the operator reads is always a sentence of the app: a detail from the backend is kept only
+// when it is short and plain (a file or a trial name), never an exception or a log line.
+function plainDetail(m) {
+  m = String(m || '').trim();
+  if (!m || m.length > 48 || /[|\n\r{}<>]|exception|error|java|android|traceback|adb|server|socket|\bat\s/i.test(m)) return '';
+  return m;
+}
 function sayError(code, message) {
-  if (hasT('err.' + code)) return T('err.' + code, message || '');
+  if (message) console.warn('error', code, message);
+  const d = plainDetail(message);
+  if (hasT('err.' + code)) return d ? T('err.' + code, d) : T('err.' + code, '').replace(/[\s:]+$/, '');
   if (hasT('link.cause.' + code)) return T('link.cause.' + code);
-  return T('err.generic', code + (message ? ': ' + message : ''));
+  return T('err.generic.plain');
 }
 
 function failed(a) {
@@ -80,6 +89,8 @@ function ask(slot) {
 // ── the pill, the toast, the wait ──────────────────────────────────────────
 let toastTimer = null;
 function toast(text, ms) {
+  // last guard: a raw line (stack, exception, log) never reaches the screen
+  if (/[|]|exception|traceback|java\.|android\.|\bat [a-z]+\./i.test(String(text || ''))) text = T('err.generic.plain');
   const el = $('toast');
   el.textContent = text;
   el.classList.add('show');

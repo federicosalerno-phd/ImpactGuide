@@ -1,20 +1,19 @@
 """Live AR on the phone stream (T20.3; module 8 of ai_design.md): board pose, face overlay and status light.
 
-Two kinds of thread work on the frames of the stream (live.py):
-  find      TRACKING["workers"] threads, each on the newest frame not yet taken: the ChArUco corners and the board
-            pose. While the board is tracked it is searched only in a box around its last position, on an image scaled
-            so that the markers are about TRACKING["marker_px"] wide, with one threshold window, and the corners are
-            refined at full resolution; otherwise on the whole frame at full resolution (marker_pose.py). PnP as
-            marker_pose.py (IPPE, then Levenberg-Marquardt), taking of the two IPPE solutions the one nearer the last
-            pose when they fit almost equally well.
-  compose   one thread, which owns the OpenGL context: every frame of the stream in order. It waits for the pose of
-            that frame for at most TRACKING["wait_ms"], gives the poses found to the tracker (pose_filter.py: One Euro
-            filter on SE(3), outlier gate, hold and fade), draws the face (and the mandible) at the filtered pose with
-            gl_overlay.py, light (a soft translucent fill and a thin outline), and keeps the frame as JPEG.
-So the video in the page keeps the rate of the stream while the pose is found at the rate the computer allows. Each
-frame is drawn at the pose filtered up to that frame: when its own pose is not ready in time, at the pose predicted
-from the earlier ones (kind "predicted" in the trace). The overlay comes late (the stream's latency, about 195 ms, plus
-the processing) but on its own frame.
+Three threads work on the frames of the stream (live.py), always on the newest one, never on a queue:
+  track     every frame: the board's ChArUco corners followed from the previous frame by optical flow and put back on
+            the chessboard's saddle points, the pose from them (board_tracker.py), then the temporal filter
+            (pose_filter.py: One Euro filter on SE(3) with a dead band, outlier gate, glide, hold and fade). A few
+            milliseconds, so it keeps the rate of the stream.
+  detect    now and then (TRACK["detect_every_s"], or at once when the tracking weakens or the board is lost): the
+            full ChArUco detection, in a box around the board or in the whole frame; its corners re-anchor the
+            tracking a few frames later.
+  compose   the newest frame tracked: the face (and the mandible) drawn at its filtered pose with gl_overlay.py, a fill
+            and an outline at the opacity asked for, board axes and corners on request, JPEG. It owns the OpenGL
+            context.
+So each frame is drawn at the pose found on that same frame, at the rate of the stream; when the computer falls
+behind, frames are skipped, never queued. The overlay comes late by the stream's latency (about 150 ms on the cable)
+plus the processing, but on its own frame. The page's calls (status, configure, next_jpeg) only read or set values.
 
 Frames as ai_design.md (Notazione): C camera (OpenCV), M board (cv2.aruco.CharucoBoard: origin at the outer corner of
 the first square, x along the printed columns, y along the rows, z into the board), B head (bench scene, mm).
@@ -25,8 +24,11 @@ Boards
               the monitor holds, square from its pixel pitch) or printed on A4 (11 x 8, square as measured with the
               caliper); either is enough to try the page without the bench. squares and marker_mm give the layout of
               the one on a monitor; without them it is the A4 one
-A pose is used with at least MIN_CORNERS corners and a reprojection RMS under the limit: 1 px with intrinsics
-calibrated for the stream (ai_design.md, module 1), 3 px with the nominal ones, which leave out the lens distortion.
+A pose is used with at least board_tracker.TRACK["min_corners"] corners (8 to start on the calibration board; with
+fewer than 10 they must spread over the board and fit tighter) and a reprojection RMS under the limit: 1 px with
+intrinsics calibrated for the stream (ai_design.md, module 1), 3 px with the nominal ones, which leave out the lens
+distortion. The small patient board works from about 20 to 64 cm (15/10, board shown at its true size on the laptop
+screen; at 1920 x 1440, 20 px per square at the far end).
 
 Intrinsics of the streaming mode: 03_data/processed/calibration/intrinsics_stream.json, in the format
 calibrate_charuco.py writes for intrinsics_photo.json (T5.3), calibrated on frames of the stream at the working
@@ -49,9 +51,10 @@ For the app:
     jpeg, n = ar.next_jpeg(after=n)                  # newest composed frame
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
-    ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...)
+    ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...,
+                 opacity=...)                        # opacity 0-1 of the overlay's fill and outline (default OPACITY)
     ar.set_registration(path or None)
-    ar.set_tracking(hold_s=..., ...)                 # TRACKING overrides
+    ar.set_tracking(hold_s=..., ...)                 # TRACKING and board_tracker.TRACK overrides
     ar.stop(); ar.shutdown()
     MjpegServer(ar).url                              # the frames for an <img>, on 127.0.0.1
     phone_view.ViewServer(ar)                        # the frames for the phone's screen (cable, Wi-Fi, network)
@@ -59,13 +62,16 @@ For the app:
     python live_ar.py view  [--board patient|sheet] [--square MM [--squares NXxNY --marker MM]] [--registration FILE]
                             [--mandible]
                             [--synthetic | --replay VIDEO_OR_FOLDER] [--intrinsics FILE]
-    python live_ar.py bench [--synthetic | --replay CLIP.h264] [--seconds S] [--still S]
-                            rate, time per stage, jitter while still, frames without a pose, blinks of the overlay
-                            (and, on the synthetic stream or a clip with a truth file, the error of the overlay)
+    python live_ar.py bench [--synthetic | --replay CLIP.h264] [--seconds S] [--still S] [--segments FILE]
+                            [--reference]
+                            rate, time per stage, CPU, tremble of the overlay (noise from second differences),
+                            jumps per minute, frames without a pose, blinks (and, on the synthetic stream or a clip with
+                            a truth file, the error of the overlay; with --reference against a pose found offline on
+                            every frame of the clip and smoothed without lag), for the whole run and for each segment
     python live_ar.py clip OUT [--seconds S] [--noise SIGMA]
                             the synthetic session as a clip of the phone (raw H.264 with times and truth), for
                             measuring versions of the live AR on the same frames (bench --replay OUT.h264)
-    python live_ar.py test  pose filter; board finder against the full search; synthetic stream: pose against the
+    python live_ar.py test  pose filter; board tracker (board_tracker.py test); synthetic stream: pose against the
                             truth, overlay, light, video rate, a hand over the board, MJPEG; frames of the digital
                             twin with the true registration; exit 1 on failure
 """
@@ -83,6 +89,7 @@ import cv2
 import numpy as np
 
 import acquisition
+import board_tracker
 import calibrate_charuco
 import live
 import marker_pose
@@ -99,43 +106,44 @@ LIVE_MODELS = WORK / "live_models"                              # the models dec
 LIVE_TRIANGLES = {"face": 4000, "mandible": 6000}
 CAMERA_APP = acquisition.CAMERA_APP     # the phone's camera app holds the camera while it is open
 NOMINAL_F = 3070.0 / 3072.0             # focal length over the height of the 4:3 sensor field (synth_twin.NOMINAL)
-# camera to decoded frame on each link, median of live.py latency: cable 15/10; Wi-Fi not measured yet (None: the
-# page says so and counts only the processing)
-STREAM_LATENCY_MS = {"usb": 195.0, "wifi": None}
-MIN_CORNERS = 8
+# camera to decoded frame on each link, median of the screen flashes (live.py latency): cable 149 ms on 15/10 night
+# with live.CODEC_OPTIONS (169 ms without, 195 ms in the first test); Wi-Fi not measured yet (None: the page says so
+# and counts only the processing)
+STREAM_LATENCY_MS = {"usb": 149.0, "wifi": None}
 MAX_RMS = {"calibrated": 1.0, "nominal": 3.0}
 DISPLAY_WIDTH = 1280
 JPEG_QUALITY = 80
-# the look of the overlay: a soft fill (its opacity), a thin outline (its opacity) and a light shading (its depth:
-# 0 flat, 1 black where the surface is seen edge on), in the colours of the palette
-STYLE = {"face": {"fill": 0.25, "line": 0.9, "shade": 0.6}, "mandible": {"fill": 0.30, "line": 0.8, "shade": 0.6}}
+# the look of the overlay: a fill and a thin outline in the colours of the palette, with a light shading (its depth:
+# 0 flat, 1 black where the surface is seen edge on). Their opacity is the setting `opacity` (0-1) times fill and line
+# (capped at 1): at the default OPACITY a soft tint and a clear outline, at 1 a nearly opaque face.
+OPACITY = 0.3
+STYLE = {"face": {"fill": 0.85, "line": 2.5, "shade": 0.6}, "mandible": {"fill": 0.9, "line": 2.2, "shade": 0.6}}
 COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC"}
 BOARDS = ("patient", "sheet")
 TRACKING = {
-    # temporal filter of the pose (pose_filter.py)
+    # temporal filter of the pose (pose_filter.py); the tracking itself is board_tracker.TRACK (set_tracking takes both)
     "smooth": True,           # False: every frame at its own pose as it comes (the tests of the geometry)
-    "min_cutoff_hz": 0.5,     # smoothing while still: lower is calmer and slower to settle
-    "beta": 0.04,             # cutoff added per px/s of the model's speed in the image: higher lags less in motion
-    "d_cutoff_hz": 3.0,       # smoothing of that speed
-    "lead": True,             # the filter moves the pose on by its speed first: no lag at a steady speed
-    "still_px_s": 60.0,       # slower than this the pose is not moved on: it is noise, not motion
-    "predict_s": 0.1,         # the pose is moved on at most this far past the last one found
+    "min_cutoff_hz": 2.0,     # smoothing while still: lower is calmer and slower to settle
+    "beta": 0.25,             # cutoff added per px/s of the model's speed past the dead band: higher lags less
+    "d_cutoff_hz": 2.0,       # smoothing of that speed
+    "lead": True,             # moving, the filter carries the pose on by its speed first: no lag at a steady speed
+    "still_px_s": 15.0,       # dead band: slower than this (px/s at the stream size) is noise, not motion
+    "predict_s": 0.1,         # a frame without its own pose is drawn at the pose carried on at most this far
     "gate_px": 40.0,          # a pose moving the model more than this (px, stream size) from the prediction is a jump:
     "strong_corners": 0.5,    #   believed with at least this share of the board's corners
-    "strong_rms": 0.5,        #   and an RMS under this share of the limit, otherwise only if the next pose agrees
+    "strong_rms": 0.6,        #   and an RMS under this share of the limit (gliding there), otherwise only if the next
+    "glide_s": 0.15,          #   pose agrees
+    "noise_k": 2.0,           # the rotation's dead band: this many times the speed its expected noise gives
+    "noise_ref_px": 0.5,      # rotation noise (px per frame at the model) up to which it is smoothed like the position;
+    "min_cutoff_floor": 0.4,  #   noisier, its lowest cutoff goes down in proportion, to this share at most
+    "wait_sure": True,        # a new acquisition is drawn once its mirrored pose is ruled out (board_tracker.py)
     # loss of the board
     "hold_s": 0.7,            # the last pose stays drawn this long
     "fade_s": 0.35,           # then fades out over this time
-    "fade_in_s": 0.12,        # and fades in when the board is found again,
+    "fade_in_s": 0.1,         # and fades in when the board is found again,
     "acquire_frames": 2,      #   after this many poses in a row
-    # speed
-    "workers": 2,             # threads finding the board, on consecutive frames
-    "wait_ms": 100.0,         # a frame waits this long at most for its own pose, then is drawn at the predicted one
-    "roi_margin": 0.35,       # while tracked, the board is searched in its last box grown by this share of its size
-    "roi_px": 48,             #   and by this many px on each side,
-    "roi_s": 0.3,             #   for this long after it was last found
-    "marker_px": 32.0,        # the box is scaled so that the markers are about this wide (never enlarged)
-    "min_scale": 0.4,
+    "roi_s": 0.4,             # after the board was lost the detection looks where it was for this long
+    "views": False,           # separate views, not a video (tests): every frame detected on its own, nothing carried
 }
 _GL_THREAD = None                       # the thread that owns gl_overlay's OpenGL context
 _SUBPIX = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 30, 0.01)
@@ -175,16 +183,28 @@ def scale_K(K, sx, sy):
 
 
 def stream_intrinsics(size, path=STREAM_INTRINSICS):
-    """K, dist and their source ({"source": calibrated|nominal, "path", "f"}) for a stream of size (w, h)."""
+    """K, dist and their source ({"source": calibrated|nominal, "path", "f"}) for a stream of size (w, h). A stream
+    turned upright (taller than wide) against a calibration made across gets the calibration turned a quarter: focal
+    lengths and principal point swapped, tangential terms swapped (the sense of the turn is not known: fine for a
+    principal point near the centre, and labelled "turned")."""
     w, h = size
     if path and Path(path).is_file():
         d = json.loads(Path(path).read_text(encoding="utf-8"))
         cw, ch = d["image_size"]
-        K = scale_K(d["K"], w / cw, h / ch)
+        K0 = np.array(d["K"], np.float64)
         dist = np.asarray(d.get("dist", np.zeros(5)), np.float64).ravel()
-        src = {"source": "calibrated", "path": str(path), "date": d.get("date", ""), "rms_px": d.get("rms_px")}
+        turned = (w > h) != (cw > ch)
+        if turned:
+            K0 = np.array([[K0[1, 1], 0, K0[1, 2]], [0, K0[0, 0], K0[0, 2]], [0, 0, 1.0]])
+            cw, ch = ch, cw
+            if len(dist) >= 4:
+                dist = dist.copy()
+                dist[[2, 3]] = dist[[3, 2]]
+        K = scale_K(K0, w / cw, h / ch)
+        src = {"source": "calibrated", "path": str(path), "date": d.get("date", ""), "rms_px": d.get("rms_px"),
+               "turned": bool(turned)}
     else:
-        f = NOMINAL_F * h
+        f = NOMINAL_F * min(w, h)       # the sensor's 4:3 field, across or upright
         K = np.array([[f, 0, (w - 1) / 2], [0, f, (h - 1) / 2], [0, 0, 1.0]])
         dist = np.zeros(5)
         src = {"source": "nominal", "path": "", "date": "", "rms_px": None}
@@ -309,108 +329,6 @@ def close_camera_app(serial=None):
         return False
 
 
-# ── the board in one frame ───────────────────────────────────────────────────
-def solve_pose(obj, img, K, dist, prior=None, ambiguous=2.0):
-    """Board pose by PnP as marker_pose.estimate_pose: IPPE (planar), then Levenberg-Marquardt. When the second IPPE
-    solution fits less than `ambiguous` times worse than the first (a small board, or one seen face on, can look
-    mirrored), the one with the rotation nearer the prior is taken."""
-    _, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, img, K, dist, flags=cv2.SOLVEPNP_IPPE)
-    errs = np.ravel(errs)
-    order = np.argsort(errs)
-    best = int(order[0])
-    if prior is not None and len(errs) > 1 and errs[order[1]] < ambiguous * max(errs[best], 1e-9):
-        ang = [np.linalg.norm(pose_filter.rotvec(cv2.Rodrigues(rvecs[k])[0] @ prior[:3, :3].T)) for k in order[:2]]
-        best = int(order[int(np.argmin(ang))])
-    rvec, tvec = cv2.solvePnPRefineLM(obj, img, K, dist, rvecs[best].copy(), tvecs[best].copy())
-    proj = cv2.projectPoints(obj, rvec, tvec, K, dist)[0].reshape(-1, 2)
-    rms = float(np.sqrt(np.mean(np.sum((proj - img) ** 2, axis=1))))
-    other = errs[order[1]] if len(errs) > 1 else np.inf
-    return {"T": marker_pose.matrix(rvec, tvec), "rms_px": rms, "n": len(obj),
-            "ambiguity": float(other / max(errs[order[0]], 1e-12))}
-
-
-class BoardFinder:
-    """ChArUco corners of one frame. Without a prior: marker_pose.detect on the whole frame (full resolution, every
-    threshold window). With one (the board's box and marker size on a recent frame): the markers in the box only, on
-    the box scaled so that they are about TRACKING["marker_px"] wide and with one threshold window, their corners
-    refined at full resolution, then the chessboard corners interpolated and refined at full resolution by OpenCV's
-    ChArUco detector, as in the full search."""
-
-    def __init__(self, board, spec, settings):
-        self.board, self.spec, self.s = board, spec, settings
-        self.full = marker_pose.make_detector(board)
-        cp = cv2.aruco.CharucoParameters()
-        cp.minMarkers = 1
-        cp.tryRefineMarkers = True
-        dp = cv2.aruco.DetectorParameters()
-        dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        self.charuco = cv2.aruco.CharucoDetector(board, cp, dp)
-        self.obj = board.getChessboardCorners().astype(np.float64)
-        nx, ny = spec["squares"]
-        sq = spec["square_mm"]
-        self.outline = np.array([[0, 0, 0], [nx * sq, 0, 0], [nx * sq, ny * sq, 0], [0, ny * sq, 0]], np.float64)
-        self._markers = {}
-
-    def _detector(self, win):
-        if win not in self._markers:
-            dp = cv2.aruco.DetectorParameters()
-            dp.adaptiveThreshWinSizeMin = dp.adaptiveThreshWinSizeMax = win
-            dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
-            self._markers[win] = cv2.aruco.ArucoDetector(self.board.getDictionary(), dp)
-        return self._markers[win]
-
-    def find(self, gray, prior=None):
-        """(corners N x 2 in px of the whole frame, ids, markers found, {"roi": box or None, "scale"})."""
-        none = np.empty((0, 2)), np.empty(0, np.int32)
-        if prior is None:
-            corners, ids, n_markers = marker_pose.detect(self.full, gray)
-            return corners, ids, n_markers, {"roi": None, "scale": 1.0}
-        x0, y0, x1, y1 = prior["box"]
-        crop = gray[y0:y1, x0:x1]
-        scale = float(np.clip(self.s["marker_px"] / max(prior["marker_px"], 1.0), self.s["min_scale"], 1.0))
-        how = {"roi": (x0, y0, x1, y1), "scale": round(scale, 3)}
-        small = crop if scale > 0.95 else cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        if scale > 0.95:
-            scale = 1.0
-        win = int(np.clip(round(0.4 * prior["marker_px"] * scale), 5, 23)) | 1
-        mc, mids, _ = self._detector(win).detectMarkers(small)
-        if mids is None or not len(mids):
-            return *none, 0, how
-        pts = np.concatenate([c.reshape(4, 2) for c in mc]).astype(np.float32)
-        if scale < 1.0:
-            pts = (pts + 0.5) / scale - 0.5
-        hw = int(np.clip(round(0.08 * prior["marker_px"]), 2, 6))
-        pts = cv2.cornerSubPix(crop, pts.reshape(-1, 1, 2), (hw, hw), (-1, -1), _SUBPIX).reshape(-1, 4, 2)
-        mc = tuple(p.reshape(1, 4, 2) for p in pts)
-        cc, cids, _, mids2 = self.charuco.detectBoard(crop, markerCorners=mc, markerIds=mids)
-        n_markers = len(mids2) if mids2 is not None else len(mids)
-        if cids is None or not len(cids):
-            return *none, n_markers, how
-        return (cc.reshape(-1, 2).astype(np.float64) + (x0, y0), cids.ravel().astype(np.int32), int(n_markers), how)
-
-    def prior_from(self, corners, ids, T, K, dist, size):
-        """The box and marker size for the search of the next frames, from the corners (and the pose, which also puts
-        the parts of the board not found in the box); None when they say too little."""
-        if len(ids) < 4:
-            return None
-        hull_px = cv2.contourArea(cv2.convexHull(corners.astype(np.float32)))
-        hull_mm = cv2.contourArea(cv2.convexHull(self.obj[ids, :2].astype(np.float32)))
-        if hull_px <= 1 or hull_mm <= 1:
-            return None
-        marker_px = float(np.sqrt(hull_px / hull_mm) * self.spec["marker_mm"])
-        pts = corners
-        if T is not None and np.all(marker_pose.transform(T, self.outline)[:, 2] > 1.0):
-            pts = np.vstack([corners, marker_pose.project(self.outline, T, K, dist)])
-        lo, hi = pts.min(0), pts.max(0)
-        grow = (hi - lo) * self.s["roi_margin"] + self.s["roi_px"]
-        w, h = size
-        x0, y0 = np.clip(np.floor(lo - grow), 0, (w, h)).astype(int)
-        x1, y1 = np.clip(np.ceil(hi + grow), 0, (w, h)).astype(int)
-        if x1 - x0 < 16 or y1 - y0 < 16:
-            return None
-        return {"box": (int(x0), int(y0), int(x1), int(y1)), "marker_px": marker_px}
-
-
 # ── stand-ins for the phone ──────────────────────────────────────────────────
 class _Frames:
     """What the stand-ins share with live.PhoneStream: the newest frame with its time and counter, the rate."""
@@ -420,14 +338,16 @@ class _Frames:
         self._lock = threading.Lock()
         self._new = threading.Condition(self._lock)
         self._frame, self._t, self._n = None, 0.0, 0
+        self._item, self._session = None, 1
         self._times = deque(maxlen=120)
         self._decode_ms = deque(maxlen=120)
         self._stop = threading.Event()
 
-    def _put(self, img, decode_ms=None):
+    def _put(self, img, decode_ms=None, t_capture=None):
         t = time.perf_counter()
         with self._new:
             self._frame, self._t, self._n = img, t, self._n + 1
+            self._item = live.Frame(self._n, t, t_capture, bgr=img, session=self._session)
             self._times.append(t)
             if decode_ms is not None:
                 self._decode_ms.append(decode_ms)
@@ -444,6 +364,18 @@ class _Frames:
             if self._n <= after:
                 return None, 0.0, after
             return self._frame, self._t, self._n
+
+    def latest_item(self):
+        with self._lock:
+            return self._item
+
+    def wait_item(self, after=0, timeout=0.1):
+        """The newest frame as a live.Frame once its counter is past `after` (None on timeout)."""
+        with self._new:
+            self._new.wait_for(lambda: self._n > after or self._stop.is_set(), timeout=timeout)
+            if self._n <= after:
+                return None
+            return self._item
 
     def stats(self):
         with self._lock:
@@ -619,22 +551,26 @@ class ReplayStream(_Frames):
     def __init__(self, source, fps=10, truth=None):
         self._init_frames()
         src = source if isinstance(source, (list, tuple)) else [source]
-        src = [Path(p) for p in src]
-        if len(src) == 1 and src[0].is_dir():
+        src = [p if isinstance(p, np.ndarray) else Path(p) for p in src]      # paths, or the images themselves
+        if len(src) == 1 and isinstance(src[0], Path) and src[0].is_dir():
             # the digital twin keeps labels, masks and depth beside its images: they are not frames
             src = sorted(p for p in src[0].iterdir() if p.suffix.lower() in calibrate_charuco.IMAGE_SUFFIXES
                          and not p.stem.endswith(("_label", "_model", "_depth")))
-        self._video = src[0] if len(src) == 1 and src[0].suffix.lower() in self.VIDEO else None
+        self._video = src[0] if len(src) == 1 and isinstance(src[0], Path) and src[0].suffix.lower() in self.VIDEO \
+            else None
         self._images = [] if self._video else src
         self.fps = fps if self._video else min(fps, 10)       # images: at most 10 a second
         if not self._video and not self._images:
             raise LiveARError(f"nothing to play in {source}")
-        self._times_rec = None
+        self._times_rec, self._pts_rec = None, None
         if self._video is not None:
             stem = self._video.with_suffix("")
             tp = Path(str(stem) + "_times.npy")
             if tp.is_file():
                 self._times_rec = np.load(tp)
+            pp = Path(str(stem) + "_pts.npy")
+            if pp.is_file():
+                self._pts_rec = np.load(pp)
             gp = Path(str(stem) + "_truth.npz")
             if truth is None and gp.is_file():
                 truth = list(np.load(gp)["T_C_M"])
@@ -681,22 +617,32 @@ class ReplayStream(_Frames):
                 cap.release()
             else:
                 for k, p in enumerate(self._images):
-                    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                    img = p if isinstance(p, np.ndarray) else cv2.imread(str(p), cv2.IMREAD_COLOR)
                     if img is None:
                         self.error = f"cannot read {p.name}"
                         return
                     yield img, None, k
 
     def _run(self):
-        rec = self._times_rec
+        rec, pts = self._times_rec, self._pts_rec
         period = 1.0 / self.fps
         t_loop, nxt = time.perf_counter(), time.perf_counter()
+        size = None
         for img, dec, k in self._frames():
             if rec is not None and k < len(rec):
                 if k == 0:
                     t_loop = time.perf_counter()
                 time.sleep(max(0.0, t_loop + rec[k] - time.perf_counter()))
-            n = self._put(img, dec)
+            if k == 0 or img.shape[:2] != size:     # a new loop or a new frame size: the tracking starts again
+                self._session += 1
+                size = img.shape[:2]
+            # the capture time: the phone's, on the clock of the replay (the recorded arrival less the quickest lag)
+            t_cap = None
+            if pts is not None and rec is not None and k < min(len(pts), len(rec)):
+                if k == 0:
+                    self._lag0 = float(np.min(rec - pts[:len(rec)])) if len(pts) >= len(rec) else 0.0
+                t_cap = t_loop + pts[k] + self._lag0
+            n = self._put(img, dec, t_cap)
             with self._lock:
                 self._index[n] = k
                 self._index.pop(n - 20000, None)
@@ -718,16 +664,17 @@ class ReplayStream(_Frames):
 
 # ── the live AR ──────────────────────────────────────────────────────────────
 class LiveAR:
-    """Phone stream -> board pose -> filtered pose -> face overlay, on every frame of the stream.
+    """Phone stream -> board tracked on every frame -> filtered pose -> face overlay (see the module docstring).
 
-    The threads live as long as the object: the finders (stage 1) and the compose thread (stage 2), which owns the
-    OpenGL context and so is never replaced: stop() and start() only close and open the stream. Meant as one per
-    process (the app keeps one); a later one makes its own OpenGL context."""
+    The threads live as long as the object: track, detect and compose (which owns the OpenGL context and so is never
+    replaced): stop() and start() only close and open the stream. Meant as one per process (the app keeps one); a
+    later one makes its own OpenGL context. Nothing here blocks the caller's thread for long: the calls of the page
+    (status, configure, set_tracking, next_jpeg) only read or set values under a lock."""
 
     def __init__(self, board="sheet", square_mm=None, registration=None, face=True, mandible=False, axes=True,
                  intrinsics=STREAM_INTRINSICS, synthetic=False, serial=None, size="1920x1440", fps=30,
                  display_width=DISPLAY_WIDTH, colors=None, log=None, replay=None, replay_truth=None, tracking=None,
-                 script=None, exposure_s=0.0, squares=None, marker_mm=None):
+                 script=None, exposure_s=0.0, squares=None, marker_mm=None, opacity=OPACITY):
         if board not in BOARDS:
             raise LiveARError(f"unknown board {board}")
         self.intrinsics_path = Path(intrinsics) if intrinsics else None
@@ -737,17 +684,19 @@ class LiveAR:
         self.display_width = display_width
         self.colors = {k: bgr(v) for k, v in {**COLORS, **(colors or {})}.items()}
         self.log = log or (lambda msg: None)
-        self.tracking = {**TRACKING, **(tracking or {})}
-        self.trace = None             # a list: one row per frame searched and per frame shown (bench, tests)
+        self.tracking = {**board_tracker.TRACK, **TRACKING, **(tracking or {})}
+        self.trace = None             # a list: one row per frame tracked, per detection and per frame shown (bench)
         self._lock = threading.Lock()
         self._frame_ready = threading.Condition(self._lock)
-        self._found_cv = threading.Condition(self._lock)
+        self._det_cv = threading.Condition(self._lock)
+        self._job_cv = threading.Condition(self._lock)
         self._apply_lock = threading.Lock()
         self._want = {"board": board, "square_mm": float(square_mm or calibrate_charuco.BOARD["square"]),
                       "squares": [int(n) for n in squares] if squares else None,
                       "marker_mm": float(marker_mm) if marker_mm else None,
                       "registration": str(registration) if registration else "", "face": bool(face),
-                      "mandible": bool(mandible), "axes": bool(axes), "version": 1}
+                      "mandible": bool(mandible), "axes": bool(axes),
+                      "opacity": float(np.clip(opacity, 0.0, 1.0)), "version": 1}
         self._tracking_version = 1
         self._stream = None
         self._starting = False
@@ -765,31 +714,37 @@ class LiveAR:
         self._cam = (None, None, {})       # K, dist, source for the size of the last frame
         self._cam_size = None
         self._apply(dict(self._want))
-        self._thread = threading.Thread(target=self._work, daemon=True, name="live_ar_compose")
-        self._thread.start()
-        self._finders = []
-        for k in range(max(1, int(self.tracking["workers"]))):
-            th = threading.Thread(target=self._find_loop, daemon=True, name=f"live_ar_find_{k}")
+        self._threads = []
+        for name, target in (("live_ar_compose", self._compose_loop), ("live_ar_track", self._track_loop),
+                             ("live_ar_detect", self._detect_loop)):
+            th = threading.Thread(target=target, daemon=True, name=name)
             th.start()
-            self._finders.append(th)
+            self._threads.append(th)
 
     def _reset_run(self):
         """What belongs to one run of the stream (under the lock, or before the threads start)."""
-        self._pose = (0, None)            # (frame counter, T_C_M) of the last frame with a pose found
+        self._pose = (0, None)            # (frame counter, T_C_M) of the last frame with a pose, as measured
         self._masks = (0, {})             # (frame counter, {model: silhouette at the display size}) of that frame
-        self._taken = 0                   # newest frame taken by a finder
-        self._busy = set()                # frames being searched
-        self._results = {}                # frame counter -> what the search found, until the compose thread uses it
-        self._prior = None                # box, marker size and pose of the last frame where the board was found
-        self._last_failed = False         # the last search found nothing: the next one looks at the whole frame
-        self._latest = None               # the newest search result, for the status
-        self._found_times = deque(maxlen=60)
+        self._tracker, self._tracker_key = None, None
+        self._filter, self._filter_key = None, None
+        self._session = None              # the stream session the tracker works on (a new one: start again)
+        self._det_req = None              # (Frame, box, marker_px, key) for the detection worker
+        self._det_busy = False
+        self._det_done = None             # (Detection, key) for the tracker
+        self._det_t = None                # capture time of the frame of the last detection asked for
+        self._lost_box = None             # (box, marker_px, t) where the board was last, for the search when lost
+        self._job = None                  # the newest frame tracked, for the compose thread
+        self._latest = None               # summary of the newest frame tracked, for the status
+        self._tracked_times = deque(maxlen=60)
         self._shown_times = deque(maxlen=60)
-        self._tm_find = deque(maxlen=30)
+        self._det_times = deque(maxlen=30)
+        self._tm_track = deque(maxlen=30)
+        self._tm_det = deque(maxlen=30)
         self._tm_show = deque(maxlen=30)
         self._served = deque(maxlen=60)
-        self._tracker, self._tracker_key = None, None
         self._verdicts = deque(maxlen=90)
+        self._skipped = 0                 # frames tracked but not drawn (the compose thread was busy)
+        self._cpu = deque(maxlen=40)      # (wall, process CPU time) for the load
 
     # ── control, from any thread ─────────────────────────────────────────
     @property
@@ -818,7 +773,7 @@ class LiveAR:
         return self
 
     def attach(self, stream):
-        """Works on a stream opened elsewhere (anything with latest, wait_frame, stats, alive, error, close)."""
+        """Works on a stream opened elsewhere (anything with wait_item or wait_frame, stats, alive, error, close)."""
         with self._lock:
             self._stream = stream
             self._link = getattr(stream, "link", None)
@@ -838,7 +793,7 @@ class LiveAR:
             stream, self._stream = self._stream, None
             self._jpeg, self._bgr = None, None
             self._frame_ready.notify_all()
-            self._found_cv.notify_all()
+            self._det_cv.notify_all()
         if stream is not None:
             stream.close()
 
@@ -846,14 +801,14 @@ class LiveAR:
         self.stop()
         self._quit.set()
         with self._lock:
-            self._found_cv.notify_all()
-        self._thread.join(timeout=2.0)
-        for th in self._finders:
+            self._det_cv.notify_all()
+            self._job_cv.notify_all()
+        for th in self._threads:
             th.join(timeout=2.0)
 
     def configure(self, **kw):
         """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
-        mandible, axes: applied by the worker from the next frame."""
+        mandible, axes, opacity (0-1, of the overlay's fill and outline): applied from the next frame."""
         if kw.get("board") is not None and kw["board"] not in BOARDS:
             raise LiveARError(f"unknown board {kw['board']}")
         with self._lock:
@@ -869,6 +824,8 @@ class LiveAR:
             for k in ("face", "mandible", "axes"):
                 if kw.get(k) is not None:
                     self._want[k] = bool(kw[k])
+            if kw.get("opacity") is not None:
+                self._want["opacity"] = float(np.clip(float(kw["opacity"]), 0.0, 1.0))
             self._want["version"] += 1
             want = dict(self._want)
         board_changed = before != {k: want[k] for k in before}
@@ -891,15 +848,14 @@ class LiveAR:
             self._apply(want)
 
     def set_tracking(self, **kw):
-        """Overrides of TRACKING (unknown keys refused); the tracker starts again from the next frame. The number of
-        workers is fixed when the object is made."""
-        bad = [k for k in kw if k not in TRACKING]
+        """Overrides of TRACKING and of board_tracker.TRACK (unknown keys refused); tracker and filter start again
+        from the next frame."""
+        bad = [k for k in kw if k not in TRACKING and k not in board_tracker.TRACK]
         if bad:
             raise LiveARError(f"unknown tracking settings {bad}")
         with self._lock:
             self.tracking = {**self.tracking, **kw}
             self._tracking_version += 1
-            self._prior = None
 
     # ── what the page reads ──────────────────────────────────────────────
     def next_jpeg(self, after=0, timeout=1.0):
@@ -946,7 +902,7 @@ class LiveAR:
         return self._stream
 
     def settings(self):
-        """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes."""
+        """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes, opacity."""
         with self._lock:
             return {k: v for k, v in self._want.items() if k != "version"}
 
@@ -956,10 +912,11 @@ class LiveAR:
             stream = self._stream
             want = dict(self._want)
             served = list(self._served)
+            cpu = list(self._cpu)
         st.update({"running": stream is not None, "starting": self._starting, "error": self._error,
                    "synthetic": self.synthetic or self.replay is not None, "replay": self.replay is not None,
                    "renderer": self.renderer,
-                   "layers": {k: want[k] for k in ("face", "mandible", "axes")},
+                   "layers": {k: want[k] for k in ("face", "mandible", "axes")}, "opacity": want["opacity"],
                    "models": {k: k in self._models for k in ("face", "mandible")},
                    "triangles": {k: int(len(f)) for k, (_, f) in self._models.items()},
                    "board": self._spec, "registration": self._setup["registration"], "score": None})
@@ -982,11 +939,17 @@ class LiveAR:
             tm["serve_ms"] = round(float(np.mean(recent)), 1)
             st["fps_served"] = round(len(recent) / 2.0, 1)
         st["timings"] = tm
+        if len(cpu) > 1 and cpu[-1][0] > cpu[0][0]:
+            st["cpu_cores"] = round((cpu[-1][1] - cpu[0][1]) / (cpu[-1][0] - cpu[0][0]), 2)
+        st["stream_dropped"] = s.get("dropped", 0)
+        late = s.get("late_p95_ms")
+        st["late_p95_ms"] = round(late, 1) if late is not None and late == late else None
         if stream.error:
             st["stream_error"] = stream.error
         st["link"] = s.get("link")
         st["link_waiting"] = bool(s.get("waiting"))     # the link dropped: the stream waits for it to come back
         st["link_drops"] = s.get("link_drops", 0)
+        st["restarts"] = s.get("restarts", 0)
         if not stream.alive:
             st["error"] = stream.error or "stream stopped"
             st["cause"] = getattr(stream, "cause", "")
@@ -998,16 +961,16 @@ class LiveAR:
 
     # ── setup ────────────────────────────────────────────────────────────
     def _apply(self, want):
-        """Board, finder and registration for the wanted settings (worker thread, or any thread while stopped)."""
+        """Board, detector and registration for the wanted settings (worker thread, or any thread while stopped)."""
         with self._apply_lock:
             if want["version"] == self._applied and self._setup is not None:
                 return
             old = self._setup
             board, spec = make_board(want["board"], want["square_mm"], want["squares"], want["marker_mm"])
             if old is not None and spec == old["spec"]:
-                board, finder = old["board"], old["finder"]
+                board, detector = old["board"], old["detector"]
             else:
-                finder = BoardFinder(board, spec, self.tracking)
+                detector = board_tracker.Detector(board, spec, self.tracking)
             reg = {"source": "demo", "path": "", "demo": "", "error": ""}
             T = None
             if want["registration"]:
@@ -1018,9 +981,9 @@ class LiveAR:
                     reg["error"] = str(e)
             if T is None and "face" in self._models:
                 T, reg["demo"] = demo_registration(spec, self._models["face"][0])
-            # one assignment, so a worker never sees the board of one setting with the finder of another
-            self._setup = {"board": board, "spec": spec, "finder": finder, "T_M_B": T, "registration": reg,
-                           "version": want["version"]}
+            # one assignment, so a worker never sees the board of one setting with the detector of another
+            self._setup = {"board": board, "spec": spec, "detector": detector, "T_M_B": T, "registration": reg,
+                           "version": want["version"], "obj": board.getChessboardCorners().astype(np.float64)}
             self._applied = want["version"]
 
     @property
@@ -1060,186 +1023,200 @@ class LiveAR:
             self._cam_size = (w, h)
         return self._cam
 
-    # ── stage 1: the board in the newest frame ───────────────────────────
-    def _find_loop(self):
-        """A finder thread: the newest frame no other finder took, its corners and the board pose. OpenCV leaves the
-        GIL while it works, so the finders run alongside each other and alongside the compose thread."""
+    def _model_points(self, setup):
+        """Points of the face (or of the board) in M: the anchor of the filter and what the tracker weighs the two
+        mirrored poses on."""
+        T_M_B = setup["T_M_B"]
+        if T_M_B is not None and "face" in self._models:
+            v = self._models["face"][0]
+            v = v[np.linspace(0, len(v) - 1, min(200, len(v))).astype(int)]
+            return v @ T_M_B[:3, :3].T + T_M_B[:3, 3]
+        nx, ny = setup["spec"]["squares"]
+        sq = setup["spec"]["square_mm"]
+        return np.array([[0, 0, 0], [nx * sq, 0, 0], [nx * sq, ny * sq, 0], [0, ny * sq, 0]], np.float64)
+
+    def _tracker_for(self, setup, K, item):
+        """Tracker and filter of this run, made again when the board, the registration, the settings, the camera or
+        the stream session (a restart, a new frame size) change."""
+        key = (setup["version"], self._tracking_version, round(float(K[0, 0]), 3), item.size, item.session)
+        if self._tracker is None or self._tracker_key != key:
+            pts = self._model_points(setup)
+            self._tracker = board_tracker.Tracker(setup["board"], setup["spec"], self.tracking, pts)
+            # the filter's anchor is the board's centre (its position is what the corners give best); the model
+            # reaches `radius` from it, the lever of the rotation
+            nx, ny = setup["spec"]["squares"]
+            anchor = np.array([nx, ny, 0.0]) * setup["spec"]["square_mm"] / 2
+            radius = float(np.sqrt(np.mean(np.sum((pts - anchor) ** 2, axis=1))))
+            self._filter = pose_filter.PoseTracker(self.tracking, anchor, radius, float(K[0, 0]))
+            self._tracker_key = key
+            with self._lock:
+                self._det_done, self._lost_box, self._det_t = None, None, None
+        return self._tracker, self._filter
+
+    def _next_item(self, stream, after):
+        """The newest frame after `after` as a live.Frame (streams without wait_item: wrapped)."""
+        if hasattr(stream, "wait_item"):
+            return stream.wait_item(after, timeout=0.1)
+        frame, t, n = stream.wait_frame(after, timeout=0.1)
+        return None if frame is None else live.Frame(n, t, bgr=frame)
+
+    # ── thread 1: every frame, the board tracked ─────────────────────────
+    def _track_loop(self):
+        cur, last = None, 0
         while not self._quit.is_set():
             stream = self._stream
             if stream is None:
-                time.sleep(0.02)
-                continue
-            frame, t, n = stream.wait_frame(self._taken, timeout=0.1)
-            if frame is None:
-                continue
-            with self._lock:
-                if self._stream is not stream or n <= self._taken:
-                    continue
-                self._taken = n
-                self._busy.add(n)
-                want = dict(self._want)
-                prior = self._prior
-                if (prior is not None and (self._last_failed or t - prior["t"] > self.tracking["roi_s"])) \
-                        or not self.tracking.get("smooth", True):
-                    prior = None
-            try:
-                if want["version"] != self._applied:
-                    self._apply(want)
-                res = self._find(frame, t, n, self._setup, prior)
-            except Exception as e:  # noqa: BLE001  a bad frame must not end the thread
-                self._failed(stream, e)
-                res = {"n": n, "t": t, "found": False, "corners": 0, "markers": 0, "rms_px": None, "T": None,
-                       "tm": {}, "error": str(e)}
-            with self._lock:
-                self._busy.discard(n)
-                if self._stream is not stream:
-                    continue
-                self._results[n] = res
-                for k in [k for k in self._results if k < n - 60]:
-                    self._results.pop(k)
-                self._found_times.append(time.perf_counter())
-                if res["tm"]:
-                    self._tm_find.append(res["tm"])
-                if self._latest is None or n > self._latest["n"]:
-                    self._latest = res
-                    self._last_failed = res.get("next") is None
-                if res.get("next") is not None and (self._prior is None or n > self._prior["n"]):
-                    self._prior = {**res["next"], "t": t, "n": n, "T": res["T"]}
-                if res["found"] and n > self._pose[0]:
-                    self._pose = (n, res["T"])
-                if self.trace is not None:
-                    self.trace.append({"what": "found", **{k: v for k, v in res.items() if k != "next"},
-                                       "t_done": time.perf_counter()})
-                self._found_cv.notify_all()
-
-    def _find(self, frame, t, n, setup, prior):
-        t0 = time.perf_counter()
-        h, w = frame.shape[:2]
-        K, dist, cam = self._intrinsics(w, h)
-        limit = MAX_RMS[cam["source"]]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        finder = setup["finder"]
-        finder.s = self.tracking
-        corners, ids, n_markers, how = finder.find(gray, prior)
-        t1 = time.perf_counter()
-        pose = None
-        if len(ids) >= MIN_CORNERS:
-            pose = solve_pose(finder.obj[ids], corners, K, dist, None if prior is None else prior.get("T"))
-        t2 = time.perf_counter()
-        found = pose is not None and pose["rms_px"] <= limit
-        s = self.tracking
-        strong = found and len(ids) >= s["strong_corners"] * setup["spec"]["corners"] and pose["rms_px"] <= \
-            s["strong_rms"] * limit
-        nxt = finder.prior_from(corners, ids, pose["T"] if found else None, K, dist, (w, h)) if len(ids) >= 4 else None
-        return {"n": n, "t": t, "found": bool(found), "strong": bool(strong), "T": pose["T"] if found else None,
-                "rms_px": None if pose is None else pose["rms_px"], "corners": int(len(ids)), "markers": int(n_markers),
-                "limit": limit, "roi": how["roi"], "scale": how["scale"], "next": nxt,
-                "tm": {"detect_ms": (t1 - t0) * 1e3, "pose_ms": (t2 - t1) * 1e3}}
-
-    # ── stage 2: every frame, drawn ──────────────────────────────────────
-    def _work(self):
-        """The compose thread, which owns the OpenGL context: every frame of the stream in order."""
-        pending, cur, seen = deque(), None, 0
-        while not self._quit.is_set():
-            stream = self._stream
-            if stream is None:
-                pending.clear()
                 cur = None
                 time.sleep(0.02)
                 continue
             if stream is not cur:
-                cur, seen = stream, 0
-                pending.clear()
-            # without frames waiting, sleep until the next one; with some, only look whether one came
-            frame, t, n = stream.wait_frame(seen, timeout=0.0 if pending else 0.05)
-            if frame is not None:
-                seen = n
-                pending.append((n, t, frame))
-            if not pending:
+                cur, last = stream, 0
+            item = self._next_item(stream, last)
+            if item is None:
                 continue
-            k = self._ready(pending)
-            if k is None:       # the oldest waits for its pose: a finder wakes this thread when one is found
-                with self._found_cv:
-                    self._found_cv.wait(timeout=0.003)
-                continue
-            for _ in range(k):
-                pending.popleft()
-            n, t, frame = pending.popleft()
+            last = item.n
             try:
-                self._compose(stream, frame, t, n)
-            except Exception as e:  # noqa: BLE001
+                self._track(stream, item)
+            except Exception as e:  # noqa: BLE001  a bad frame must not end the thread
                 self._failed(stream, e)
 
-    def _ready(self, pending):
-        """Index in `pending` of the frame to draw now, None to wait: the oldest once its pose is in (or will not come,
-        or it waited wait_ms); the newest ready one when the thread fell behind."""
-        now = time.perf_counter()
-        wait = self.tracking["wait_ms"] / 1e3
-        with self._lock:
-            ready = [n in self._results or (n <= self._taken and n not in self._busy) or now - t > wait
-                     for n, t, _ in pending]
-        if len(pending) >= 3 and any(ready):
-            return max(i for i, r in enumerate(ready) if r)
-        return 0 if ready[0] else None
-
-    def _tracker_for(self, setup, K):
-        """The tracker of this run, made again when the board, the registration or the settings change."""
-        key = (setup["version"], self._tracking_version, round(float(K[0, 0]), 3))
-        if self._tracker is None or self._tracker_key != key:
-            T_M_B = setup["T_M_B"]
-            if T_M_B is not None and "face" in self._models:
-                v = self._models["face"][0] @ T_M_B[:3, :3].T + T_M_B[:3, 3]
-            else:
-                nx, ny = setup["spec"]["squares"]
-                sq = setup["spec"]["square_mm"]
-                v = np.array([[0, 0, 0], [nx * sq, ny * sq, 0]], np.float64)
-            anchor = v.mean(0)
-            radius = float(np.sqrt(np.mean(np.sum((v - anchor) ** 2, axis=1))))
-            self._tracker = pose_filter.PoseTracker(self.tracking, anchor, radius, float(K[0, 0]))
-            self._tracker_key = key
-        return self._tracker
-
-    def _feed(self, n, tracker):
-        """Gives the tracker the poses found on the frames up to n, in order; returns the result of frame n, if any."""
-        with self._lock:
-            ks = sorted(k for k in self._results if k <= n)
-            rs = [self._results.pop(k) for k in ks]
-        own = None
-        for r in rs:
-            r["verdict"] = tracker.measure(r["t"], r["T"] if r["found"] else None, r.get("strong", False))
-            self._verdicts.append(r["verdict"])
-            if r["n"] == n:
-                own = r
-        return own
-
-    def _compose(self, stream, frame, t_dec, n):
-        tc = time.perf_counter()
-        setup = self._setup
+    def _track(self, stream, item):
+        t0 = time.perf_counter()
         with self._lock:
             want = dict(self._want)
-        board, spec, T_M_B = setup["board"], setup["spec"], setup["T_M_B"]
-        h, w = frame.shape[:2]
+        if want["version"] != self._applied:
+            self._apply(want)
+        setup = self._setup
+        w, h = item.size
         K, dist, cam = self._intrinsics(w, h)
-        tracker = self._tracker_for(setup, K)
-        own = self._feed(n, tracker)
-        T, vis, state = tracker.pose_at(t_dec)
-        if T is None:
-            kind = "none"
-        elif own is not None and own["verdict"] in ("accepted", "restarted"):
-            kind = "measured"
-        elif own is None and state == "tracking":
-            kind = "predicted"          # its own pose was not ready in time
-        else:
-            kind = "fading" if state == "fading" else "holding"     # the board was not found on it
+        limit = MAX_RMS[cam["source"]]
+        tracker, filt = self._tracker_for(setup, K, item)
+        s = self.tracking
+        tracker.s = {**tracker.s, **{k: v for k, v in s.items() if k in board_tracker.TRACK}}
+        key = self._tracker_key
+        with self._lock:
+            done, self._det_done = self._det_done, None
+        det = done[0] if done is not None and done[1] == key else None
+        gray = item.gray()
+        if s.get("views"):
+            tracker.reset()
+            det = setup["detector"].detect(gray, n=item.n, t=item.t_capture)
         t1 = time.perf_counter()
+        res = tracker.step(gray, item.t_capture, item.n, K, dist, limit, det)
+        t2 = time.perf_counter()
+        spec = setup["spec"]
+        strong = res.ok and res.n >= s["strong_corners"] * spec["corners"] and res.rms <= s["strong_rms"] * limit
+        use = res.T if (res.ok and (res.sure or not s.get("wait_sure", True))) else None
+        if not s.get("smooth", True) and use is not None:
+            strong = True
+        verdict = filt.measure(item.t_capture, use, strong, res.noise_px)
+        T, vis, state = filt.pose_at(item.t_capture)
+        t3 = time.perf_counter()
+        # the next detection: in the box around the board, or where it was last, or in the whole frame
+        if res.ok and res.box is not None:
+            self._lost_box = (res.box, res.marker_px, item.t_capture)
+        ask = None
+        if not s.get("views") and tracker.want_detection(res, item.t_capture, self._det_t):
+            box, mpx = (res.box, res.marker_px) if res.ok else (None, None)
+            lb = self._lost_box
+            if box is None and lb is not None and item.t_capture - lb[2] < s["roi_s"]:
+                box, mpx = lb[0], lb[1]
+            ask = (item, box, mpx, key)
+        tm = {"gray_ms": (t1 - t0) * 1e3, "track_ms": (t2 - t1) * 1e3, "filter_ms": (t3 - t2) * 1e3,
+              **{k: v for k, v in res.tm.items() if k != "track_ms"}}
+        with self._lock:
+            if self._stream is not stream:
+                return
+            if ask is not None and not self._det_busy:
+                self._det_req, self._det_busy, self._det_t = ask, True, item.t_capture
+                self._det_cv.notify_all()
+            self._tracked_times.append(time.perf_counter())
+            self._tm_track.append(tm)
+            self._verdicts.append(verdict)
+            self._cpu.append((time.perf_counter(), time.process_time()))
+            if res.ok:
+                self._pose = (item.n, res.T)
+            self._latest = {"n": item.n, "ok": res.ok, "sure": res.sure, "corners": res.n if res.ok else
+                            (len(det.ids) if det is not None else 0), "rms_px": res.rms, "source": res.source,
+                            "limit": limit, "markers": det.markers if det is not None else
+                            (self._latest or {}).get("markers", 0), "counts": dict(tracker.counts),
+                            "ambiguity_px": res.ambiguity_px}
+            if self._job is not None:
+                self._skipped += 1
+            self._job = {"stream": stream, "item": item, "T": T, "vis": vis, "state": state, "res": res,
+                         "verdict": verdict, "K": K, "dist": dist, "cam": cam, "setup": setup, "want": want,
+                         "filter": filt, "t_tracked": t3}
+            self._job_cv.notify_all()
+            if self.trace is not None:
+                self.trace.append({"what": "track", "n": item.n, "t": item.t, "tc": item.t_capture, "ok": res.ok,
+                                   "size": list(item.size),
+                                   "sure": res.sure, "T_raw": res.T, "T": T, "vis": vis, "state": state,
+                                   "verdict": verdict, "corners": res.n, "rms_px": res.rms, "source": res.source,
+                                   "reanchored": res.reanchored, "shift_px": res.shift_px, "flipped": res.flipped,
+                                   "noise_px": res.noise_px,
+                                   "t_done": t3, "tm": tm, "detection": None if det is None else det.n})
+
+    # ── thread 2: the detection, now and then ────────────────────────────
+    def _detect_loop(self):
+        while not self._quit.is_set():
+            with self._det_cv:
+                self._det_cv.wait_for(lambda: self._det_req is not None or self._quit.is_set(), timeout=0.2)
+                req, self._det_req = self._det_req, None
+                stream = self._stream
+            if req is None:
+                continue
+            item, box, mpx, key = req
+            try:
+                d = self._setup["detector"].detect(item.gray(), box, mpx, n=item.n, t=item.t_capture)
+            except Exception as e:  # noqa: BLE001
+                self._failed(stream, e)
+                d = None
+            with self._lock:
+                self._det_busy = False
+                if d is None or self._stream is not stream:
+                    continue
+                self._det_done = (d, key)
+                self._det_times.append(time.perf_counter())
+                self._tm_det.append(d.ms)
+                if self.trace is not None:
+                    self.trace.append({"what": "detect", "n": d.n, "t": item.t, "tc": item.t_capture,
+                                       "corners": int(len(d.ids)), "markers": d.markers, "ms": d.ms,
+                                       "box": d.box, "t_done": time.perf_counter()})
+
+    # ── thread 3: the newest frame tracked, drawn ────────────────────────
+    def _compose_loop(self):
+        while not self._quit.is_set():
+            with self._job_cv:
+                self._job_cv.wait_for(lambda: self._job is not None or self._quit.is_set(), timeout=0.2)
+                job, self._job = self._job, None
+            if job is None:
+                continue
+            try:
+                self._compose(job)
+            except Exception as e:  # noqa: BLE001
+                self._failed(job["stream"], e)
+
+    def _compose(self, job):
+        tc = time.perf_counter()
+        item, T, vis, state, res = job["item"], job["T"], job["vis"], job["state"], job["res"]
+        K, dist, cam, setup, want = job["K"], job["dist"], job["cam"], job["setup"], job["want"]
+        spec, T_M_B = setup["spec"], setup["T_M_B"]
+        w, h = item.size
         dw = min(self.display_width, w)
         s = dw / w
-        dh = int(round(h * s))
-        img = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_LINEAR) if dw != w else frame.copy()
-        Kd = scale_K(K, s, s)
+        img = item.bgr(dw, keep=False)
+        dh = img.shape[0]
+        Kd = scale_K(K, s, dh / h)
+        if T is None:
+            kind = "none"
+        elif job["verdict"] in ("accepted", "restarted"):
+            kind = "measured"
+        else:
+            kind = "fading" if state == "fading" else "holding"
         t2 = time.perf_counter()
         drawn, masks = {}, {}
-        if T is not None and T_M_B is not None:
+        alpha = want["opacity"] * vis
+        if T is not None and T_M_B is not None and alpha > 0:
             T_C_B = T @ T_M_B
             for name in ("mandible", "face"):
                 rend = self._renderer(name) if want[name] and name in self._models else None
@@ -1250,75 +1227,94 @@ class LiveAR:
                     masks[name] = r.mask
                     st = STYLE[name]
                     shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
-                    self._paint(img, r, self.colors[name], st, vis, shade)
+                    self._paint(img, r, self.colors[name], st, alpha, shade)
         t3 = time.perf_counter()
-        if T is not None and want["axes"] and vis > 0.5:
-            rvec = cv2.Rodrigues(T[:3, :3])[0]
-            cv2.drawFrameAxes(img, Kd, dist, rvec, T[:3, 3], 3 * spec["square_mm"], 2)
-            proj = marker_pose.project(setup["finder"].obj, T, Kd, dist)
-            for p in proj:
-                cv2.circle(img, (int(round(p[0] * 16)), int(round(p[1] * 16))), 2 * 16, self.colors["reprojected"], -1,
-                           cv2.LINE_AA, 4)
+        if want["axes"] and T is not None and vis > 0.5:
+            self._draw_board(img, T, Kd, dist, spec, setup, res, s)
         t4 = time.perf_counter()
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         t5 = time.perf_counter()
-        tm_show = {"wait_ms": (tc - t_dec) * 1e3, "resize_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3,
-                   "axes_ms": (t4 - t3) * 1e3, "jpeg_ms": (t5 - t4) * 1e3, "compose_ms": (t5 - tc) * 1e3}
+        tm_show = {"wait_ms": (tc - job["t_tracked"]) * 1e3, "resize_ms": (t2 - tc) * 1e3,
+                   "render_ms": (t3 - t2) * 1e3, "axes_ms": (t4 - t3) * 1e3, "jpeg_ms": (t5 - t4) * 1e3,
+                   "compose_ms": (t5 - tc) * 1e3}
+        stream = job["stream"]
         with self._lock:
             if self._stream is not stream:
                 return
             self._tm_show.append(tm_show)
             self._shown_times.append(t5)
-            latest = self._latest
-            st = self._status_of(tracker, state, kind, vis, T, latest, cam, spec, drawn, w, h, dw, dh, t5 - t_dec)
+            st = self._status_of(job["filter"], state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, t5 - item.t)
             self._status = st
-            if kind == "measured":
-                self._masks = (n, masks)
+            if kind == "measured" and res.ok:
+                self._masks = (item.n, masks)
             if ok:
                 self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = buf.tobytes(), self._jpeg_n + 1, img, t5
             if self.trace is not None:
-                self.trace.append({"what": "shown", "n": n, "t": t_dec, "t_done": t5, "kind": kind, "state": state,
-                                   "vis": vis, "T": T, "verdict": None if own is None else own["verdict"],
-                                   "drawn": drawn, "tm": tm_show})
+                self.trace.append({"what": "shown", "n": item.n, "t": item.t, "tc": item.t_capture, "t_done": t5,
+                                   "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show})
             self._frame_ready.notify_all()
 
-    def _status_of(self, tracker, state, kind, vis, T, latest, cam, spec, drawn, w, h, dw, dh, processing):
+    def _draw_board(self, img, T, Kd, dist, spec, setup, res, s):
+        """Board axes at the drawn pose and the corners where the tracker has them on this frame (dots): only what is
+        in front of the camera and inside the image, so a pose seen edge on or a board half out of the frame cannot
+        throw the drawing off."""
+        h, w = img.shape[:2]
+        L = 3 * spec["square_mm"]
+        ends = np.array([[0, 0, 0], [L, 0, 0], [0, L, 0], [0, 0, L]], np.float64)
+        if np.all(marker_pose.transform(T, ends)[:, 2] > 1.0):
+            p = marker_pose.project(ends, T, Kd, dist)
+            if np.all(np.isfinite(p)) and np.all(np.abs(p) < 4 * max(w, h)):
+                q = np.round(p * 16).astype(np.int32)
+                for k, c in ((1, (60, 60, 230)), (2, (60, 200, 60)), (3, (230, 120, 40))):
+                    cv2.line(img, tuple(q[0]), tuple(q[k]), c, 2, cv2.LINE_AA, 4)
+        if res is not None and res.ok and len(res.corners):
+            c = (res.corners + 0.5) * s - 0.5
+            inside = (c[:, 0] >= 0) & (c[:, 1] >= 0) & (c[:, 0] < w) & (c[:, 1] < h)
+            for x, y in np.round(c[inside] * 16).astype(np.int32):
+                cv2.circle(img, (int(x), int(y)), 2 * 16, self.colors["corners"], -1, cv2.LINE_AA, 4)
+
+    def _status_of(self, filt, state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, processing):
         """The status after a frame was drawn (under the lock)."""
         def mean(rows, key):
             vals = [r[key] for r in rows if key in r]
             return round(float(np.mean(vals)), 1) if vals else 0.0
-        tm = {k: mean(self._tm_find, k) for k in ("detect_ms", "pose_ms")}
+        tm = {k: mean(self._tm_track, k) for k in ("gray_ms", "track_ms", "flow_ms", "filter_ms")}
+        tm["detect_ms"] = round(float(np.mean(self._tm_det)), 1) if self._tm_det else 0.0
+        tm["pose_ms"] = tm["track_ms"]
         tm.update({k: mean(self._tm_show, k) for k in ("wait_ms", "resize_ms", "render_ms", "axes_ms", "jpeg_ms",
                                                          "compose_ms")})
         tm["draw_ms"] = round(tm["resize_ms"] + tm["axes_ms"] + tm["jpeg_ms"], 1)
-        tm["total_ms"] = round(tm["detect_ms"] + tm["pose_ms"] + tm["compose_ms"], 1)
+        tm["total_ms"] = round(tm["gray_ms"] + tm["track_ms"] + tm["filter_ms"] + tm["compose_ms"], 1)
 
         def rate(times):
             return round((len(times) - 1) / (times[-1] - times[0]), 1) if len(times) > 1 and times[-1] > times[0] else 0.0
         v = list(self._verdicts)
-        st = {"tracked": tracker.tracked, "state": state, "kind": kind, "opacity": round(float(vis), 2),
-              "corners": 0 if latest is None else latest["corners"], "markers": 0 if latest is None else latest["markers"],
-              "rms_px": None if latest is None or latest["rms_px"] is None else round(latest["rms_px"], 3),
-              "rms_limit_px": MAX_RMS[cam["source"]], "min_corners": MIN_CORNERS, "intrinsics": cam,
-              "drawn_px": drawn, "timings": tm, "image": [w, h], "display": [dw, dh],
-              "fps_ar": rate(self._shown_times), "fps_pose": rate(self._found_times),
+        latest = self._latest or {}
+        st = {"tracked": filt.tracked, "state": state, "kind": kind, "opacity_now": round(float(vis), 2),
+              "corners": latest.get("corners", 0), "markers": latest.get("markers", 0),
+              "rms_px": None if latest.get("rms_px") is None else round(latest["rms_px"], 3),
+              "rms_limit_px": MAX_RMS[cam["source"]], "min_corners": board_tracker.TRACK["min_corners"],
+              "intrinsics": cam, "drawn_px": drawn, "timings": tm, "image": [w, h], "display": [dw, dh],
+              "fps_ar": rate(self._shown_times), "fps_pose": rate(self._tracked_times),
+              "fps_detect": rate(self._det_times), "source": latest.get("source"), "sure": latest.get("sure"),
+              "tracking": latest.get("counts", {}), "skipped": self._skipped,
               "missed_share": round(sum(x == "missed" for x in v) / len(v), 3) if v else 0.0,
-              "rejected": tracker.counts["rejected"]}
+              "rejected": filt.counts["rejected"]}
         if T is not None:
             nx, ny = spec["squares"]
             centre = np.array([nx, ny, 0.0]) * [spec["square_mm"], spec["square_mm"], 0] / 2
             st["distance_mm"] = round(float(np.linalg.norm(marker_pose.transform(T, centre[None])[0])), 1)
-            st["tilt_deg"] = round(float(np.degrees(np.arccos(abs(T[2, 2])))), 1)
+            st["tilt_deg"] = round(float(np.degrees(np.arccos(min(1.0, abs(T[2, 2]))))), 1)
         stream_ms = 0.0 if self.synthetic or self.replay is not None else STREAM_LATENCY_MS.get(self._link)
         st["latency"] = {"stream_ms": stream_ms, "processing_ms": round(processing * 1e3, 1),
                          "total_ms": round((stream_ms or 0.0) + processing * 1e3, 1), "link": self._link}
         return st
 
     def _failed(self, stream, e):
-        if self._stream is stream:
+        if stream is not None and self._stream is stream:
             self._error = f"{type(e).__name__}: {e}"
             self.log(self._error)
-        time.sleep(0.05)
+        time.sleep(0.01)
 
     def _shade(self, name, rend, T, depth):
         """Brightness of each triangle under a light at the camera (both sides lit), from 1 face on down to 1 - depth
@@ -1331,11 +1327,12 @@ class LiveAR:
         return np.concatenate([[0], np.rint(255 * (1 - depth * (1 - cos)))]).astype(np.uint8)
 
     @staticmethod
-    def _paint(img, r, colour, style, vis=1.0, shade=None):
-        """The visible model as a soft tint over the image and a thin smooth outline, both at opacity `vis`."""
+    def _paint(img, r, colour, style, alpha=1.0, shade=None):
+        """The visible model as a tint over the image and a thin smooth outline; alpha (the opacity setting times
+        the fade) scales both."""
         x0, y0 = r.offset
         bh, bw = r.faces.shape
-        if not (bh and bw) or vis <= 0:
+        if not (bh and bw) or alpha <= 0:
             return
         roi = img[y0:y0 + bh, x0:x0 + bw]
         m = r.mask[y0:y0 + bh, x0:x0 + bw]
@@ -1347,7 +1344,7 @@ class LiveAR:
         else:
             light = cv2.cvtColor(shade[r.faces + 1], cv2.COLOR_GRAY2BGR)
             tint = cv2.multiply(light, tuple(c / 255 for c in colour) + (0,))
-        a = style["fill"] * vis
+        a = min(1.0, style["fill"] * alpha)
         cv2.copyTo(cv2.addWeighted(roi, 1 - a, tint, a, 0), m, roi)
         outline, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
         lines = []
@@ -1356,7 +1353,7 @@ class LiveAR:
             if len(c) >= 7:      # the pixel staircase of the mask, smoothed along the contour
                 c = sum(np.roll(c, k, 0) for k in (-2, -1, 0, 1, 2)) / 5
             lines.append(np.round(c * 8).astype(np.int32))
-        la = style["line"] * vis
+        la = min(1.0, style["line"] * alpha)
         if la >= 0.999:
             cv2.polylines(roi, lines, True, colour, 1, cv2.LINE_AA, 3)
         else:
@@ -1444,80 +1441,129 @@ def model_points(ar, k=400):
         v = ar._models["face"][0]
         v = v[np.linspace(0, len(v) - 1, min(k, len(v))).astype(int)]
         return v @ T[:3, :3].T + T[:3, 3]
-    return setup["finder"].obj
+    return setup["board"].getChessboardCorners().astype(np.float64)
 
 
-def measure_run(X, rows, K, still=None, truth=None, t0=0.0):
-    """Numbers of a run from its trace (rows "found" and "shown"): rates, time per stage, frames without a pose,
-    blinks of the overlay, jitter of the overlay while still (of the points X in M: px at the stream size and mm, as
-    found and as drawn) and, with the truth (truth(n) -> T_C_M), the error of the overlay in the image. still: (from,
-    to) in s from t0."""
-    found = sorted((r for r in rows if r["what"] == "found"), key=lambda r: r["n"])
+def _noise(P):
+    """White noise of a track of points P (frames x points x dims) from its second differences: a smooth motion
+    (a hand that holds the phone, a pan) adds almost nothing, a tremble of the overlay all of it. RMS, units of P."""
+    if len(P) < 3:
+        return None
+    d2 = P[1:-1] - (P[:-2] + P[2:]) / 2
+    return float(np.sqrt(np.mean(np.sum(d2 ** 2, axis=-1)) / 1.5))
+
+
+def _jumps(P, t, floor_px=15.0, factor=5.0):
+    """Jumps of the overlay: frames where it moves (RMS over its points) more than floor_px and factor times the
+    median move of the frames around it (a fast pan moves it a lot, but evenly). Returns (count, per minute)."""
+    if len(P) < 5:
+        return 0, 0.0
+    d = np.sqrt(np.mean(np.sum((P[1:] - P[:-1]) ** 2, axis=-1), axis=1))
+    k = 15
+    med = np.array([np.median(d[max(0, i - k):i + k + 1]) for i in range(len(d))])
+    jump = d > np.maximum(floor_px, factor * med)
+    events = int(np.sum(jump[1:] & ~jump[:-1]) + jump[0])
+    minutes = max((t[-1] - t[0]) / 60.0, 1e-9)
+    return events, events / minutes
+
+
+def measure_run(X, rows, K, segments=None, truth=None, clip_time=None):
+    """Numbers of a run from its trace: rates, time per stage, latency (decoded frame to JPEG), frames without a
+    pose, blinks, jumps of the overlay per minute, its tremble (noise from second differences, px at the stream size
+    and mm, as measured and as drawn) and, with the truth (truth(n) -> T_C_M, or a reference pose for the frames of a
+    recorded clip), its error in the image. segments: {name: (from, to)} in s of clip_time(row) (default: time since
+    the first row), each with the same numbers. Works on traces of this version (rows track, detect, shown) and of
+    the one before (rows found, shown)."""
     shown = sorted((r for r in rows if r["what"] == "shown"), key=lambda r: r["n"])
-    out = {}
+    raw = sorted((r for r in rows if r["what"] in ("track", "found")), key=lambda r: r["n"])
+    dets = [r for r in rows if r["what"] == "detect"]
+    t_first = min((r["t"] for r in rows), default=0.0)
+    ct = clip_time or (lambda r: r["t"] - t_first)
 
     def mean_tm(rr, key):
         v = [r["tm"][key] for r in rr if r.get("tm") and key in r["tm"]]
         return float(np.mean(v)) if v else None
-    if len(shown) > 1:
-        ts = np.array([r["t_done"] for r in shown])
-        out["fps_video"] = (len(ts) - 1) / (ts[-1] - ts[0])
-        out["latency_ms"] = float(np.median([(r["t_done"] - r["t"]) * 1e3 for r in shown]))
-        for k in ("wait_ms", "resize_ms", "render_ms", "axes_ms", "jpeg_ms", "compose_ms"):
-            out[k] = mean_tm(shown, k)
-        vis = np.array([r["vis"] > 0 for r in shown])
-        out["blinks"] = int(np.sum(vis[:-1] & ~vis[1:]))
-        out["kinds"] = {k: int(sum(r["kind"] == k for r in shown)) for k in ("measured", "predicted", "holding",
-                                                                           "fading", "none")}
-    if len(found) > 1:
-        tf = np.array([r["t_done"] for r in found])
-        out["fps_pose"] = (len(tf) - 1) / (tf[-1] - tf[0])
-        out["detect_ms"] = mean_tm(found, "detect_ms")
-        out["pose_ms"] = mean_tm(found, "pose_ms")
-        out["no_pose_share"] = float(np.mean([not r["found"] for r in found]))
-        out["searched_share"] = len(found) / max(len(shown), 1)
 
-    def jitter(rows_):
-        P = np.array([marker_pose.project(X, r["T"], K) for r in rows_])
-        Q = np.array([marker_pose.transform(r["T"], X) for r in rows_])
-        px = float(np.sqrt(np.mean(np.sum((P - P.mean(0)) ** 2, axis=2))))
-        mm = float(np.sqrt(np.mean(np.sum((Q - Q.mean(0)) ** 2, axis=2))))
-        return px, mm
-    if still is not None:
-        a, b = still
-        f_still = [r for r in found if r["found"] and a <= r["t"] - t0 < b]
-        s_still = [r for r in shown if r["T"] is not None and a <= r["t"] - t0 < b]
-        if len(f_still) > 5:
-            out["jitter_found_px"], out["jitter_found_mm"] = jitter(f_still)
-        if len(s_still) > 5:
-            out["jitter_drawn_px"], out["jitter_drawn_mm"] = jitter(s_still)
-    if truth is not None:
-        def err(rows_):
-            e = []
-            for r in rows_:
-                Tt = truth(r["n"])
-                if Tt is not None and r["T"] is not None:
-                    e.append(np.sqrt(np.mean(np.sum((marker_pose.project(X, r["T"], K)
-                                                     - marker_pose.project(X, Tt, K)) ** 2, axis=1))))
-            return np.array(e)
-        for name, rr in (("found", [r for r in found if r["found"]]),
-                         ("drawn", [r for r in shown if r["kind"] in ("measured", "predicted")]),
-                         ("drawn_predicted", [r for r in shown if r["kind"] == "predicted"]),
-                         ("drawn_held", [r for r in shown if r["kind"] in ("holding", "fading")])):
-            e = err(rr)
-            if len(e):
-                out[f"error_{name}_px"] = (float(np.median(e)), float(np.percentile(e, 95)))
+    def numbers(sh, rw, dt):
+        out = {}
+        if len(sh) > 1:
+            ts = np.array([r["t_done"] for r in sh])
+            out["fps_video"] = (len(ts) - 1) / max(ts[-1] - ts[0], 1e-9)
+            lat = [(r["t_done"] - r["t"]) * 1e3 for r in sh]
+            out["latency_ms"] = float(np.median(lat))
+            out["latency_p95_ms"] = float(np.percentile(lat, 95))
+            for k in ("wait_ms", "resize_ms", "render_ms", "axes_ms", "jpeg_ms", "compose_ms"):
+                out[k] = mean_tm(sh, k)
+            vis = np.array([r["vis"] > 0 for r in sh])
+            out["blinks"] = int(np.sum(vis[:-1] & ~vis[1:]))
+            out["drawn_share"] = float(np.mean(vis))
+            out["kinds"] = {k: int(sum(r["kind"] == k for r in sh)) for k in ("measured", "predicted", "holding",
+                                                                            "fading", "none")}
+            dr = [r for r in sh if r["T"] is not None]
+            if len(dr) > 4:
+                P = np.array([marker_pose.project(X, r["T"], K) for r in dr])
+                Q = np.array([marker_pose.transform(r["T"], X) for r in dr])
+                out["jitter_drawn_px"], out["jitter_drawn_mm"] = _noise(P), _noise(Q)
+                out["jumps"], out["jumps_per_min"] = _jumps(P, np.array([r["t"] for r in dr]))
+        if len(rw) > 1:
+            tf = np.array([r["t_done"] for r in rw])
+            out["fps_pose"] = (len(tf) - 1) / max(tf[-1] - tf[0], 1e-9)
+            ok = [r for r in rw if r.get("ok", r.get("found"))]
+            out["no_pose_share"] = 1.0 - len(ok) / len(rw)
+            for k in ("detect_ms", "pose_ms", "gray_ms", "track_ms", "flow_ms", "filter_ms"):
+                out[k] = mean_tm(rw, k)
+            Tk = "T_raw" if "T_raw" in rw[0] else "T"
+            okT = [r for r in ok if r.get(Tk) is not None]
+            if len(okT) > 4:
+                P = np.array([marker_pose.project(X, r[Tk], K) for r in okT])
+                Q = np.array([marker_pose.transform(r[Tk], X) for r in okT])
+                out["jitter_found_px"], out["jitter_found_mm"] = _noise(P), _noise(Q)
+                out["jumps_found"], out["jumps_found_per_min"] = _jumps(P, np.array([r["t"] for r in okT]))
+        if dt:
+            out["detections_per_s"] = len(dt) / max((max(r["t"] for r in dt) - min(r["t"] for r in dt)), 1e-9)
+            out["detect_ms"] = float(np.mean([r["ms"] for r in dt]))
+        if truth is not None:
+            def err(rr, key):
+                e = []
+                for r in rr:
+                    Tt = truth(r["n"])
+                    if Tt is not None and r.get(key) is not None:
+                        e.append(np.sqrt(np.mean(np.sum((marker_pose.project(X, r[key], K)
+                                                         - marker_pose.project(X, Tt, K)) ** 2, axis=1))))
+                return np.array(e)
+            Tk = "T_raw" if rw and "T_raw" in rw[0] else "T"
+            for name, rr, key in (("found", [r for r in rw if r.get("ok", r.get("found"))], Tk),
+                                  ("drawn", [r for r in sh if r["kind"] in ("measured", "predicted")], "T"),
+                                  ("drawn_predicted", [r for r in sh if r["kind"] == "predicted"], "T"),
+                                  ("drawn_held", [r for r in sh if r["kind"] in ("holding", "fading")], "T")):
+                e = err(rr, key)
+                if len(e):
+                    out[f"error_{name}_px"] = (float(np.median(e)), float(np.percentile(e, 95)))
+        return out
+
+    out = numbers(shown, raw, dets)
+    if segments:
+        out["segments"] = {}
+        for name, (a, b) in segments.items():
+            def inside(r):
+                c = ct(r)
+                return c is not None and a <= c < b
+            out["segments"][name] = numbers([r for r in shown if inside(r)], [r for r in raw if inside(r)],
+                                            [r for r in dets if inside(r)])
     return out
 
 
-def run_bench(ar, seconds, still=None, warmup=1.0):
+def run_bench(ar, seconds, segments=None, warmup=1.0, reference=None):
     """Runs the live AR for `seconds` with the trace on and an MJPEG client reading the frames; returns the numbers of
-    measure_run and of the client (frames received per second)."""
+    measure_run, of the client (frames received per second) and the CPU used (cores, all threads of this process).
+    On a recorded clip, segments and reference (T_C_M per recorded frame, NaN where none) go by the frame's index in
+    the recording."""
     import urllib.request
     ar.trace = []
     ar.start()
     stream = ar.stream()
     t0 = time.perf_counter()
+    c0 = time.process_time()
     server = MjpegServer(ar)
     got = []
 
@@ -1535,27 +1581,42 @@ def run_bench(ar, seconds, still=None, warmup=1.0):
     th = threading.Thread(target=client, daemon=True)
     th.start()
     time.sleep(seconds + warmup)
+    cpu = (time.process_time() - c0) / (time.perf_counter() - t0)
     rows = [r for r in ar.trace if r["t"] - t0 >= warmup]
     st = ar.status()
     ar.trace = None
     th.join(timeout=2.0)
     server.close()
+    index = dict(getattr(stream, "_index", {}))
+    rec = getattr(stream, "_times_rec", None)
     ar.stop()
     w, h = st["image"] if "image" in st else ar._size_wh()
     K = stream_intrinsics((w, h), ar.intrinsics_path)[0]
     truth = getattr(stream, "truth", None)
-    out = measure_run(model_points(ar), rows, K, still, truth, t0)
+    if reference is not None:
+        def truth(n):
+            k = index.get(n)
+            if k is None or k >= len(reference) or not np.isfinite(reference[k][0, 0]):
+                return None
+            return reference[k]
+    clip_time = None
+    if rec is not None:
+        def clip_time(r):
+            k = index.get(r["n"])
+            return None if k is None or k >= len(rec) else float(rec[k])
+    out = measure_run(model_points(ar), rows, K, segments, truth, clip_time)
     g = np.array([x for x in got if x - t0 >= warmup])
     out["fps_page"] = (len(g) - 1) / (g[-1] - g[0]) if len(g) > 1 else 0.0
     out["decode_ms"] = st.get("timings", {}).get("decode_ms")
     out["serve_ms"] = st.get("timings", {}).get("serve_ms")
     out["fps_stream"] = st.get("fps_stream")
+    out["cpu_cores"] = cpu
     return out
 
 
 def print_bench(out, title):
-    def f(k, fmt="{:.1f}"):
-        v = out.get(k)
+    def f(k, fmt="{:.1f}", o=None):
+        v = (o or out).get(k)
         if v is None:
             return "-"
         if isinstance(v, tuple):
@@ -1563,20 +1624,85 @@ def print_bench(out, title):
         return fmt.format(v)
     print(f"\n{title}")
     print(f"  rate: stream {f('fps_stream')} fps, video {f('fps_video')} fps, received by the page {f('fps_page')} fps, "
-          f"poses {f('fps_pose')} fps ({f('searched_share', '{:.0%}')} of the frames searched)")
-    print(f"  per frame: decode {f('decode_ms')} ms, corners {f('detect_ms')} ms, PnP {f('pose_ms', '{:.2f}')} ms, "
-          f"wait for the pose {f('wait_ms')} ms, resize {f('resize_ms')} ms, models drawn {f('render_ms')} ms, "
+          f"poses {f('fps_pose')} fps, detections {f('detections_per_s')} per s; CPU {f('cpu_cores', '{:.2f}')} cores")
+    print(f"  per frame: decode {f('decode_ms')} ms, gray {f('gray_ms', '{:.2f}')} ms, tracking {f('track_ms')} ms "
+          f"(flow {f('flow_ms')}), detection {f('detect_ms')} ms, filter {f('filter_ms', '{:.2f}')} ms, "
+          f"pose {f('pose_ms', '{:.2f}')} ms, image {f('resize_ms')} ms, models drawn {f('render_ms')} ms, "
           f"axes {f('axes_ms')} ms, JPEG {f('jpeg_ms')} ms, to the page {f('serve_ms', '{:.2f}')} ms")
-    print(f"  decoded frame to JPEG: median {f('latency_ms')} ms")
-    print(f"  frames searched without a pose: {f('no_pose_share', '{:.1%}')}; overlay blinks: {f('blinks', '{:d}')}; "
-          f"frames drawn: {out.get('kinds')}")
-    print(f"  jitter while still: as found {f('jitter_found_px', '{:.3f}')} px {f('jitter_found_mm', '{:.3f}')} mm, "
-          f"as drawn {f('jitter_drawn_px', '{:.3f}')} px {f('jitter_drawn_mm', '{:.3f}')} mm")
-    if "error_found_px" in out:
-        print(f"  overlay against the truth (median / 95th percentile, px): as found {f('error_found_px', '{:.2f}')}; "
-              f"as drawn while tracked {f('error_drawn_px', '{:.2f}')}, of which at a predicted pose "
-              f"{f('error_drawn_predicted_px', '{:.2f}')}; held while the board is lost "
-              f"{f('error_drawn_held_px', '{:.2f}')}")
+    print(f"  decoded frame to JPEG: median {f('latency_ms')} ms, 95th percentile {f('latency_p95_ms')} ms")
+    print(f"  frames without a pose: {f('no_pose_share', '{:.1%}')}; overlay drawn on {f('drawn_share', '{:.1%}')} of "
+          f"the frames, blinks {f('blinks', '{:d}')}; frames drawn: {out.get('kinds')}")
+
+    def quality(o, pre="  "):
+        print(f"{pre}tremble (noise): as found {f('jitter_found_px', '{:.3f}', o)} px {f('jitter_found_mm', '{:.3f}', o)} "
+              f"mm, as drawn {f('jitter_drawn_px', '{:.3f}', o)} px {f('jitter_drawn_mm', '{:.3f}', o)} mm; jumps "
+              f"drawn {f('jumps_per_min', '{:.1f}', o)} per min ({f('jumps', '{:d}', o)}), as found "
+              f"{f('jumps_found_per_min', '{:.1f}', o)} per min")
+        if "error_found_px" in o:
+            print(f"{pre}overlay against the reference (median / 95th percentile, px): as found "
+                  f"{f('error_found_px', '{:.2f}', o)}; drawn {f('error_drawn_px', '{:.2f}', o)}; held "
+                  f"{f('error_drawn_held_px', '{:.2f}', o)}")
+    quality(out)
+    for name, o in (out.get("segments") or {}).items():
+        print(f"  [{name}] video {f('fps_video', o=o)} fps, latency {f('latency_ms', o=o)} ms, no pose "
+              f"{f('no_pose_share', '{:.0%}', o)}, drawn {f('drawn_share', '{:.0%}', o)}, blinks {f('blinks', '{:d}', o)}")
+        quality(o, "      ")
+
+
+def clip_reference(clip, board, spec, K, dist, cache=True):
+    """A reference pose for every frame of a recorded clip: the full ChArUco detection at full resolution, PnP, then
+    smoothed without lag (forward and backward) over runs of frames with a pose: the board's centre at 6 Hz, the
+    rotation at 3 Hz (a hand turns the phone slowly; a small board's rotation is its noisiest part). T_C_M per frame
+    (NaN where none), kept beside the clip (CLIP_reference_<board>.npz)."""
+    from scipy.signal import butter, filtfilt
+    clip = Path(clip)
+    out = clip.with_name(clip.stem + f"_reference_{spec['name']}_{spec['squares'][0]}x{spec['squares'][1]}_v2.npz")
+    if cache and out.is_file():
+        return np.load(out)["T_C_M"]
+    import av
+    det = marker_pose.make_detector(board)
+    codec = av.CodecContext.create("h264", "r")
+    poses = []
+    with open(clip, "rb") as fh:
+        while True:
+            data = fh.read(1 << 20)
+            for packet in codec.parse(data):
+                for frame in codec.decode(packet):
+                    c, ids, _ = marker_pose.detect(det, frame.to_ndarray(format="gray"))
+                    e = marker_pose.estimate_pose(board, c, ids, K, dist,
+                                                  min_corners=8 if spec["name"] == "sheet" else 6)
+                    poses.append(e["T"] if e is not None and e["rms_px"] < 2.0 else np.full((4, 4), np.nan))
+            if not data:
+                break
+    P = np.array(poses)
+    # smoothing: anchor at the board centre (translation) and rotation vector, on runs of 10 or more frames
+    ok = np.isfinite(P[:, 0, 0])
+    b, a = butter(2, 6.0 / 15.0)
+    br, ar_ = butter(2, 3.0 / 15.0)
+    nx, ny = spec["squares"]
+    centre = np.array([nx, ny, 0.0]) * spec["square_mm"] / 2
+    ref = np.full_like(P, np.nan)
+    k = 0
+    while k < len(P):
+        if not ok[k]:
+            k += 1
+            continue
+        j = k
+        while j < len(P) and ok[j]:
+            j += 1
+        if j - k >= 10:
+            R0 = P[k, :3, :3]
+            w = np.array([cv2.Rodrigues(R0.T @ P[i, :3, :3])[0].ravel() for i in range(k, j)])
+            c = np.array([P[i, :3, :3] @ centre + P[i, :3, 3] for i in range(k, j)])
+            pad = min(9, j - k - 1)
+            w, c = filtfilt(br, ar_, w, axis=0, padlen=pad), filtfilt(b, a, c, axis=0, padlen=pad)
+            for i in range(k, j):
+                ref[i] = np.eye(4)
+                ref[i, :3, :3] = R0 @ cv2.Rodrigues(w[i - k])[0]
+                ref[i, :3, 3] = c[i - k] - ref[i, :3, :3] @ centre
+        k = j
+    np.savez_compressed(out, T_C_M=ref)
+    return ref
 
 
 # ── command line ─────────────────────────────────────────────────────────────
@@ -1654,9 +1780,18 @@ def cmd_bench(a):
                 squares=a.squares, marker_mm=a.marker)
     if replay is not None:
         ar.fps = 30
+    if a.segments:
+        segments = {k: tuple(v) for k, v in json.loads(Path(a.segments).read_text(encoding="utf-8")).items()}
+    elif replay is None:
+        segments = {"still": (1.0, 6.0), "slow": (6.0, 12.0), "fast": (12.0, 18.0)}
+    else:
+        segments = {"still": (1.0, a.still)} if a.still else None
+    reference = None
+    if replay is not None and a.reference:
+        K, dist, _ = stream_intrinsics((1920, 1440), a.intrinsics or STREAM_INTRINSICS)
+        reference = clip_reference(replay, board, spec, K, dist)
     try:
-        still = (1.0, a.still) if a.still else ((1.0, 6.0) if replay is None else None)
-        out = run_bench(ar, a.seconds, still, warmup=0.0)
+        out = run_bench(ar, a.seconds, segments, warmup=0.0, reference=reference)
     finally:
         ar.shutdown()
     print_bench(out, f"live AR on {'the synthetic session' if replay is None else replay}, {a.seconds:.0f} s, "
@@ -1700,7 +1835,7 @@ def twin_check(ar, expect, out=None):
         ar.replay, ar.replay_truth, ar.intrinsics_path = images, list(zip(rows, labels)), intr
         ar.set_registration(reg)
         ar.configure(board="patient", mandible=False, face=True)
-        ar.set_tracking(smooth=False, acquire_frames=1, fade_in_s=0.0)
+        ar.set_tracking(smooth=False, acquire_frames=1, fade_in_s=0.0, views=True, wait_sure=False)
         ar.start()
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 2.0 + 2.5 * len(images) / 10 and len(checks) < len(images):
@@ -1735,44 +1870,11 @@ def twin_check(ar, expect, out=None):
            f"{c[:, 2].max() if len(c) else float('nan'):.3f} deg, {c[:, 3].max() if len(c) else float('nan'):.2f} mm")
 
 
-def finder_check(expect):
-    """The fast search (box, scaled image, one threshold window) against the full search on frames of the synthetic
-    stream, for both boards: as many corners, as close to their true positions (the two refine the corners from
-    different starting points, so single corners differ by up to a few tenths of a pixel either way)."""
-    for name in BOARDS:
-        board, spec = make_board(name, 24.0)
-        K, dist, _ = stream_intrinsics((1920, 1440))
-        s = SyntheticStream(board, spec, K, exposure_s=0.0)
-        s.close()
-        finder = BoardFinder(board, spec, TRACKING)
-        err_full, err_fast, counts, t_full, t_fast, scales = [], [], [], [], [], []
-        for k in range(12):
-            img, T = s.render(0.7 * k, k)
-            true = marker_pose.project(finder.obj, T, K)
-            t = time.perf_counter()
-            c0, i0, _ = marker_pose.detect(finder.full, img)
-            t_full.append(time.perf_counter() - t)
-            prior = finder.prior_from(c0, i0, T, K, dist, (1920, 1440))
-            t = time.perf_counter()
-            c1, i1, _, how = finder.find(img, prior)
-            t_fast.append(time.perf_counter() - t)
-            scales.append(how["scale"])
-            counts.append((len(i0), len(i1)))
-            err_full.append(np.linalg.norm(c0 - true[i0], axis=1))
-            err_fast.append(np.linalg.norm(c1 - true[i1], axis=1))
-        counts = np.array(counts)
-        rms = [float(np.sqrt(np.mean(np.concatenate(e) ** 2))) for e in (err_full, err_fast)]
-        ok = np.all(counts[:, 1] >= counts[:, 0] - 1) and rms[1] <= 1.05 * rms[0] + 0.01
-        expect(ok, f"{name}: fast search against the full one on {len(counts)} frames: corners {counts[:, 1].sum()} of "
-                   f"{counts[:, 0].sum()}, from the truth {rms[1]:.3f} px RMS against {rms[0]:.3f}; "
-                   f"{1e3 * np.median(t_fast):.1f} ms against {1e3 * np.median(t_full):.1f} ms (scale "
-                   f"{min(scales):.2f}-{max(scales):.2f})")
-
-
 def run_test():
-    """Pose filter; fast search against the full one; synthetic stream through the whole pipeline: pose against the
-    truth, overlay drawn, light, video at the stream rate, file registration, no board, a hand over the board, MJPEG;
-    then the frames of the digital twin with the true registration."""
+    """Pose filter; board tracker; synthetic stream through the whole pipeline: pose against the truth, overlay
+    drawn, light, video at the stream rate, file registration, no board, a hand over the board, MJPEG; the frames of
+    the digital twin with the true registration; the opacity; frames that turn upright and back; a stream that stalls
+    and then comes in a burst."""
     import tempfile
     import urllib.request
     fails = []
@@ -1784,7 +1886,8 @@ def run_test():
 
     if pose_filter.run_test(TRACKING):
         fails.append("pose filter")
-    finder_check(expect)
+    if board_tracker.run_test():
+        fails.append("board tracker")
 
     def run(ar, seconds):
         ar.start()
@@ -1819,7 +1922,7 @@ def run_test():
                    f"{errs[:, 0].max() if len(errs) else float('nan'):.3f} deg, translation max "
                    f"{errs[:, 1].max() if len(errs) else float('nan'):.2f} mm (camera at about "
                    f"{st.get('distance_mm')} mm)")
-            expect(st.get("rms_px") is not None and st["rms_px"] < 0.5 and st["corners"] >= MIN_CORNERS,
+            expect(st.get("rms_px") is not None and st["rms_px"] < 0.5 and st["corners"] >= 8,
                    f"{board}: {st.get('corners')} of {st['board']['corners']} corners, RMS {st.get('rms_px')} px")
             expect(st.get("drawn_px", {}).get("face", 0) > 1000 and st["registration"]["source"] == "demo",
                    f"{board}: face drawn at the demo registration ({st['registration']['demo']}), "
@@ -1858,6 +1961,9 @@ def run_test():
                f"MJPEG on 127.0.0.1: multipart frames and a still ({len(still)} bytes)")
         twin_check(ar, expect)
         hand_check(ar, expect)
+        opacity_check(ar, expect)
+        turn_check(ar, expect)
+        burst_check(ar, expect)
     finally:
         ar.shutdown()
     # no board in view: grey light
@@ -1873,6 +1979,98 @@ def run_test():
            f"no board in view: not tracked, grey light, video still at {st.get('fps_ar')} fps")
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
     return 1 if fails else 0
+
+
+def opacity_check(ar, expect):
+    """The opacity setting: the face's tint grows with it, 0 draws nothing."""
+    ar.configure(board="sheet", mandible=False, axes=False)
+    ar.start()
+    time.sleep(1.5)
+    tints = {}
+    for op in (0.0, 0.3, 1.0):
+        ar.configure(opacity=op)
+        time.sleep(0.6)
+        img = ar.composed()
+        st = ar.status()
+        if img is None:
+            continue
+        tints[op] = float(np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 1]))
+    ar.stop()
+    ar.configure(opacity=OPACITY, axes=True)
+    ok = len(tints) == 3 and tints[0.0] < tints[0.3] < tints[1.0] and st.get("opacity") == 1.0
+    expect(ok, "opacity of the overlay: mean saturation of the frame " + ", ".join(f"{k:.1f}: {v:.1f}"
+                                                                                for k, v in tints.items()))
+
+
+def turn_check(ar, expect):
+    """Frames that turn upright (1440 x 1920) and back, as a phone turned in the hand could send: no error, the
+    video goes on at every size, the board is found again across."""
+    board, spec = make_board("sheet", 24.0)
+    K, _, _ = stream_intrinsics((1920, 1440))
+    s = SyntheticStream(board, spec, K, exposure_s=0.0)
+    s.close()
+    imgs = []
+    for k in range(36):
+        img, _ = s.render(0.2 * k, k)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        imgs.append(cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE) if 12 <= k < 24 else img)
+    saved = ar.replay, ar.replay_truth
+    ar.replay, ar.replay_truth = imgs, None
+    ar.configure(board="sheet", mandible=False)
+    ar.trace = []
+    ar.start()
+    time.sleep(4.5)
+    rows, ar.trace = ar.trace, None
+    st = ar.status()
+    ar.stop()
+    ar.replay, ar.replay_truth = saved
+    shown = [r for r in rows if r["what"] == "shown"]
+    sizes = {tuple(r.get("size", ())) for r in rows if r["what"] == "track"}
+    found = {}
+    for r in rows:
+        if r["what"] == "track":
+            found.setdefault(tuple(r["size"]), []).append(r["ok"])
+    expect(not st.get("error") and len(shown) >= 25 and len(sizes) == 2
+           and all(np.mean(v) > 0.5 for v in found.values()),
+           f"frames turned upright and back: no error ({st.get('error') or 'none'}), {len(shown)} frames shown, "
+           f"board found on " + ", ".join(f"{k[0]}x{k[1]} {np.mean(v):.0%}" for k, v in found.items()))
+
+
+def burst_check(ar, expect):
+    """A clip of the synthetic session whose frames arrive with a 0.6 s stall every 3 s and then all at once (Wi-Fi):
+    the newest frame is drawn, the delay does not grow, and the overlay does not jump when the burst comes (the
+    filter goes by the capture times)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        clip = make_clip(Path(tmp) / "burst", "sheet", 24.0, seconds=9.0)
+        n = len(np.load(Path(tmp) / "burst_times.npy"))
+        cap = np.arange(n) / 30.0
+        arrive = cap.copy()
+        for k in range(n):
+            u = cap[k] % 3.0
+            if 2.0 <= u < 2.6:          # held back, all delivered at 2.6 s of each period
+                arrive[k] = cap[k] - u + 2.6
+        np.save(Path(tmp) / "burst_times.npy", arrive)
+        np.save(Path(tmp) / "burst_pts.npy", cap)
+        saved = ar.replay, ar.replay_truth
+        ar.replay, ar.replay_truth = str(clip), None
+        ar.configure(board="sheet", mandible=False)
+        ar.trace = []
+        ar.start()
+        stream = ar.stream()
+        time.sleep(8.5)
+        rows, ar.trace = ar.trace, None
+        index = dict(stream._index)
+        ar.stop()
+        stream.thread.join(timeout=3.0)     # it reads the clip: done before the folder goes
+        ar.replay, ar.replay_truth = saved
+    K = stream_intrinsics((1920, 1440), ar.intrinsics_path)[0]
+    out = measure_run(model_points(ar), [r for r in rows if index.get(r["n"], 10 ** 9) < n], K)
+    shown = [r for r in rows if r["what"] == "shown" and index.get(r["n"], 10 ** 9) < n]
+    after = [(r["t_done"] - r["t"]) * 1e3 for r in shown if 2.7 <= cap[index[r["n"]]] % 3.0 < 3.0]
+    expect(out.get("jumps", 9) == 0 and after and np.median(after) < 120,
+           f"stalls of 0.6 s then bursts: {out.get('jumps')} jumps of the overlay, frame to JPEG after a burst "
+           f"median {np.median(after) if after else float('nan'):.0f} ms, video {out.get('fps_video', 0):.1f} fps")
 
 
 def hand_check(ar, expect):
@@ -1893,7 +2091,8 @@ def hand_check(ar, expect):
     ar.stop()
     ar.script, ar.exposure = saved
     K = stream_intrinsics((1920, 1440), ar.intrinsics_path)[0]
-    out = measure_run(model_points(ar), rows, K, (1.0, 6.0), stream.truth, t0)
+    out = measure_run(model_points(ar), rows, K, {"still": (1.0, 6.0)}, stream.truth, lambda r: r["t"] - t0)
+    still = out["segments"]["still"]
     shown = sorted((r for r in rows if r["what"] == "shown"), key=lambda r: r["n"])
     rel = np.array([r["t"] - t0 for r in shown])
     vis = np.array([r["vis"] for r in shown])
@@ -1902,16 +2101,17 @@ def hand_check(ar, expect):
     clear = vis[((rel >= 1.0) & (rel < 1.9)) | ((rel >= 4.8) & (rel < 7.9)) | ((rel >= 9.0) & (rel < 13.9))]
     expect(len(short) and short.min() == 1.0 and len(long_) and long_.max() == 0.0 and clear.min() == 1.0
            and out["blinks"] == 1,
-           f"hand over the board: face held at full opacity over the 0.4 s cover, gone in the 1.5 s one, "
-           f"{out['blinks']} blink in 18 s (the long cover), always drawn with the board in view")
+           f"hand over the board: face held at full opacity over the 0.4 s cover (min {short.min() if len(short) else -1:.2f}), "
+           f"gone in the 1.5 s one (max {long_.max() if len(long_) else -1:.2f}), {out['blinks']} blink in 18 s (the long "
+           f"cover), always drawn with the board in view (min {clear.min() if len(clear) else -1:.2f})")
     e = out.get("error_drawn_px", (np.inf, np.inf))
     expect(st.get("fps_ar", 0) >= 0.75 * st["fps_stream"] and e[1] < 6.0
-           and out.get("jitter_drawn_px", 9) < out.get("jitter_found_px", 0) + 1e-9,
+           and still.get("jitter_drawn_px", 9) < still.get("jitter_found_px", 0) + 1e-9,
            f"session: video {out.get('fps_video', 0):.1f} fps on a {st['fps_stream']} fps stream, poses "
            f"{out.get('fps_pose', 0):.1f} fps; overlay against the truth median / 95th percentile "
            f"{e[0]:.2f} / {e[1]:.2f} px drawn, {out.get('error_found_px', (0, 0))[0]:.2f} / "
            f"{out.get('error_found_px', (0, 0))[1]:.2f} px as found; jitter while still "
-           f"{out.get('jitter_found_px', 0):.3f} px as found, {out.get('jitter_drawn_px', 0):.3f} px drawn")
+           f"{still.get('jitter_found_px', 0):.3f} px as found, {still.get('jitter_drawn_px', 0):.3f} px drawn")
 
 
 def main():
@@ -1934,6 +2134,10 @@ def main():
     ap.add_argument("--noise", type=float, default=2.0, help="clip: sensor noise, grey levels")
     ap.add_argument("--still", type=float, default=None,
                     help="bench: the phone is still from 1 s to this many s (default 6 on the synthetic session)")
+    ap.add_argument("--segments", help="bench: JSON {name: [from, to]} of parts of the clip (s), each measured")
+    ap.add_argument("--reference", action="store_true",
+                    help="bench on a clip: the overlay against a reference pose (full detection, smoothed without "
+                         "lag; computed once and kept beside the clip)")
     a = ap.parse_args()
     if a.command == "test":
         sys.exit(run_test())

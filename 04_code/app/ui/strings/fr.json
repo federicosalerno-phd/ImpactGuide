@@ -51,6 +51,7 @@
   "pill.starting": "Démarrage de la vidéo",
 
   "err.generic": "Une erreur s'est produite : {0}",
+  "err.generic.plain": "Quelque chose n'a pas fonctionné. Réessayez ; si cela se reproduit, redémarrez ImpactGuide.",
   "err.missing_file": "Le fichier de cette étape manque encore : {0}",
   "err.trial_open": "L'essai {0} est encore ouvert : clôturez-le ou annulez-le d'abord",
   "err.swing_mass": "Pesez la partie oscillante et saisissez sa masse avant le premier essai",

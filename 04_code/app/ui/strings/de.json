@@ -51,6 +51,7 @@
   "pill.starting": "Video wird gestartet",
 
   "err.generic": "Etwas ist schiefgelaufen: {0}",
+  "err.generic.plain": "Etwas hat nicht funktioniert. Erneut versuchen; passiert es wieder, ImpactGuide neu starten.",
   "err.missing_file": "Die Datei dieses Schritts fehlt noch: {0}",
   "err.trial_open": "Versuch {0} ist noch offen: zuerst abschließen oder annullieren",
   "err.swing_mass": "Vor dem ersten Versuch den schwingenden Teil wiegen und seine Masse eintragen",

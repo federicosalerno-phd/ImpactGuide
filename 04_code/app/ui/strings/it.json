@@ -51,6 +51,7 @@
   "pill.starting": "Avvio del video",
 
   "err.generic": "Qualcosa non è andato: {0}",
+  "err.generic.plain": "Qualcosa non ha funzionato. Riprova; se succede ancora, riavvia ImpactGuide.",
   "err.missing_file": "Manca ancora il file di questo passo: {0}",
   "err.trial_open": "La prova {0} è ancora aperta: chiudila o annullala prima",
   "err.swing_mass": "Pesa la parte che oscilla e scrivi la massa prima della prima prova",

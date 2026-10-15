@@ -6,7 +6,7 @@ function onEvent(raw) {
   if (!e) return;
   if (e.type === 'phone') { PHONE = e; showPhone(); LINK.onEvent(e); return; }
   if (e.type === 'acquire_failed') toast(sayError(e.error, e.message), 5000);
-  if (e.type === 'error') toast(T('err.generic', e.message || ''), 6000);
+  if (e.type === 'error') toast(sayError('generic', e.message), 6000);
   CAL.onEvent(e);
   TRIALS.onEvent(e);
   LIVE.onEvent(e);

@@ -51,6 +51,7 @@
   "pill.starting": "正在启动视频",
 
   "err.generic": "出错了：{0}",
+  "err.generic.plain": "出现了问题。请重试；如果再次发生，请重新启动 ImpactGuide。",
   "err.missing_file": "此步骤的文件仍缺失：{0}",
   "err.trial_open": "试验 {0} 仍未关闭：请先关闭或作废",
   "err.swing_mass": "首次试验前，请称量摆动部分并填写其质量",

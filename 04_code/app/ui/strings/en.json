@@ -51,6 +51,7 @@
   "pill.starting": "Starting the video",
 
   "err.generic": "Something went wrong: {0}",
+  "err.generic.plain": "Something did not work. Try again; if it happens again, restart ImpactGuide.",
   "err.missing_file": "The file of this step is still missing: {0}",
   "err.trial_open": "Trial {0} is still open: close it or void it first",
   "err.swing_mass": "Weigh the swinging part and write its mass before the first trial",
