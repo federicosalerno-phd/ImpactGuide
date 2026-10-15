@@ -7,7 +7,8 @@ frame is kept, with the time it was decoded. Nothing is installed on the phone a
 For the app page:
     s = open_stream(size="1920x1440", fps=30)    # starts the server, returns once the first frame is in
     frame, t, n = s.latest()                     # BGR array, time.perf_counter() of decoding, frame counter
-    s.stats()                                    # fps, mean decode interval, frames, dropped by the reader
+    frame, t, n = s.wait_frame(after=n)          # the next one, as soon as it is decoded
+    s.stats()                                    # fps, mean decode interval and decoding time, frames
     s.close()
 
 Latency (camera to decoded frame) is measured with `latency`: the PC screen flashes, the phone looks at it, and the
@@ -18,6 +19,9 @@ time from each flash to the first frame that sees it is taken (includes the scre
     python live.py view [--size WxH] [--fps N]   window with the stream, fps and ChArUco corners
     python live.py latency [--size WxH]          flashes the screen, the phone films it
     python live.py bench [--size WxH] [--seconds S]   fps and decode interval without a window
+    python live.py record OUT [--seconds S]      the raw H.264 of the stream (OUT.h264) and the decoding time of each
+                                                 frame (OUT_times.npy), to replay the live AR on it
+                                                 (live_ar.py view --replay OUT.h264, live_ar.py bench --replay ...)
 
 Environment: IMPACTGUIDE_SCRCPY = folder with scrcpy-server and adb.exe (default: found on the PATH or in the WinGet
 packages folder).
@@ -106,15 +110,19 @@ class PhoneStream:
     """Back camera of the phone over USB; a reader thread decodes and keeps only the newest frame."""
 
     def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=BIT_RATE, camera_id=None, port=PORT,
-                 restarts=RESTARTS, log=None):
+                 restarts=RESTARTS, log=None, record=None):
         self.serial = pick_serial(serial)
+        self.record = record            # an open binary file that gets the raw H.264 (`record`)
+        self.frame_times = []           # decoding time of every frame while recording
         self.size, self.fps, self.bit_rate, self.camera_id, self.port = size, fps, bit_rate, camera_id, port
         self.max_restarts, self.restarts = restarts, 0
         self.scid = int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
         self.log = log or (lambda msg: None)
         self._lock = threading.Lock()
+        self._new = threading.Condition(self._lock)
         self._frame, self._t, self._n = None, 0.0, 0
         self._times = deque(maxlen=120)
+        self._decode_ms = deque(maxlen=120)
         self._stop = threading.Event()
         self.server, self.sock, self.thread, self.error = None, None, None, None
         self.server_lines = []
@@ -138,6 +146,8 @@ class PhoneStream:
 
     def close(self):
         self._stop.set()
+        with self._new:
+            self._new.notify_all()
         if self.sock:
             try:
                 self.sock.close()
@@ -182,16 +192,27 @@ class PhoneStream:
         with self._lock:
             return self._frame, self._t, self._n
 
+    def wait_frame(self, after=0, timeout=0.1):
+        """The newest frame once its counter is past `after`: (frame, t, n), or (None, 0.0, after) on timeout."""
+        with self._new:
+            self._new.wait_for(lambda: self._n > after or self._stop.is_set(), timeout=timeout)
+            if self._n <= after:
+                return None, 0.0, after
+            return self._frame, self._t, self._n
+
     def stats(self):
-        """Measured fps over the last frames, mean and 95th percentile of the decode interval (ms), frame count."""
+        """Measured fps over the last frames, mean and 95th percentile of the decode interval (ms), mean time to
+        decode and convert a frame (ms), frame count."""
         with self._lock:
             t = np.array(self._times)
             n = self._n
+            dec = float(np.mean(self._decode_ms)) if self._decode_ms else float("nan")
         if len(t) < 2:
-            return {"fps": 0.0, "interval_ms": float("nan"), "interval_p95_ms": float("nan"), "frames": n}
+            return {"fps": 0.0, "interval_ms": float("nan"), "interval_p95_ms": float("nan"), "decode_ms": dec,
+                    "frames": n}
         dt = np.diff(t) * 1e3
         return {"fps": float((len(t) - 1) / (t[-1] - t[0])), "interval_ms": float(dt.mean()),
-                "interval_p95_ms": float(np.percentile(dt, 95)), "frames": n}
+                "interval_p95_ms": float(np.percentile(dt, 95)), "decode_ms": dec, "frames": n}
 
     # -- threads
     def _server_log(self, server):
@@ -228,13 +249,21 @@ class PhoneStream:
                 codec = av.CodecContext.create("h264", "r")
                 codec.flags |= av.codec.context.Flags.low_delay
                 while not self._stop.is_set():
+                    if self.record is not None:
+                        self.record.write(data)
                     for packet in codec.parse(data):
+                        t0 = time.perf_counter()
                         for frame in codec.decode(packet):
                             img = frame.to_ndarray(format="bgr24")
                             t = time.perf_counter()
-                            with self._lock:
+                            with self._new:
                                 self._frame, self._t, self._n = img, t, self._n + 1
                                 self._times.append(t)
+                                self._decode_ms.append((t - t0) * 1e3)
+                                self._new.notify_all()
+                            if self.record is not None:
+                                self.frame_times.append(t)
+                            t0 = time.perf_counter()
                     data = self.sock.recv(1 << 18)
                     if not data:
                         raise LiveError("stream closed by the phone")
@@ -309,6 +338,28 @@ def cmd_bench(a):
           f"(95th percentile {st['interval_p95_ms']:.1f}), {st['frames']} frames")
 
 
+def cmd_record(a):
+    """Raw H.264 of the stream from its first frame, and the decoding time of each frame (s from the first), so that
+    a replay keeps the timing of the phone. The stream is recorded as it comes: no restart if it breaks."""
+    out = Path(a.out).with_suffix("")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(out) + ".h264", "wb") as raw:
+        s = PhoneStream(a.serial, a.size, a.fps, record=raw, restarts=0)
+        s.start()
+        t0 = time.perf_counter()
+        try:
+            while time.perf_counter() - t0 < a.seconds and s.alive:
+                time.sleep(0.5)
+                print(f"{time.perf_counter() - t0:5.1f} s  {s.latest()[2]} frames", flush=True)
+        finally:
+            s.close()
+            time.sleep(0.3)
+    t = np.array(s.frame_times)
+    np.save(str(out) + "_times.npy", t - t[0] if len(t) else t)
+    print(f"{out}.h264: {len(t)} frames, {(len(t) - 1) / max(t[-1] - t[0], 1e-9):.1f} fps" if len(t) > 1
+          else "no frame recorded")
+
+
 def cmd_latency(a, flashes=12, period=0.8):
     """Full-screen window that turns white and black; the phone films its centre. Latency of each flash: from the
     screen change (after waitKey has shown it) to the first decoded frame whose brightness crossed half way between
@@ -349,7 +400,8 @@ def cmd_latency(a, flashes=12, period=0.8):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["devices", "cameras", "view", "bench", "latency"])
+    ap.add_argument("command", choices=["devices", "cameras", "view", "bench", "latency", "record"])
+    ap.add_argument("out", nargs="?", help="record: the file to write (OUT.h264 and OUT_times.npy)")
     ap.add_argument("--serial")
     ap.add_argument("--size", default="1920x1440")
     ap.add_argument("--fps", type=int, default=30)
@@ -362,7 +414,9 @@ def main():
         elif a.command == "cameras":
             print(list_cameras(a.serial))
         else:
-            {"view": cmd_view, "bench": cmd_bench, "latency": cmd_latency}[a.command](a)
+            if a.command == "record" and not a.out:
+                ap.error("record needs OUT")
+            {"view": cmd_view, "bench": cmd_bench, "latency": cmd_latency, "record": cmd_record}[a.command](a)
     except LiveError as e:
         sys.exit(f"live: {e}")
 

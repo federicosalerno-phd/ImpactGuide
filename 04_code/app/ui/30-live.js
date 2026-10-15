@@ -99,8 +99,10 @@ const LIVE = {
     const speed = [];
     if (on) {
       const tm = s.timings || {};
+      // the video keeps the stream's rate; the board pose is found as often as the computer allows
       speed.push(piRow(T('live.f.stream'), T('live.f.fps', cifre(s.fps_stream, 1))),
-                 piRow(T('live.f.overlay'), T('live.f.fps', cifre(s.fps_ar || 0, 1))),
+                 piRow(T('live.f.video'), T('live.f.fps', cifre(s.fps_ar || 0, 1))),
+                 piRow(T('live.f.poses'), T('live.f.fps', cifre(s.fps_pose || 0, 1))),
                  piRow(T('live.f.latency'), T('live.f.ms', cifre(lat.total_ms || 0, 0))),
                  piRow(T('live.f.pose'), T('live.f.ms', cifre((tm.detect_ms || 0) + (tm.pose_ms || 0), 0))),
                  piRow(T('live.f.drawing'), T('live.f.ms', cifre((tm.render_ms || 0) + (tm.draw_ms || 0), 0))));
