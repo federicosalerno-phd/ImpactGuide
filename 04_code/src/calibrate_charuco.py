@@ -354,6 +354,10 @@ def run_check(images, intrinsics, square):
     whole model. The stored intrinsics stay valid when each change is within 3
     combined standard deviations or below the floor, and when they reproject the
     new photos with an RMS below MAX_RMS.
+
+    Returns (ok, report): report holds the RMS of the stored model on these
+    photos, the views used and skipped, and per parameter the stored and new
+    value, the change, the limit and whether it passed.
     """
     ref = json.loads(Path(intrinsics).read_text())
     views, skipped, size = detect(find_images(images), make_board(square))
@@ -371,7 +375,9 @@ def run_check(images, intrinsics, square):
                            - i.reshape(-1, 2)) ** 2)) for o, i in zip(obj, img))
     rms_stored = np.sqrt(sq / sum(len(o) for o in obj))
     print(f"views {len(views)}, stored intrinsics reproject them with RMS {rms_stored:.3f} px")
-    ok = rms_stored < MAX_RMS
+    ok = bool(rms_stored < MAX_RMS)
+    report = {"images": str(Path(images)), "intrinsics": str(Path(intrinsics)), "n_views": len(views),
+              "skipped": dict(skipped), "rms_stored_px": round(float(rms_stored), 4), "rms_ok": ok, "params": {}}
     flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
              | cv2.CALIB_FIX_TANGENT_DIST)
     crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 200, 1e-12)
@@ -379,11 +385,15 @@ def run_check(images, intrinsics, square):
     for i, (name, r, c) in enumerate([("fx", 0, 0), ("fy", 1, 1), ("cx", 0, 2), ("cy", 1, 2)]):
         delta = K[r, c] - K0[r, c]
         limit = max(3 * np.hypot(std[i, 0], ref["std"][name]), CHECK_FOCAL * K0[r, c] if r == c else CHECK_CENTRE)
-        ok &= abs(delta) <= limit
+        ok &= bool(abs(delta) <= limit)
+        report["params"][name] = {"stored": round(float(K0[r, c]), 3), "now": round(float(K[r, c]), 3),
+                                  "change": round(float(delta), 3), "limit": round(float(limit), 3),
+                                  "ok": bool(abs(delta) <= limit)}
         print(f"{name} {K0[r, c]:.2f} -> {K[r, c]:.2f}  change {delta:+.2f} px, limit {limit:.2f} px"
               + ("" if abs(delta) <= limit else "  CHANGED"))
     print("check: " + ("ok, stored intrinsics still valid" if ok else "FAILED, recalibrate"))
-    return ok
+    report["ok"] = ok
+    return ok, report
 
 
 def run_test(work):
@@ -398,12 +408,12 @@ def run_test(work):
     print("calibration: " + ("PASS" if ok else "FAIL"))
     # session check with the same camera: must pass
     synth(work / "check_same", 10, seed=1, prefix="check")
-    same = run_check(work / "check_same", work / "synth_intrinsics.json", BOARD["square"])
+    same = run_check(work / "check_same", work / "synth_intrinsics.json", BOARD["square"])[0]
     # session check after refocusing (focal length +0.3 %, distortion unchanged): must fail
     K = SYNTH_K.copy()
     K[:2, :2] *= 1.003
     synth(work / "check_refocused", 10, seed=2, K=K, prefix="check")
-    moved = run_check(work / "check_refocused", work / "synth_intrinsics.json", BOARD["square"])
+    moved = run_check(work / "check_refocused", work / "synth_intrinsics.json", BOARD["square"])[0]
     ok = ok and same and not moved
     print("test: " + ("PASS" if ok else "FAIL"))
     return ok

@@ -17,6 +17,7 @@ const TRIALS = {
 
   setView: function (v) {
     trialsView = v;
+    showHome();
     document.querySelectorAll('.view-btn').forEach(function (b) { b.classList.toggle('on', b.dataset.view === v); });
     showView('trials-' + v);
     $('hint').textContent = T('trials.hint.' + v);
@@ -127,6 +128,7 @@ const TRIALS = {
       $('gNowT').textContent = TRIALS.stepTitle(st);
       $('gNowX').textContent = TRIALS.stepText(st, s);
       const staged = s.staged[st.key];
+      if (st.files.length && !st.done) $('gNowX').textContent += ' ' + T('trials.now.file', st.files[0]);
       if (staged) TRIALS.preview(prev, staged);
       else if (st.done && st.files.length) {
         prev.append(piRow(T('trials.file.kept'), st.files[0]));
@@ -147,7 +149,7 @@ const TRIALS = {
       const it = E('div', 'mitem ' + (now ? 'sel' : (x.done ? 'done' : 'todo')));
       const name = E('span', 'mitem-name');
       name.append(E('span', 'blk-n', k + 1), E('span', null, TRIALS.stepTitle(x)));
-      if (x.files.length) name.append(E('span', 'mitem-det', x.files.join(', ')));
+      if (x.files.length) it.title = x.files.join(', ');
       it.append(name);
       if (now || x.done) it.append(E('span', 'mbadge', T(now ? 'trials.badge.now' : 'trials.badge.done')));
       if (t.open) it.onclick = function () { ask('step_go', k, function (a) { if (a) TRIALS.render(a); }); };
@@ -156,7 +158,7 @@ const TRIALS = {
     const sel = list.querySelector('.mitem.sel');
     if (sel && TRIALS._lastKey !== (t.trial + st.key)) {
       TRIALS._lastKey = t.trial + st.key;
-      sel.scrollIntoView({ block: 'nearest' });
+      sel.scrollIntoView({ block: 'center' });
     }
 
     if (t.open) { showPanel('trials-step'); TRIALS.renderStep(s); }
@@ -300,6 +302,19 @@ const TRIALS = {
   // ── the log ────────────────────────────────────────────────────────────
   colName: function (c) { return hasT('col.' + c) ? T('col.' + c) : c; },
 
+  // A logged value as it reads: yes or no, a time, a unit after the number.
+  colValue: function (c, v) {
+    if (v === '') return '';
+    if (c.unit === '0/1') return T(v === '1' ? 'word.yes' : 'word.no');
+    if (c.unit === 'ISO 8601') return v.replace('T', ' ');
+    if (c.unit === 'deg') return v + '°';
+    if (c.unit === 'mm' || c.unit === 'g') return v + ' ' + c.unit;
+    if (c.name === 'status') return T('status.' + v);
+    if (c.name === 'phase') return T('phase.' + v);
+    if (c.name === 'reference') return v.split(';').filter(Boolean).map(function (r) { return T('ref.' + r); }).join(', ');
+    return v;
+  },
+
   loadLog: function () {
     ask('log_rows', function (L) { if (L) TRIALS.renderLog(L); });
   },
@@ -316,7 +331,9 @@ const TRIALS = {
     rows.forEach(function (r) {
       const it = E('div', 'mitem' + (r.trial === TRIALS.logSel ? ' sel' : ''));
       const name = E('span', 'mitem-name', r.trial + ' ');
-      let det = r.holder + ' · ' + r.angle_deg + '° · ' + r.direction_deg + '°' + (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '');
+      let det = r.holder + ' · ' + T('seq.cell', r.angle_deg, r.direction_deg) + (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '')
+        + ' · ' + quando(r.time_impact || r.time_start);
+      if (r.cap_shift_mm) det += ' · ' + T('log.cap', cifre(r.cap_shift_mm, 2));
       if (edited[r.trial]) det += ' · ' + T('log.edited', edited[r.trial]);
       name.append(E('span', 'mitem-det', det));
       it.append(name, E('span', 'mbadge', T('status.' + r.status)));
@@ -329,15 +346,20 @@ const TRIALS = {
     const r = L.rows.find(function (x) { return x.trial === TRIALS.logSel; });
     $('lgTitle').textContent = r ? r.trial : T('trials.view.log');
     $('lgSub').textContent = r ? T('status.' + r.status) + ' · ' + r.session : T('log.none');
+    $('lgDetail').textContent = r ? T('log.detail', r.trial) : T('log.none');
     const fields = $('lgFields');
     fields.replaceChildren();
     const editable = L.columns.filter(function (c) { return c.name !== 'trial' && c.name !== 'phase'; });
     if (r) {
       L.columns.forEach(function (c) {
-        if (r[c.name] !== '') fields.append(piRow(TRIALS.colName(c.name), r[c.name] + (c.unit && c.unit.length < 4 ? ' ' + c.unit : '')));
+        if (r[c.name] !== '') fields.append(piRow(TRIALS.colName(c.name), TRIALS.colValue(c, r[c.name])));
       });
     }
     setOptions($('lgField'), editable.map(function (c) { return TRIALS.colName(c.name); }), editable.map(function (c) { return c.name; }));
+    const canVoid = !!r && r.status !== 'void';
+    $('lgVoid').classList.toggle('hidden', !canVoid);
+    $('lgVoidReason').classList.toggle('hidden', !canVoid);
+    $('lgVoidLbl').classList.toggle('hidden', !canVoid);
     ['lgField', 'lgValue', 'lgReason', 'lgSave', 'lgOpen'].forEach(function (id) {
       const el = $(id);
       if (el.tagName === 'BUTTON' || el.tagName === 'INPUT') el.disabled = !r;
@@ -523,6 +545,18 @@ const TRIALS = {
       });
     };
     $('lgSave').onclick = TRIALS.saveEdit;
+    $('lgVoid').onclick = function () {
+      const reason = $('lgVoidReason').value.trim(), t = TRIALS.logSel;
+      if (!reason) { toast(T('err.reason')); $('lgVoidReason').focus(); return; }
+      if (!armed($('lgVoid'), T('step.ctl.void.sure', t))) return;
+      be('trial_void', t, reason, function (raw) {
+        const a = JSON.parse(raw);
+        if (failed(a)) return;
+        $('lgVoidReason').value = '';
+        toast(T('trials.voided', t), 3500);
+        TRIALS.loadLog();
+      });
+    };
     $('lgOpen').onclick = function () {
       if (TRIALS.log && TRIALS.logSel) ask('open_path', TRIALS.log.folder + '\\' + TRIALS.logSel);
     };

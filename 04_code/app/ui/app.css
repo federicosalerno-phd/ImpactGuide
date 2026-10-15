@@ -52,6 +52,14 @@
              background:var(--surface-0);align-self:flex-start}
 .preview .pi-row{background:var(--surface-2)}
 
+/* The guide fills the stage: the trial and its settings on top, then the step
+   to do now beside the list of all the steps, each column scrolling by itself,
+   so the step to do never leaves the screen. */
+.sheet-col.fill{height:100%}
+.split{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px);gap:12px}
+.split>*{min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.split-side{padding-right:4px}
+
 /* The steps of the trial: done, now, still to do. */
 #gSteps .mitem-name{display:flex;align-items:center;gap:9px}
 #gSteps .mitem.done .mitem-name{color:var(--text-3)}

@@ -93,7 +93,7 @@
 
         <!-- ── trials: the guide ───────────────────────────────────────── -->
         <div class="view" data-view="trials-guide">
-          <div class="sheet-col" id="guide">
+          <div class="sheet-col fill" id="guide">
             <div class="trial-head">
               <div class="trial-id" id="gId"></div>
               <div class="col grow">
@@ -103,14 +103,20 @@
             </div>
             <div class="tiles" id="gTiles"></div>
             <div class="col" id="gWarn"></div>
-            <div class="now card" id="gNow">
-              <div class="now-n" id="gNowN"></div>
-              <div class="now-t" id="gNowT"></div>
-              <div class="now-x" id="gNowX"></div>
-              <div class="preview hidden" id="gPrev"></div>
+            <div class="split">
+              <div class="split-main">
+                <div class="now card" id="gNow">
+                  <div class="now-n" id="gNowN"></div>
+                  <div class="now-t" id="gNowT"></div>
+                  <div class="now-x" id="gNowX"></div>
+                  <div class="preview hidden" id="gPrev"></div>
+                </div>
+              </div>
+              <div class="split-side">
+                <div class="sec-lbl" data-t="trials.steps.sec"></div>
+                <div class="mlist slim" id="gSteps"></div>
+              </div>
             </div>
-            <div class="sec-lbl" data-t="trials.steps.sec"></div>
-            <div class="mlist slim" id="gSteps"></div>
           </div>
           <div class="sheet-col hidden" id="guideDone">
             <div class="done-card card col">
@@ -122,9 +128,23 @@
 
         <!-- ── trials: the log ─────────────────────────────────────────── -->
         <div class="view" data-view="trials-log">
-          <div class="sheet-col">
-            <div class="mlist slim" id="logList"></div>
-            <div class="note" id="logNote"></div>
+          <div class="sheet-col fill">
+            <div class="split">
+              <div class="split-main">
+                <div class="mlist slim" id="logList"></div>
+                <div class="note" id="logNote"></div>
+              </div>
+              <div class="split-side">
+                <div class="card col">
+                  <div class="sec-lbl" id="lgDetail"></div>
+                  <div id="lgFields"></div>
+                </div>
+                <div class="card col">
+                  <div class="sec-lbl" data-t="log.edits.sec"></div>
+                  <div class="stack" id="lgEdits"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -298,14 +318,14 @@
           <div class="rp-sub" id="lgSub"></div>
         </div>
         <div class="rp-scroll stack">
-          <div id="lgFields"></div>
           <div class="sec-lbl" data-t="log.edit.sec"></div>
           <div class="combo" id="lgField" tabindex="0" role="button"><span class="combo-v"></span></div>
           <input class="input" type="text" id="lgValue" data-t-ph="log.edit.value"/>
           <input class="input" type="text" id="lgReason" data-t-ph="log.edit.reason"/>
           <button class="btn btn-2 btn-wide" id="lgSave"><span class="btn-label" data-t="log.edit.action"></span></button>
-          <div class="sec-lbl" data-t="log.edits.sec"></div>
-          <div class="stack" id="lgEdits"></div>
+          <div class="sec-lbl" id="lgVoidLbl" data-t="step.ctl.void.sec"></div>
+          <input class="input" type="text" id="lgVoidReason" data-t-ph="step.ctl.void.ph"/>
+          <button class="btn btn-danger btn-wide" id="lgVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide" id="lgOpen"><span data-icon="open"></span><span class="btn-label" data-t="log.open.action"></span></button>

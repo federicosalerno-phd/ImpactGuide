@@ -20,12 +20,16 @@ a later trial; a different setting done by mistake fills the matching slot.
 Reference scans precede the impact when the trial is the first of its phase or
 of its holder block, the previous trial has no post-impact scans, its cap moved
 more than 3 mm from where the last reference left it (A goes back with the
-jig, B is reseated by hand), the previous trial had the drape (taken off at its
-end), the session day changed, or the operator asks (e.g. after replacing the
-cap). Otherwise the post-impact scans of the previous trial give the
-pre-impact registration (log column pre_scan). The drape goes on before any
-reference scan and the impact, and comes off after the video, so scans, photos
-and video of a drape trial all see the same state.
+jig, B is reseated by hand), the session day changed, or the operator asks
+(e.g. after replacing the cap). Otherwise the post-impact scans of the previous
+trial give the pre-impact registration (log column pre_scan).
+
+Drape trials. The drape goes on before any reference scan and the impact.
+After the impact the photos and the video are taken with the drape, the drape
+comes off slowly without touching the marker, the photos and the video are
+taken again, and then come the scans. So the post-impact scans see the same
+state as the photos and the video without the drape, as in every other trial,
+and the next trial needs no reference scans because of the drape.
 
 Files, in 03_data/raw/<phase>/. Every name starts with the trial id, so a file
 stays identifiable outside its folder; names carry no conditions, which live in
@@ -45,6 +49,9 @@ the log and can be corrected there without touching raw files.
             t001_photo_az70.jpg
             t001_photo_az85.jpg
             t001_video.mp4           video from the arm, 35 to 95 degrees
+            t001_drape_photo_az40.jpg  drape trials only: photos and video
+            ...                        with the drape, before it comes off
+            t001_drape_video.mp4
     pilot/
         p001/                    the same, plus p001_highspeed.mp4
 
@@ -110,9 +117,10 @@ LOG_COLUMNS = (
     ("direction_deg", "deg", "start", "Impact direction: 0 frontal, 45, 90 lateral from the right"),
     ("washers_per_side", "", "start", "M8 washers on each side of the mass block"),
     ("swing_mass_g", "g", "start", "Weighed mass of the swinging part"),
-    ("drape", "0/1", "start", "1 if a drape covers part of the face from before the impact to after the video"),
+    ("drape", "0/1", "start", "1 if a drape covers part of the face from before the impact; photos and video are "
+     "taken with it, then again after taking it off, then the scans"),
     ("reference", "", "start", "Why reference scans precede the impact (first, holder, no_scan, reposition, "
-     "drape, session, manual; ';' separated); empty if none"),
+     "session, manual; ';' separated); empty if none"),
     ("pre_scan", "", "start", "Scans giving the pre-impact registration: <trial>_ref, or the previous trial "
      "(its post-impact scans)"),
     ("time_start", "ISO 8601", "start", "Trial opened"),
@@ -330,8 +338,9 @@ def write_templates(folder):
     write_csv(folder / "trial_log_dictionary.csv", [dict(zip(columns, c)) for c in LOG_COLUMNS], columns)
 
 
-def file_name(trial, kind, az=None, ref=False):
-    stem = f"{trial}_{'ref_' if ref else ''}{kind}" + ("" if az is None else f"_az{az}")
+def file_name(trial, kind, az=None, ref=False, drape=False):
+    """ref: reference scan before the impact; drape: photo or video taken with the drape on."""
+    stem = f"{trial}_{'ref_' if ref else ''}{'drape_' if drape else ''}{kind}" + ("" if az is None else f"_az{az}")
     return stem + SUFFIXES[kind][0]
 
 
@@ -469,7 +478,7 @@ def trial_steps(cfg, row, prev=None):
     drape = str(row["drape"]) == "1"
     if drape:
         s.append(Step("drape_on", "Lay the drape over part of the face, clear of the marker, the spheres and "
-                      "the pendulum path. It stays on until after the video."))
+                      "the pendulum path. It stays on for the first photos and video after the impact."))
     for az in cfg.scan_az if reasons else ():
         s.append(Step(f"ref_scan_az{az}", f"Reference scan: pendulum hooked up, arm at {az}°, panels off. "
                       "Scan and export.", (file_name(t, "scan", az, ref=True),)))
@@ -480,17 +489,31 @@ def trial_steps(cfg, row, prev=None):
                   "Stop it on the rebound (no second hit) and hook it up high.", fields=("time_impact",)))
     if cfg.highspeed:
         s.append(Step("highspeed", "Stop the side video and copy it.", (file_name(t, "highspeed"),)))
-    for az in cfg.scan_az:
-        s.append(Step(f"scan_az{az}", f"Scan: arm at {az}°, panels off. Scan and export.", (file_name(t, "scan", az),)))
-    s.append(Step("spheres", "Six spheres found? Cap shift since the last reference, in mm.", fields=ONLINE))
-    for az in cfg.photo_az:
-        s.append(Step(f"photo_az{az}", f"Photo: arm at {az}°, panels on. Shoot from the PC.", (file_name(t, "photo", az),)))
-    a, b = cfg.video_az
-    s.append(Step("video", f"Video: lift the index plunger and sweep the arm from end stop to end stop "
-                  f"({a}° to {b}°) in about {round((b - a) / VIDEO_SPEED)} s, then back to {cfg.photo_az[0]}°.",
-                  (file_name(t, "video"),)))
+
+    def scans():
+        for az in cfg.scan_az:
+            s.append(Step(f"scan_az{az}", f"Scan: arm at {az}°, panels off. Scan and export.",
+                          (file_name(t, "scan", az),)))
+        s.append(Step("spheres", "Six spheres found? Cap shift since the last reference, in mm.", fields=ONLINE))
+
+    def views(with_drape=False):
+        tag, what = ("drape_", " with the drape") if with_drape else ("", "")
+        for az in cfg.photo_az:
+            s.append(Step(f"{tag}photo_az{az}", f"Photo{what}: arm at {az}°, panels on. Shoot from the PC.",
+                          (file_name(t, "photo", az, drape=with_drape),)))
+        a, b = cfg.video_az
+        s.append(Step(f"{tag}video", f"Video{what}: lift the index plunger and sweep the arm from end stop to end "
+                      f"stop ({a}° to {b}°) in about {round((b - a) / VIDEO_SPEED)} s, then back to "
+                      f"{cfg.photo_az[0]}°.", (file_name(t, "video", drape=with_drape),)))
+
     if drape:
-        s.append(Step("drape_off", "Take the drape off; the next trial starts with reference scans."))
+        views(with_drape=True)
+        s.append(Step("drape_off", "Take the drape off slowly, without touching the marker or the pendulum."))
+        views()
+        scans()
+    else:
+        scans()
+        views()
     s.append(Step("close", "Check second hit, cap replaced and notes, then close the trial.",
                   fields=("second_hit", "cap_replaced", "time_end")))
     return s
@@ -563,19 +586,26 @@ class Run:
     def has_scans(self, trial):
         return all(self.find(trial, file_name(trial, "scan", az)) for az in self.config.scan_az)
 
-    def next(self, today=None, reference=None):
+    def next(self, today=None, reference=None, settings=None):
         """The trial to do now: the open one (resume, with the index of the step to resume from) or a
         plan for the next pending slot of the holder in use; None when the sequence is complete.
-        reference: a reason for reference scans chosen by the operator (e.g. "manual" after a new cap)."""
+        reference: a reason for reference scans chosen by the operator (e.g. "manual" after a new cap).
+        settings: holder, angle_deg, direction_deg and drape chosen by the operator instead of the next
+        slot (an extra trial); it fills a pending slot with the same cell, if any, or stays outside."""
         rows = self.log.rows()
         for r in rows:
             if r["status"] == OPEN:
                 return {**r, "resume": True, "step": self.resume_step(r["trial"]), "changes": [], "warnings": []}
         pending = self.pending()
-        if not pending:
-            return None
         prev = rows[-1] if rows else None
-        s = next((x for x in pending if prev and x["holder"] == prev["holder"]), pending[0])
+        if settings:
+            s = {k: str(settings[k]) for k in ("holder", "angle_deg", "direction_deg")}
+            s["drape"] = str(int(settings.get("drape") or 0))
+            s["slot"] = next((x["slot"] for x in pending if cell(x) == cell(s)), "")
+        elif not pending:
+            return None
+        else:
+            s = next((x for x in pending if prev and x["holder"] == prev["holder"]), pending[0])
         today = (today or date.today()).isoformat()
         plan = {"trial": self.new_id(), "phase": self.phase, "session": today, "holder": s["holder"],
                 "angle_deg": s["angle_deg"], "direction_deg": s["direction_deg"],
@@ -592,8 +622,6 @@ class Run:
                 warnings.append(f"cap shift of {prev['trial']} unknown: check the cap, ask for a reference if it moved")
             elif float(prev["cap_shift_mm"]) > self.config.reposition_mm:
                 reasons.append("reposition")
-            if prev["drape"] == "1":
-                reasons.append("drape")
             if prev["session"] != today:
                 reasons.append("session")
         if reference:
@@ -851,8 +879,6 @@ def run_test(work=WORK):
                 want.add("no_scan")
             elif float(prev["cap_shift_mm"]) > 3:
                 want.add("reposition")
-            if prev["drape"] == "1":
-                want.add("drape")
             if prev["session"] != day.isoformat():
                 want.add("session")
         ok_ref &= set(filter(None, plan["reference"].split(";"))) == want
@@ -898,7 +924,7 @@ def run_test(work=WORK):
         if k == 40:
             run.void(t, "scans exported from the wrong project")
         clock += timedelta(minutes=5)
-    expect(ok_ref, "reference scans exactly when due (first, holder, no_scan, reposition, drape, session)")
+    expect(ok_ref, "reference scans exactly when due (first, holder, no_scan, reposition, session)")
     expect(ok_pre, "pre_scan: own reference or previous trial")
     expect(first_b is not None and run.steps(first_b)[0].key == "holder", f"holder change at {first_b}")
     rows = run.log.rows()
@@ -909,6 +935,20 @@ def run_test(work=WORK):
            and all(sum(n for c, n in done.items() if c[0] == h and c[3]) == 12 for h in cfg.holders),
            f"valid trials: every cell twice and 12 drape trials per holder; {len(rows)} trials in all")
     expect(all(not t["problems"] for t in report["trials"]), "no problems in any trial")
+    dr = next(r["trial"] for r in rows if r["status"] == OK and r["drape"] == "1")
+    keys = [st.key for st in run.steps(dr)]
+    names = sorted(p.name for p in (raw / "campaign" / dr).iterdir())
+    expect(keys.index("drape_video") < keys.index("drape_off") < keys.index("photo_az40") < keys.index("video")
+           < keys.index("scan_az40") < keys.index("spheres")
+           and names == sorted(n for st in run.steps(dr) for n in st.files)
+           and len([n for n in names if "_ref_" not in n]) == 12
+           and file_name(dr, "photo", 40, drape=True) in names and file_name(dr, "video", drape=True) in names,
+           f"drape trial {dr}: photos and video with the drape, drape off, photos and video, then scans "
+           f"({len(names)} files)")
+    plain = next(r["trial"] for r in rows if r["status"] == OK and r["drape"] == "0")
+    keys = [st.key for st in run.steps(plain)]
+    expect(keys.index("spheres") < keys.index("photo_az40") and not any(k.startswith("drape") for k in keys),
+           f"trial without drape {plain}: scans, then photos and video")
     edits = run.log.edits()
     expect([(e["trial"], e["field"]) for e in edits] == [(edited, "angle_deg"), ("t040", "status")],
            f"audit trail: the angle of {edited} and the status of t040")

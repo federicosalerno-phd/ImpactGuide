@@ -17,3 +17,9 @@ torchvision==0.26.0+cu128
 # SAM 2.1 from the Meta repository (the sam2 package on PyPI is a third-party fork), without the CUDA
 # extension, which only the video predictor needs. Weights in C:\work\marker-impact\models\sam2
 sam-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+# ImpactGuide (04_code/app): the SlantUI window, and adb for the phone over USB (adbutils carries adb.exe).
+# During development SlantUI is installed editable from a local checkout: uv pip install -e <checkout>[shell]
+slantui[shell] @ git+https://github.com/federicosalerno-phd/SlantUI.git@1a4470e707e6209b52a1c3d842e630842660fe68
+PyQt6==6.11.0
+PyQt6-WebEngine==6.11.0
+adbutils==2.12.0

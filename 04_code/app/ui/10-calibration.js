@@ -52,7 +52,7 @@ const CAL = {
                     piRow('fx, fy', cifre(st.fx, 1) + ', ' + cifre(st.fy, 1) + ' px'),
                     piRow('cx, cy', cifre(st.cx, 1) + ', ' + cifre(st.cy, 1) + ' px'));
       } else {
-        card.append(E('div', 'note', T('cal.stored.none', mode)));
+        card.append(E('div', 'note', T('cal.stored.none')));
       }
       if (m.pending) {
         const ok = m.pending.rms_px < s.max_rms;
@@ -89,7 +89,7 @@ const CAL = {
       const it = E('div', 'mitem' + (fo.name === CAL.folder ? ' sel' : ''));
       const name = E('span', 'mitem-name', fo.name + ' ');
       name.append(E('span', 'mitem-det', T('cal.folders.n', fo.n)));
-      it.append(name, E('span', 'mbadge', fo.kind.toUpperCase()));
+      it.append(name, E('span', 'mbadge', hasT('cal.kind.' + fo.kind) ? T('cal.kind.' + fo.kind) : fo.kind.toUpperCase()));
       it.onclick = function () { CAL.folder = fo.name; CAL.render(CAL.state); };
       list.append(it);
     });

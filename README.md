@@ -8,9 +8,11 @@ calibration to the live AR overlay, the scans that measure where the marker
 went, the analysis and the charts.
 
 **Status: early.** The desktop app, built on
-[SlantUI](https://github.com/federicosalerno-phd/SlantUI), is being written and
-will live in `04_code/app`. What is here today is the code the app runs, which
-also works on its own, and the Blender model of the test bench.
+[SlantUI](https://github.com/federicosalerno-phd/SlantUI), is in `04_code/app`:
+today it guides the phone calibration and the impact trials; live AR, scans,
+analysis, charts and the dataset are the next pages. The code the app runs is
+in `04_code/src` and also works on its own. The Blender model of the test bench
+is in `02_cad`.
 
 ## The bench
 
@@ -28,6 +30,7 @@ also works on its own, and the Blender model of the test bench.
 
 | Path | What it holds |
 |---|---|
+| `04_code/app` | The ImpactGuide desktop app: the window, the bridge to the code in `04_code/src`, the page (`ui.html`, `ui/`), the words in English and Italian (`ui/strings`), the desktop launcher (`scripts`) and a test that runs whole trials with stand-in files |
 | `04_code/src` | Phone camera calibration with a ChArUco board, marker pose from one image, silhouette and edges of a mesh for the AR overlay, synthetic phone views of the bench with their ground truth, evaluation of the marker pose against it, mandible segmentation with SAM 2.1 |
 | `04_code/figures/style.py` | Shared matplotlib style for the charts: Abadi, column widths of 90, 140 and 190 mm, vector PDF with embedded fonts and 300 dpi PNG |
 | `04_code/tools/build_test_bench.py` | Builds the test bench in Blender from the dimensions in its `P` dictionary (mm) |
@@ -63,6 +66,31 @@ python 04_code/src/eval_marker_pose.py
 Each script explains its options in its docstring. Intermediate files go to
 `C:\work\marker-impact` by default; the paths are constants at the top of each
 script.
+
+## The app
+
+```
+python 04_code/app/impactguide_app.py
+python 04_code/app/impactguide_app.py --simulate SOME_EMPTY_FOLDER
+python 04_code/app/test_app.py [--ui PICTURES_FOLDER]
+powershell -ExecutionPolicy Bypass -File 04_code/app/scripts/install_shortcut.ps1
+```
+
+The first line opens the app on the project's data (`03_data`); `--simulate`
+keeps everything in the given folder and stands in for the phone and the
+scanner, so the app can be tried without the bench. `test_app.py` runs whole
+trials through the app's backend, and with `--ui` through the real window,
+pressing the page's buttons. The last line puts an icon on the desktop.
+
+The trial page follows the seeded sequence of `04_code/src/trials.py`: each
+step is confirmed with a button, photos and videos are shot from the PC over
+USB, exported scans are picked up from the scanner's export folder, every file
+gets its name from the trial and the step, and the log row is written at the
+end. Logged values can be corrected later, with a reason, in an audit trail;
+raw files are never overwritten. After a closed app the open trial resumes
+where it stopped. The phone needs USB debugging on and the camera app open,
+with the volume key set as the shutter; `adb` comes with the `adbutils`
+package.
 
 ## License
 

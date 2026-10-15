@@ -134,6 +134,18 @@ function showPanel(name) {
   document.querySelectorAll('.rp-page').forEach(function (p) { p.classList.toggle('show', p.dataset.panel === name); });
 }
 
+// Home is the guide of the trials, where the work at the bench happens. The way
+// back to it is SlantUI's: the mark on the band becomes a button, and only
+// while there is somewhere to go back to.
+function goHome() {
+  trialsView = 'guide';
+  go('trials');
+}
+function showHome() {
+  const home = page === 'trials' && trialsView === 'guide';
+  setBrandAction(home ? null : goHome, T('win.home.hint'));
+}
+
 function go(p) {
   if (PAGES.indexOf(p) < 0) p = 'trials';
   page = p;
@@ -143,6 +155,7 @@ function go(p) {
   document.querySelectorAll('.tool-group').forEach(function (g) { g.classList.toggle('hidden', g.dataset.for !== p); });
   $('where').textContent = '';
   be('set_page', p);
+  showHome();
   if (p === 'calibration') { showView('calibration'); showPanel('calibration'); $('hint').textContent = T('cal.hint'); CAL.enter(); return; }
   if (p === 'trials') { TRIALS.enter(); return; }
   showView('soon');
