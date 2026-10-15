@@ -1,5 +1,6 @@
 // ImpactGuide · the Live AR page: the phone's stream with the board pose and
-// the face overlay, the status light, fps and latency. The work is live_ar.py's:
+// the face overlay, the status light, fps and latency, and the opacity of what
+// is drawn over the picture. The work is live_ar.py's:
 // the backend composes the frames and serves them on 127.0.0.1; the page shows
 // them and asks for the rest.
 
@@ -7,6 +8,8 @@ const LIVE = {
   state: null,
   timer: null,
   src: '',          // the address of the frames while the view runs, '' otherwise
+  sliding: false,   // the opacity slider is being moved
+  sentAt: 0,        // when the opacity was last sent
 
   enter: function () {
     LIVE.refresh();
@@ -63,7 +66,7 @@ const LIVE = {
     const size = s.intrinsics.size;
     $('where').textContent = T(s.synthetic ? 'live.where.sim' : 'live.where', size[0], size[1]);
 
-    // over the picture: a link that dropped, what is not real yet, the light, the pace
+    // over the picture: a link that dropped, what is not real yet, the light and why, the pace
     const reg = s.registration, tags = [];
     if (s.link_waiting) tags.push([T('live.waiting'), true]);
     if (!s.models.face) tags.push([T('live.tag.nomodel')]);
@@ -75,78 +78,66 @@ const LIVE = {
     const word = s.tracked ? T('live.light.tracked') : T(s.corners ? 'live.light.weak' : 'live.light.none');
     $('lvDot').className = 'live-dot' + (on && s.tracked ? ' ok' : '');
     $('lvLight').textContent = word;
-    const lat = s.latency || {};
-    const measured = lat.stream_ms !== null && lat.stream_ms !== undefined;
-    $('lvRate').textContent = on && s.fps_ar ? T(measured ? 'live.rate' : 'live.rate.pc', cifre(s.fps_ar, 0), cifre(lat.total_ms || 0, 0)) : '';
-
-    // the panel: the board
-    $('lvStDot').className = 'live-dot' + (on && s.tracked ? ' ok' : '');
-    $('lvStWord').textContent = on ? word : T('live.idle.title');
-    const b = s.board, rows = [];
-    if (on) {
-      rows.push(piRow(T('live.f.corners'), T('live.f.corners.v', s.corners || 0, b.corners, s.markers || 0)));
-      rows.push(piRow(T('live.f.rms', cifre(s.rms_limit_px, 0)), s.rms_px === null || s.rms_px === undefined ? '-'
-        : T('live.f.px', cifre(s.rms_px, 2))));
-      if (s.distance_mm) rows.push(piRow(T('live.f.distance'), T('live.f.distance.v', cifre(s.distance_mm, 0), cifre(s.tilt_deg, 0))));
-    }
-    $('lvStatus').replaceChildren.apply($('lvStatus'), rows);
     let why = '';
     if (on && !s.tracked && s.corners) {
       why = s.corners < s.min_corners ? T('live.why.corners', s.min_corners) : T('live.why.rms', cifre(s.rms_limit_px, 0));
     }
     $('lvWhy').textContent = why;
     $('lvWhy').classList.toggle('hidden', !why);
+    const lat = s.latency || {};
+    const measured = lat.stream_ms !== null && lat.stream_ms !== undefined;
+    $('lvRate').textContent = on && s.fps_ar ? T(measured ? 'live.rate' : 'live.rate.pc', cifre(s.fps_ar, 0), cifre(lat.total_ms || 0, 0)) : '';
+    $('lvRate').title = !on ? '' : s.synthetic ? T('live.f.latency.note.sim', cifre(lat.processing_ms || 0, 0))
+      : !measured ? T('live.f.latency.note.wifi', cifre(lat.processing_ms || 0, 0))
+      : T('live.f.latency.note', cifre(lat.stream_ms || 0, 0), cifre(lat.processing_ms || 0, 0));
 
-    // the panel: the pace
-    const speed = [];
-    if (on) {
-      const tm = s.timings || {};
-      // the video keeps the stream's rate; the board pose is found as often as the computer allows
-      speed.push(piRow(T('live.f.stream'), T('live.f.fps', cifre(s.fps_stream, 1))),
-                 piRow(T('live.f.video'), T('live.f.fps', cifre(s.fps_ar || 0, 1))),
-                 piRow(T('live.f.poses'), T('live.f.fps', cifre(s.fps_pose || 0, 1))),
-                 piRow(T('live.f.latency'), T('live.f.ms', cifre(lat.total_ms || 0, 0))),
-                 piRow(T('live.f.pose'), T('live.f.ms', cifre((tm.detect_ms || 0) + (tm.pose_ms || 0), 0))),
-                 piRow(T('live.f.drawing'), T('live.f.ms', cifre((tm.render_ms || 0) + (tm.draw_ms || 0), 0))));
-      $('lvLatency').textContent = s.synthetic ? T('live.f.latency.note.sim', cifre(lat.processing_ms || 0, 0))
-        : !measured ? T('live.f.latency.note.wifi', cifre(lat.processing_ms || 0, 0))
-        : T('live.f.latency.note', cifre(lat.stream_ms || 0, 0), cifre(lat.processing_ms || 0, 0));
-    } else {
-      $('lvLatency').textContent = '';
-    }
-    $('lvSpeed').replaceChildren.apply($('lvSpeed'), speed);
-    $('lvLatency').classList.toggle('hidden', !on);
-    $('lvSpeedLbl').classList.toggle('hidden', !on);
-
-    // the panel: board, registration, camera
+    // the panel: the board in use, and the calibration board's controls when it is that one
+    const b = s.board;
     $('lvBoard').value = s.prefs.board;
-    $('lvBoardNote').textContent = T('live.board.note', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
-                                     cifre(b.marker_mm, b.marker_mm % 1 ? 2 : 0), b.dictionary)
-      + (b.name === 'sheet' ? ' ' + T('live.board.note.sheet') : '');
-    // the calibration board: on a monitor or printed, the same controls as on the Calibration page
+    $('lvBoard').title = T('live.board.note', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
+                           cifre(b.marker_mm, b.marker_mm % 1 ? 2 : 0), b.dictionary);
     $('lvBd').classList.toggle('hidden', s.prefs.board !== 'sheet');
     BOARD.render(s.board_ui);
-    let r = reg.source === 'file' ? T('live.reg.file', reg.path) : T('live.reg.demo.' + (reg.demo || 'lying'));
-    if (reg.error) r = T('live.reg.error', LIVE.name(s.prefs.registration)) + ' ' + r;
-    $('lvRegNote').textContent = r;
+    if (s.prefs.board !== 'sheet') $('lvBdMore').classList.add('hidden');
+
+    // the panel: how strongly the virtual elements are drawn
+    const op = $('lvOpacity');
+    if (typeof s.opacity === 'number' && !LIVE.sliding && Date.now() - LIVE.sentAt > 1500) op.value = s.opacity;
+    $('lvOpacityV').textContent = cifre(100 * Number(op.value), 0) + ' %';
+
+    // Advanced: the board, the pace and the link while the view runs; the registration; the camera
+    const rows = [];
+    if (on) {
+      const tm = s.timings || {}, ln = s.phone_link || {};
+      rows.push(piRow(T('live.f.corners'), T('live.f.corners.v', s.corners || 0, b.corners, s.markers || 0)),
+                piRow(T('live.f.rms', cifre(s.rms_limit_px, 0)), s.rms_px === null || s.rms_px === undefined ? '-'
+                  : T('live.f.px', cifre(s.rms_px, 2))));
+      if (s.distance_mm) rows.push(piRow(T('live.f.distance'), cifre(s.distance_mm, 0) + ' mm'), piRow(T('live.f.tilt'), cifre(s.tilt_deg, 0) + '°'));
+      // the video keeps the stream's rate; the board pose is found as often as the computer allows
+      rows.push(piRow(T('live.f.stream'), T('live.f.fps', cifre(s.fps_stream, 1))),
+                piRow(T('live.f.video'), T('live.f.fps', cifre(s.fps_ar || 0, 1))),
+                piRow(T('live.f.poses'), T('live.f.fps', cifre(s.fps_pose || 0, 1))),
+                piRow(T('live.f.latency'), T('live.f.ms', cifre(lat.total_ms || 0, 0))),
+                piRow(T('live.f.pose'), T('live.f.ms', cifre((tm.detect_ms || 0) + (tm.pose_ms || 0), 0))),
+                piRow(T('live.f.drawing'), T('live.f.ms', cifre((tm.render_ms || 0) + (tm.draw_ms || 0), 0))));
+      const lw = T('link.btn.' + (ln.mode === 'wifi' ? 'wifi' : 'usb'));
+      rows.push(piRow(T('live.f.link'), ln.state === 'ready'
+        ? (ln.rtt_ms === null || ln.rtt_ms === undefined ? lw : T('live.f.link.v', lw, cifre(ln.rtt_ms, 0)))
+        : lw + ' · ' + T('link.state.' + (hasT('link.state.' + ln.state) ? ln.state : 'unknown'))));
+    }
+    $('lvStatus').replaceChildren.apply($('lvStatus'), rows);
+    $('lvStatusLbl').classList.toggle('hidden', !on);
+    const regRow = piRow(T('live.reg.now'), reg.source === 'file' ? LIVE.name(reg.path) : T('live.reg.demo.' + (reg.demo || 'lying')));
+    regRow.title = reg.source === 'file' ? reg.path : T('live.reg.demo.hint');
+    $('lvReg').replaceChildren(regRow);
+    if (reg.error) $('lvReg').append(E('div', 'callout callout-warn', T('live.reg.error', LIVE.name(s.prefs.registration))));
     $('lvRegDemo').disabled = reg.source !== 'file' && !s.prefs.registration;
     const c = s.intrinsics;
-    if (c.source === 'calibrated') {
-      $('lvCamNote').textContent = T('live.cam.calibrated', c.date || '-', cifre(c.f, 1), c.rms_px === null ? '-' : cifre(c.rms_px, 3));
-      $('lvCamPath').textContent = c.path;
-    } else {
-      $('lvCamNote').textContent = T('live.cam.nominal', cifre(c.f, 0), c.size[0], c.size[1]);
-      $('lvCamPath').textContent = s.intrinsics_file;
-    }
-
-    // the panel: the phone, its link and its own screen
-    const ln = s.phone_link || {}, pv = s.phone_view || {}, ph = [];
-    const lw = T('link.btn.' + (ln.mode === 'wifi' ? 'wifi' : 'usb'));
-    ph.push(piRow(T('live.f.link'), ln.state === 'ready'
-      ? (ln.rtt_ms === null || ln.rtt_ms === undefined ? lw : T('live.f.link.v', lw, cifre(ln.rtt_ms, 0)))
-      : lw + ' · ' + T('link.state.' + (hasT('link.state.' + ln.state) ? ln.state : 'unknown'))));
-    if (pv.viewers) ph.push(piRow(T('view.f.fps'), T('live.f.fps', cifre(pv.fps || 0, 1))));
-    $('lvPhone').replaceChildren.apply($('lvPhone'), ph);
+    const camRow = piRow(T('live.cam.now'), c.source === 'calibrated' ? T('live.cam.calibrated', c.date || '-') : T('live.cam.nominal'));
+    camRow.title = c.source === 'calibrated'
+      ? T('live.cam.calibrated.hint', cifre(c.f, 1), c.rms_px === null ? '-' : cifre(c.rms_px, 3)) + ' · ' + c.path
+      : T('live.cam.nominal.hint', cifre(c.f, 0), c.size[0], c.size[1]) + ' · ' + s.intrinsics_file;
+    $('lvCam').replaceChildren(camRow);
 
     // the toolbar and the footer
     document.querySelectorAll('.layer-btn').forEach(function (btn) {
@@ -157,6 +148,22 @@ const LIVE = {
     $('lvStart').classList.toggle('hidden', s.running);
     $('lvStop').classList.toggle('hidden', !s.running);
     $('lvStart').disabled = starting;
+  },
+
+  // The opacity of the virtual elements, 0 to 1, as the live setting `opacity`: sent while the slider
+  // moves (at most every 150 ms) and when it is let go; the backend keeps it for the next session. Once
+  // let go, the slider follows the value the live view reports.
+  opacity: function (final) {
+    const v = Math.round(Number($('lvOpacity').value) * 100) / 100;
+    $('lvOpacityV').textContent = cifre(100 * v, 0) + ' %';
+    clearTimeout(LIVE._opTimer);
+    const send = function () {
+      LIVE.sentAt = Date.now();
+      LIVE._opLast = LIVE.sentAt;
+      ask('live_settings', JSON.stringify({ opacity: v }), function (s) { if (s && page === 'live') LIVE.render(s); });
+    };
+    if (final || Date.now() - (LIVE._opLast || 0) > 150) send();
+    else LIVE._opTimer = setTimeout(send, 150);
   },
 
   start: function () {
@@ -204,6 +211,7 @@ const LIVE = {
     $('lvStop').onclick = LIVE.stop;
     $('lvRegLoad').onclick = function () { ask('live_registration_load', function (s) { if (s) LIVE.render(s); }); };
     $('lvRegDemo').onclick = function () { ask('live_registration_demo', function (s) { if (s) LIVE.render(s); }); };
-    $('lvPhoneBtn').onclick = function () { if (!LINK.open) LINK.show(); };
+    $('lvOpacity').oninput = function () { LIVE.sliding = true; LIVE.opacity(false); };
+    $('lvOpacity').onchange = function () { LIVE.sliding = false; LIVE.opacity(true); };
   },
 };

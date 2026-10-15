@@ -32,9 +32,8 @@ const CAL = {
       CAL.folder = mine ? mine.name : (s.folders[0] ? s.folders[0].name : '');
     }
     const f = CAL.folderOf(s);
-    $('where').textContent = s.raw;
 
-    // the two camera modes
+    // the two camera modes: stored or not, the date, the error and the photos; the rest on hover
     const host = $('calModes');
     host.replaceChildren();
     ['photo', 'video'].forEach(function (mode) {
@@ -42,18 +41,15 @@ const CAL = {
       const card = E('div', 'card col');
       const head = E('div', 'row');
       head.append(E('div', 'sec-lbl grow', T('cal.mode.' + mode)));
-      head.append(chip(st ? T('cal.stored.yes') : T('cal.stored.no'), st ? 'accent' : 'warn'));
       if (chk) head.append(chip(T(chk.ok === '1' ? 'cal.check.ok' : 'cal.check.failed', quando(chk.time)), chk.ok === '1' ? '' : 'err'));
+      head.append(chip(st ? T('cal.stored.yes') : T('cal.stored.no'), st ? 'accent' : 'warn'));
       card.append(head);
       if (st) {
         card.append(piRow(T('cal.f.date'), st.date),
                     piRow(T('cal.f.rms'), cifre(st.rms_px, 3) + ' px'),
-                    piRow(T('cal.f.views'), st.n_views + ' (' + st.n_corners + ' ' + T('cal.f.corners') + ')'),
-                    piRow(T('cal.f.size'), st.image_size[0] + ' × ' + st.image_size[1] + ' px'),
-                    piRow('fx, fy', cifre(st.fx, 1) + ', ' + cifre(st.fy, 1) + ' px'),
-                    piRow('cx, cy', cifre(st.cx, 1) + ', ' + cifre(st.cy, 1) + ' px'));
-      } else {
-        card.append(E('div', 'note', T('cal.stored.none')));
+                    piRow(T('cal.f.views'), st.n_views));
+        card.title = st.image_size[0] + ' × ' + st.image_size[1] + ' px · fx, fy ' + cifre(st.fx, 1) + ', ' + cifre(st.fy, 1)
+          + ' · cx, cy ' + cifre(st.cx, 1) + ', ' + cifre(st.cy, 1) + ' · ' + st.n_corners + ' ' + T('cal.f.corners');
       }
       if (m.pending) {
         const ok = m.pending.rms_px < s.max_rms;
@@ -63,37 +59,34 @@ const CAL = {
       host.append(card);
     });
 
-    // the board the photos are of: the active one (a folder keeps the one it was made with)
+    // the board the photos are of: chosen in the panel; the printed one's details under Advanced
     const a = s.active;
     $('calBoard').replaceChildren(
-      piRow(T('cal.board.kind'), a.kind === 'screen' ? T('board.kind.screen') + ' · ' + (a.monitor_label || '')
-                                                     : T('board.kind.printed')),
       piRow(T('cal.board.squares'), a.squares[0] + ' × ' + a.squares[1]),
-      piRow(T('cal.board.square'), cifre(a.square_mm, 2) + ' mm'),
       piRow(T('cal.board.marker'), cifre(a.marker_mm, 2) + ' mm'),
       piRow(T('cal.board.dict'), a.dictionary));
     $('calBoardPrint').classList.toggle('hidden', a.kind === 'screen');
     $('calBoardOpen').disabled = !s.board_file;
     BOARD.render(s.board_ui);
 
-    // the last run
+    // the last run, once there is one
     const last = CAL.last;
+    $('calLast').classList.toggle('hidden', !last);
     $('calLastHead').replaceChildren();
     if (last) {
       $('calLastHead').append(chip(T('cal.last.' + last.action) + ' · ' + T('cal.mode.' + last.mode),
                                    last.ok ? 'accent' : 'err'));
       $('calLog').textContent = last.log || last.message || '';
-    } else {
-      $('calLog').textContent = T('cal.last.none');
     }
 
-    // the folders
+    // the folders: the one chosen is where the photos go
     const list = $('calFolders');
     list.replaceChildren();
     s.folders.forEach(function (fo) {
       const it = E('div', 'mitem' + (fo.name === CAL.folder ? ' sel' : ''));
       const name = E('span', 'mitem-name', fo.name + ' ');
-      name.append(E('span', 'mitem-det', T('cal.folders.n', fo.n)));
+      name.append(E('span', 'mitem-det', T('cal.folders.n', fo.n)
+        + (fo.board ? ' · ' + T('board.desc.' + (fo.board.kind === 'screen' ? 'screen' : 'printed')) : '')));
       it.append(name, E('span', 'mbadge', hasT('cal.kind.' + fo.kind) ? T('cal.kind.' + fo.kind) : fo.kind.toUpperCase()));
       it.onclick = function () { CAL.folder = fo.name; CAL.render(CAL.state); };
       list.append(it);
@@ -102,16 +95,13 @@ const CAL = {
 
     // the panel
     $('calMode').value = s.mode;
-    $('calFolder').textContent = f ? f.name : T('cal.folder.none');
-    $('calFolderBoard').textContent = f && f.board ? T('cal.folder.board', T('board.kind.' + f.board.kind),
-      f.board.squares[0], f.board.squares[1], cifre(f.board.square_mm, 2)) : '';
-    $('calFolderBoard').classList.toggle('hidden', !(f && f.board));
-    $('calCount').textContent = f ? String(f.n) : '0';
+    $('calFolder').textContent = f ? f.path : T('cal.folder.none');
     const busyNow = s.busy.indexOf('calibration') >= 0;
     $('calShoot').disabled = !f;
     $('calImport').disabled = !f;
     $('calOpen').disabled = !f;
     $('calRun').disabled = !f || f.n < s.min_views || busyNow;
+    $('calRun').title = f && f.n < s.min_views ? T('cal.run.few', s.min_views) : '';
     $('calCheck').disabled = !f || !s.modes[s.mode].stored || busyNow;
     $('calSave').classList.toggle('hidden', !s.modes[s.mode].pending);
   },

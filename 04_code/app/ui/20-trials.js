@@ -20,7 +20,6 @@ const TRIALS = {
     showHome();
     document.querySelectorAll('.view-btn').forEach(function (b) { b.classList.toggle('on', b.dataset.view === v); });
     showView('trials-' + v);
-    $('hint').textContent = T('trials.hint.' + v);
     if (v === 'guide') TRIALS.refresh();
     else if (v === 'log') TRIALS.loadLog();
     else if (v === 'sequence') TRIALS.loadSeq();
@@ -80,12 +79,10 @@ const TRIALS = {
 
     // the head
     $('gId').textContent = t.trial;
-    $('gSub').textContent = (t.slot ? T('trials.slot', t.slot, s.totals.slots) : T('trials.extra'))
-      + ' · ' + T('phase.' + s.phase);
+    $('gSub').textContent = t.slot ? T('trials.slot', t.slot, s.totals.slots) : T('trials.extra');
     const chips = $('gChips');
     chips.replaceChildren();
-    if (!t.open) chips.append(chip(T('trials.chip.next'), 'accent'));
-    else chips.append(chip(T(t.resumed ? 'trials.chip.resumed' : 'trials.chip.open', quando(t.time_start)), 'accent'));
+    if (t.open) chips.append(chip(T(t.resumed ? 'trials.chip.resumed' : 'trials.chip.open', quando(t.time_start)), 'accent'));
     const reasons = (t.reference || '').split(';').filter(Boolean);
     if (reasons.length) chips.append(chip(T('trials.chip.reference', reasons.map(function (r) { return T('ref.' + r); }).join(', '))));
     if (String(t.drape) === '1') chips.append(chip(T('trials.chip.drape'), 'warn'));
@@ -128,7 +125,7 @@ const TRIALS = {
       $('gNowT').textContent = TRIALS.stepTitle(st);
       $('gNowX').textContent = TRIALS.stepText(st, s);
       const staged = s.staged[st.key];
-      if (st.files.length && !st.done) $('gNowX').textContent += ' ' + T('trials.now.file', st.files[0]);
+      $('gNowT').title = st.files.join(', ');
       if (staged) TRIALS.preview(prev, staged);
       else if (st.done && st.files.length) {
         prev.append(piRow(T('trials.file.kept'), st.files[0]));
@@ -137,6 +134,7 @@ const TRIALS = {
     } else {
       $('gNowN').textContent = T('trials.now.plan');
       $('gNowT').textContent = T('trials.now.plan.t', t.trial);
+      $('gNowT').title = '';
       const files = steps.reduce(function (n, x) { return n + x.files.length; }, 0);
       $('gNowX').textContent = T('trials.now.plan.x', steps.length, files);
     }
@@ -181,12 +179,12 @@ const TRIALS = {
   renderPlan: function (s) {
     const t = s.trial;
     if (!t) {
-      $('planSub').textContent = T('trials.complete.title');
+      $('planSub').textContent = '';
       $('planStart').disabled = true;
       $('planStartL').textContent = T('trials.plan.start', '');
       return;
     }
-    $('planSub').textContent = t.slot ? T('trials.plan.sub', t.trial, t.slot) : T('trials.plan.sub.extra', t.trial);
+    $('planSub').textContent = t.slot ? '' : T('trials.extra');
     $('planRef').checked = !!s.options.reference;
     if (document.activeElement !== $('planMass')) $('planMass').value = t.swing_mass_g || '';
     $('planMass').placeholder = T('trials.plan.mass.ph');
@@ -233,15 +231,14 @@ const TRIALS = {
     const staged = s.staged[st.key];
     const kind = st.kind;
     $('stTitle').textContent = T('trials.now.n', s.step + 1, s.steps.length);
-    $('stSub').textContent = t.trial + ' · ' + TRIALS.stepTitle(st);
-    const show = {
-      photo: ['photo', 'file'], video: ['video', 'file'], scan: ['scan', 'file'], highspeed: ['file'],
-      spheres: ['spheres'], close: ['close'],
-    }[kind] || [];
+    $('stSub').textContent = t.trial;
+    // in plain view what this step asks for; importing a file by hand, the scanner folder and voiding under Advanced
+    const show = [kind].concat(staged ? ['staged'] : []);
     document.querySelectorAll('#stBody [data-kind]').forEach(function (b) {
       b.classList.toggle('hidden', show.indexOf(b.dataset.kind) < 0);
     });
-    $('stDiscard').classList.toggle('hidden', !staged);
+    $('stImport').classList.toggle('hidden', ['photo', 'video', 'scan'].indexOf(kind) < 0 || !!staged || st.done);
+    $('stImportHs').disabled = !!staged || st.done;
     const recording = s.recording === st.key;
     $('stRecL').textContent = T(recording ? 'step.ctl.stop' : 'step.ctl.record');
     $('stRec').classList.toggle('on', recording);
@@ -256,7 +253,8 @@ const TRIALS = {
     $('stOk').disabled = fileStep && !staged && !st.done;
     $('stBack').disabled = s.step === 0;
     $('stScanner').textContent = s.scanner_folder || T('trials.scanner.none');
-    $('stScannerBtn').classList.toggle('hidden', !!s.simulate);
+    $('stScannerBtn').classList.toggle('hidden', !!s.simulate || !!s.scanner_folder);
+    $('stScannerBtn2').classList.toggle('hidden', !!s.simulate);
     const waiting = kind === 'scan' && !staged && !st.done;
     $('stWait').classList.toggle('hidden', !waiting || !s.scanner_folder);
     if (waiting && s.scanner_folder && s.watching !== st.key) ask('scan_watch', st.key);
@@ -346,7 +344,6 @@ const TRIALS = {
     const r = L.rows.find(function (x) { return x.trial === TRIALS.logSel; });
     $('lgTitle').textContent = r ? r.trial : T('trials.view.log');
     $('lgSub').textContent = r ? T('status.' + r.status) + ' · ' + r.session : T('log.none');
-    $('lgDetail').textContent = r ? T('log.detail', r.trial) : T('log.none');
     const fields = $('lgFields');
     fields.replaceChildren();
     const editable = L.columns.filter(function (c) { return c.name !== 'trial' && c.name !== 'phase'; });
@@ -508,6 +505,7 @@ const TRIALS = {
     const chooseFolder = function () { ask('choose_scanner_folder', function (s) { if (s) TRIALS.render(s); }); };
     $('planScannerBtn').onclick = chooseFolder;
     $('stScannerBtn').onclick = chooseFolder;
+    $('stScannerBtn2').onclick = chooseFolder;
     $('stShoot').onclick = function () {
       const st = TRIALS.state.steps[TRIALS.state.step];
       ask('step_shoot', st.key, function (a) { if (a) work(true, T('pill.shooting')); });
@@ -525,6 +523,7 @@ const TRIALS = {
       const st = TRIALS.state.steps[TRIALS.state.step];
       ask('step_import', st.key, function (a) { if (a && a.trial) TRIALS.render(a); });
     };
+    $('stImportHs').onclick = $('stImport').onclick;
     $('stDiscard').onclick = function () {
       const st = TRIALS.state.steps[TRIALS.state.step];
       ask('step_discard', st.key, function (a) { if (a) TRIALS.render(a); });

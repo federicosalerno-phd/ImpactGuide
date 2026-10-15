@@ -1,8 +1,10 @@
 // ImpactGuide · the calibration board: on a monitor (the default) or printed.
 // The same controls sit on the Calibration page and on the Live AR page (ids
 // starting with cal and lv); both pages hand this part the backend's board
-// state with their own, and it draws both copies. The work is screen_board.py's
-// and the backend's: the page shows, chooses and asks.
+// state with their own, and it draws both copies. In plain view: the kind, the
+// square, what needs doing and Show board; the monitor and the ruler check sit
+// in the page's Advanced part. The work is screen_board.py's and the backend's:
+// the page shows, chooses and asks.
 
 // The sign of a monitor, on SlantUI's 24 grid.
 ICONS.screen = { s: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/>' };
@@ -10,17 +12,18 @@ ICONS.screen = { s: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path 
 const BOARD = {
   state: null,
   copies: ['cal', 'lv'],
-  more: {},          // the Advanced part of each copy, open or not (closed at start)
 
   // a length as the language writes it: one decimal, or two for a square
   mm: function (v, n) { return cifre(v, n === undefined ? 1 : n); },
 
+  // a monitor in the list: its name and size; the pixels and which one is the main one on hover
   monitorLabel: function (m, i) {
     const parts = [m.label || T('board.monitor.sec') + ' ' + (i + 1)];
     if (m.diag_in) parts.push(cifre(m.diag_in, 1) + '″');
-    parts.push(m.px[0] + ' × ' + m.px[1]);
-    if (m.primary) parts.push(T('board.monitor.main'));
     return parts.join(' · ');
+  },
+  monitorHint: function (m) {
+    return m ? m.px[0] + ' × ' + m.px[1] + (m.primary ? ' · ' + T('board.monitor.main') : '') : '';
   },
 
   render: function (s) {
@@ -34,30 +37,33 @@ const BOARD = {
     document.querySelectorAll('#' + p + 'BdKinds .mitem').forEach(function (it) {
       it.classList.toggle('sel', it.dataset.kind === s.kind);
     });
-    $(p + 'BdScreen').classList.toggle('hidden', !screen);
     $(p + 'BdPrinted').classList.toggle('hidden', screen);
+    $(p + 'BdMore').classList.toggle('hidden', !screen);
 
     // on a monitor: which one, what the board is there, how sure its size is
     const mons = s.monitors || [];
     setOptions($(p + 'BdMonitor'), mons.length ? mons.map(BOARD.monitorLabel) : [T('board.monitor.none')],
                mons.length ? mons.map(function (m) { return m.key; }) : ['']);
     $(p + 'BdMonitor').value = s.monitor || '';
-    const m = s.mon, lay = s.layout, rows = [];
+    $(p + 'BdMonitor').title = BOARD.monitorHint(s.mon);
+    const m = s.mon, lay = s.layout, rows = [], pr = s.printed;
+    const square = screen ? (lay ? lay.square_mm : null) : pr.square_mm;
     $(p + 'BdSquare').replaceChildren.apply($(p + 'BdSquare'),
-      lay ? [piRow(T('board.f.square'), BOARD.mm(lay.square_mm, 2) + ' mm')] : []);
+      square ? [piRow(T('board.f.square'), BOARD.mm(square, 2) + ' mm')] : []);
     if (lay) {
       rows.push(piRow(T('board.f.board'), T('board.f.board.v', lay.squares[0], lay.squares[1],
                                             BOARD.mm(lay.width_mm), BOARD.mm(lay.height_mm))),
-                piRow(T('board.f.pitch'), cifre(lay.pitch_mm, 4) + ' mm · ' + T('board.src.' + m.source)));
+                piRow(T('board.f.pitch'), cifre(lay.pitch_mm, 4) + ' mm'));
+      rows[rows.length - 1].title = T('board.src.' + m.source);
     }
     $(p + 'BdRows').replaceChildren.apply($(p + 'BdRows'), rows);
-    $(p + 'BdMore').classList.toggle('hidden', !BOARD.more[p]);
-    $(p + 'BdMoreBtn').classList.toggle('on', !!BOARD.more[p]);
     // how sure the size is, in the Advanced part; what needs doing, in plain view
     let sure = '', warn = '';
     if (m && lay && m.source !== 'none' && m.source !== 'ruler') sure = T('board.sure.data', BOARD.mm(lay.width_mm), BOARD.mm(lay.width_u_mm));
     $(p + 'BdSure').textContent = sure;
-    if (!m) warn = T('board.err.no_monitor');
+    $(p + 'BdSure').classList.toggle('hidden', !sure);
+    if (!screen) warn = '';
+    else if (!m) warn = T('board.err.no_monitor');
     else if (s.error === 'too_small') warn = T('board.err.small');
     else if (!m.is_native && m.native) warn = T('board.warn.native', m.native[0], m.native[1]);
     else if (m.source === 'none') warn = T('board.sure.unknown');
@@ -69,6 +75,7 @@ const BOARD = {
     show.querySelector('.btn-label').textContent = T(s.shown ? 'board.hide' : 'board.show');
     show.classList.toggle('on', !!s.shown);
     show.disabled = !lay;
+    show.classList.toggle('hidden', !screen);
 
     // the ruler check, once per monitor
     const ruler = $(p + 'BdRuler');
@@ -80,10 +87,9 @@ const BOARD = {
     $(p + 'BdForget').classList.toggle('hidden', !(m && m.ruler));
     ruler.disabled = !lay;
 
-    // printed: the length measured between the arrows of the sheet, the square from it
-    const pr = s.printed, long = $(p + 'BdLong');
+    // printed: the length measured between the arrows of the sheet; the square is worked out from it
+    const long = $(p + 'BdLong');
     if (document.activeElement !== long) long.value = Math.round(pr.square_mm * pr.squares[0] * 10) / 10;
-    $(p + 'BdLongNote').textContent = T('cal.square.calc', BOARD.mm(pr.square_mm, 2), pr.squares[0]);
   },
 
   // The backend's answer: the board state, or a cause this part says in its own words.
@@ -134,10 +140,6 @@ const BOARD = {
         if ($(p + 'BdMonitor').value) BOARD.set({ monitor: $(p + 'BdMonitor').value });
       };
       $(p + 'BdShow').onclick = BOARD.toggle;
-      $(p + 'BdMoreBtn').onclick = function () {
-        BOARD.more[p] = !BOARD.more[p];
-        if (BOARD.state) BOARD.draw(p, BOARD.state);
-      };
       $(p + 'BdRuler').onchange = function () {
         const v = parseFloat($(p + 'BdRuler').value);
         if (isFinite(v) && v > 0) BOARD.set({ ruler_mm: v });

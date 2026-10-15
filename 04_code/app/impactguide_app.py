@@ -116,7 +116,8 @@ class Prefs:
                 "calib_mode": "photo", "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down",
                                                   "switch_modes": True, "link": phone_link.USB, "wifi_address": "",
                                                   "phone_id": ""},
-                "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": ""},
+                "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": "",
+                         "opacity": live_ar.OPACITY},
                 # the calibration board: on a monitor (the one chosen, else screen_board.default_monitor) or printed;
                 # last: the board last laid out on a monitor, for when that monitor is away
                 "board": {"kind": "screen", "monitor": "", "last": None},
@@ -171,6 +172,7 @@ class Backend(Bridge):
         self.roots, self.prefs = roots, prefs
         self.replay = replay        # recorded frames for the live page in place of the phone
         self.lang = lang if lang in LANGS else (prefs["lang"] if prefs["lang"] in LANGS else "en")  # English unless chosen
+        self.start_page = "home"    # the page opens at home, or at a page asked for on the command line
         self.on_page_ready = None
         self._runs = {}
         self._jobs = queue.Queue()
@@ -268,7 +270,7 @@ class Backend(Bridge):
             ready()
         return json.dumps({"name": APP_NAME, "version": APP_VERSION, "lang": self.lang,
                            "langs": [{"code": c, "native": n, "flag": f} for c, n, f in LANGUAGES],
-                           "page": self.prefs["page"] if self.prefs["page"] in PAGES else "trials",
+                           "page": self.start_page,
                            "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5",
                            "link": self.link.mode})
 
@@ -1332,6 +1334,7 @@ class Backend(Bridge):
                                         square_mm=lb["square_mm"], squares=lb["squares"], marker_mm=lb["marker_mm"],
                                         registration=p["registration"] or None,
                                         face=p["face"], mandible=p["mandible"], axes=p["axes"],
+                                        opacity=self._opacity(p.get("opacity")),
                                         intrinsics=self.roots.calib_out / "intrinsics_stream.json",
                                         synthetic=bool(self.roots.simulate), colors=live_colors(),
                                         replay=self.replay)
@@ -1394,18 +1397,29 @@ class Backend(Bridge):
             return self._live_state()
         return self._answer(go)
 
+    @staticmethod
+    def _opacity(v):
+        """The opacity of the virtual elements, 0 to 1 (live_ar's default when missing or not a number)."""
+        try:
+            return min(1.0, max(0.0, float(v)))
+        except (TypeError, ValueError):
+            return live_ar.OPACITY
+
     @pyqtSlot(str, result=str)
     def live_settings(self, payload):
-        """{board, face, mandible, axes}, kept for the next session too."""
+        """{board, face, mandible, axes, opacity}, kept for the next session too."""
         def go():
-            given = {k: v for k, v in json.loads(payload).items() if k in ("board", "face", "mandible", "axes")}
+            given = {k: v for k, v in json.loads(payload).items()
+                     if k in ("board", "face", "mandible", "axes", "opacity")}
             p = {**self.prefs["live"], **given}
             if p["board"] not in live_ar.BOARDS:
                 return {"error": "bad_value", "message": "board"}
             for k in ("face", "mandible", "axes"):
                 p[k] = bool(p[k])
+            p["opacity"] = self._opacity(p.get("opacity"))
             self.prefs.set("live", p)
-            self.live().configure(board=p["board"], face=p["face"], mandible=p["mandible"], axes=p["axes"])
+            self.live().configure(board=p["board"], face=p["face"], mandible=p["mandible"], axes=p["axes"],
+                                  opacity=p["opacity"])
             return self._live_state()
         return self._answer(go)
 
@@ -1568,11 +1582,11 @@ def build(args):
     """Application, backend and window, shown; returns (app, window, backend)."""
     roots = Roots(args.simulate)
     prefs = Prefs(roots.prefs)
-    if args.page in PAGES:
-        prefs.set("page", args.page)
     app = Application(APP_NAME, app_id=APP_ID)
     app.setWindowIcon(app_icon())
     backend = Backend(roots, prefs, lang=args.lang, replay=args.replay)
+    if args.page in PAGES:
+        backend.start_page = args.page
     page = prepare_page((roots.simulate or LOCAL) / "page")
     title = APP_NAME + (" (simulation)" if roots.simulate else "")
     # the band the window draws before the page has one shows the mark as a button, as the page

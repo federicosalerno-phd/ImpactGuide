@@ -1,16 +1,21 @@
-// ImpactGuide · the shell: the rail, the views on the stage, the panels, the
-// status pill, the toast and the wait. A plain script sharing one global scope.
+// ImpactGuide · the shell: home, the rail, the views on the stage, the panels,
+// the Advanced parts, the status pill, the toast and the wait. A plain script
+// sharing one global scope.
 
 // The pages of the rail and whether they are built. A page not built yet opens
-// and says which part of the work will bring it.
+// and says which part of the work will bring it. Home is not on the rail: it is
+// the start, and the mark on the band leads back to it.
 const PAGES = ['calibration', 'live', 'trials', 'scans', 'analysis', 'charts', 'dataset'];
 const BUILT = { calibration: true, live: true, trials: true };
 
 // The signs this application adds to SlantUI's set, on the same 24 grid.
 ICONS.camera = { s: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9'
   + 'a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.8" r="3.4"/>' };
+ICONS.pendulum = { s: '<path d="M5 4h14"/><path d="M12 4 8.9 13.8"/><circle cx="8" cy="16.6" r="2.9"/>'
+  + '<path d="M14.6 17.2a13 13 0 0 0 4.3-3.6" stroke-dasharray="1.6 2"/>' };
+ICONS.chart = { s: '<path d="M4 20h16"/><path d="M7 16.5V11"/><path d="M12 16.5V6"/><path d="M17 16.5v-3.5"/>' };
 
-let page = 'trials';
+let page = 'home';
 let trialsView = 'guide';
 
 function $(id) { return document.getElementById(id); }
@@ -48,6 +53,23 @@ function placeIcons(root) {
       setIcon(el, name);
       el.removeAttribute('data-icon');
     }
+  });
+}
+
+// ── Advanced ─────────────────────────────────────────────────────────────────
+// What is rarely needed sits in a part of the panel that stays closed until its
+// button is pressed (SlantUI has no folding section: this is a plain button that
+// shows the stack after it). Open or closed is kept while the app runs.
+function wireAdvanced(root) {
+  (root || document).querySelectorAll('.adv-btn[data-adv]').forEach(function (b) {
+    const box = $(b.getAttribute('data-adv'));
+    b.setAttribute('aria-expanded', 'false');
+    b.onclick = function () {
+      const open = box.classList.contains('hidden');
+      box.classList.toggle('hidden', !open);
+      b.classList.toggle('on', open);
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
   });
 }
 
@@ -105,11 +127,12 @@ function setStatus(kind, text) {
 
 let PHONE = { ok: false, cause: 'unknown', link: 'usb' };
 let working = 0;
-// The pill says whether the phone is there, on the link chosen; a Wi-Fi link
-// coming back pulses, as work does.
+// The pill says whether the phone is there; the button beside it says the link.
+// A Wi-Fi link coming back pulses, as work does.
 function showPhone() {
+  if (typeof HOME !== 'undefined') HOME.phone();
   if (working) return;
-  if (PHONE.ok) setStatus('ok', T(PHONE.link === 'wifi' ? 'pill.phone.ok.wifi' : 'pill.phone.ok'));
+  if (PHONE.ok) setStatus('ok', T('pill.phone.ok'));
   else setStatus(PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
                  T('pill.phone.' + (hasT('pill.phone.' + PHONE.cause) ? PHONE.cause : 'none')));
 }
@@ -147,7 +170,7 @@ function armed(btn, text) {
   return false;
 }
 
-// ── the rail, the views, the panels ────────────────────────────────────────
+// ── home, the rail, the views, the panels ──────────────────────────────────
 function showView(name) {
   document.querySelectorAll('.view').forEach(function (v) { v.classList.toggle('show', v.dataset.view === name); });
 }
@@ -155,36 +178,33 @@ function showPanel(name) {
   document.querySelectorAll('.rp-page').forEach(function (p) { p.classList.toggle('show', p.dataset.panel === name); });
 }
 
-// Home is the guide of the trials, where the work at the bench happens. The way
-// back to it is SlantUI's: the mark on the band becomes a button, and only
-// while there is somewhere to go back to.
-function goHome() {
-  trialsView = 'guide';
-  go('trials');
-}
-// The way home is always there, raised and pressable, on the home page too (Federico, 15/10):
-// there a press brings the guide back to its start.
+// Home is the start (Federico, 15/10): the app opens there and the mark on the
+// band always leads back to it. The way back is SlantUI's: the mark becomes a
+// button, raised and pressable on every page, home too.
+function goHome() { go('home'); }
 function showHome() {
   setBrandAction(goHome, T('win.home.hint'));
 }
 
 function go(p) {
-  if (PAGES.indexOf(p) < 0) p = 'trials';
+  if (p !== 'home' && PAGES.indexOf(p) < 0) p = 'home';
   if (page === 'live' && p !== 'live') LIVE.leave();
   page = p;
+  document.querySelector('.app').classList.toggle('at-home', p === 'home');
   document.querySelectorAll('#rail .tab').forEach(function (t) {
     t.classList.toggle('active', t.dataset.page === p);
   });
   document.querySelectorAll('.tool-group').forEach(function (g) { g.classList.toggle('hidden', g.dataset.for !== p); });
   $('where').textContent = '';
-  be('set_page', p);
+  $('hint').textContent = '';
   showHome();
-  if (p === 'calibration') { showView('calibration'); showPanel('calibration'); $('hint').textContent = T('cal.hint'); CAL.enter(); return; }
-  if (p === 'live') { showView('live'); showPanel('live'); $('hint').textContent = T('live.hint'); LIVE.enter(); return; }
+  if (p === 'home') { showView('home'); HOME.enter(); return; }
+  be('set_page', p);
+  if (p === 'calibration') { showView('calibration'); showPanel('calibration'); CAL.enter(); return; }
+  if (p === 'live') { showView('live'); showPanel('live'); LIVE.enter(); return; }
   if (p === 'trials') { TRIALS.enter(); return; }
   showView('soon');
   showPanel('soon');
-  $('hint').textContent = '';
   $('soonTitle').textContent = T('page.' + p + '.title');
   $('soonPanelTitle').textContent = T('page.' + p + '.title');
   $('soonText').textContent = T('soon.' + p);

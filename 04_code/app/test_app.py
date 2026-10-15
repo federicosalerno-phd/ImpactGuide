@@ -14,13 +14,18 @@ backend   the slots the page calls, without a window: a trial from the first
           the ruler check, the printed board, the live view on either), the
           calibration and the session check on synthetic photos of the printed
           board and of the board on a monitor.
---ui DIR  the same through the real window: the page's own buttons are
-          pressed, one trial is run to its log row, the other views are opened,
-          the live view is started from its page and left, the board is shown
-          on a monitor from the Calibration page (the screen grabbed back and
-          compared with the image pixel for pixel, the board found in the grab)
-          and closed with Esc, and the window is grabbed into DIR at each
-          stage, in English and in Italian.
+--ui DIR  the same through the real window: the app opens at home, the page's
+          own buttons are pressed, one trial is run to its log row, the mark on
+          the band leads home and a tile of home to its page, the other views
+          are opened, the live view is started from its page, its opacity set
+          with the slider, and left, the board is shown on a monitor from the
+          Calibration page (the screen grabbed back and compared with the image
+          pixel for pixel, the board found in the grab) and closed with Esc;
+          then every page and panel, with its Advanced part open, is checked
+          for words that are cut or wrap, at the smallest window and at
+          1440 x 900, in the six languages. The window is grabbed into DIR at
+          each stage, and on every page in English and Italian (1440 x 900)
+          and in German (smallest window).
 
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
@@ -246,6 +251,12 @@ def test_backend(app, work, calibration=True):
     s = d.call("live_state")
     expect(tracked and s["registration"]["demo"] == "design" and s["layers"]["mandible"],
            f"live view: patient board tracked after the switch, bench design registration, mandible on")
+    s = d.call("live_settings", json.dumps({"opacity": 0.55}))
+    bad = d.call("live_settings", json.dumps({"opacity": 7}))
+    expect(abs(s.get("opacity", -1) - 0.55) < 1e-9 and bad.get("opacity") == 1.0
+           and ig.Prefs(d.backend.roots.prefs)["live"]["opacity"] == 1.0,
+           "live view: the opacity of the virtual elements set through live_settings, kept, held between 0 and 1")
+    d.call("live_settings", json.dumps({"opacity": 0.3}))
     folder = d.call("calib_folder_new", "check_video")["folder"]
     n = len(d.events)
     d.call("calib_shoot", folder)
@@ -494,6 +505,7 @@ DRIVE = r"""
     if (!$('planMass').value) $('planMass').value = '137.2';
     $('planStart').click(); return 'start';
   }
+  if (!window.__open) window.__open = JSON.parse(JSON.stringify(s));   // an open trial, for the sweep of the step panel
   const st = s.steps[s.step];
   const staged = s.staged[st.key];
   if (st.kind === 'photo' && !staged && !st.done) { if (!$('stShoot').disabled) $('stShoot').click(); return 'shoot ' + st.key; }
@@ -511,6 +523,111 @@ DRIVE = r"""
 })()
 """
 
+# What the sweep of every page needs in the page: open or close an Advanced part, show a step of an open
+# trial, and find the words that do not fit. A word does not fit when it is cut by a box (its own or one
+# around it that clips) or when a label that must stay on one line wraps.
+FIT = r"""
+window.__adv = function (id, open) {
+  const b = document.querySelector('[data-adv="' + id + '"]'), box = $(id);
+  if (b && box && box.classList.contains('hidden') === !!open) b.click();
+};
+window.__closeAdv = function () {
+  document.querySelectorAll('.adv-btn').forEach(function (b) { if (!$(b.dataset.adv).classList.contains('hidden')) b.click(); });
+};
+window.__step = function (base, adv) {
+  const o = window.__open;
+  if (!o) return;
+  const s = JSON.parse(JSON.stringify(o));
+  let k = s.steps.findIndex(function (x) { return x.key.replace(/_az\d+$/, '') === base; });
+  if (k < 0) k = 0;
+  s.step = k; s.staged = {}; s.recording = ''; s.watching = s.steps[k].key;
+  trialsView = 'guide'; showView('trials-guide');
+  TRIALS.render(s);
+  __adv('stAdv', !!adv);
+};
+window.__fit = function () {
+  const out = [];
+  const ONE = '.btn-label, .tab span, .sec-lbl, .pi-l, .pi-row > span, .mitem-name, .mbadge, .chip, .stpill span, .combo-v,'
+    + ' .toggle, .sl-l, .sl-v, .rp-title, .rp-sub, .home-hd, .home-sub, .home-tile b, .home-line, .home-st-l, .home-st-v,'
+    + ' .tile-l, .tile-v, .tile-c, .live-light span, .trial-sub, .now-n, .ct-fname, .sheet-title, .lk-step span, .covl div,'
+    + ' .czoom, .seq-n, .seq-v, .seq-t, .tool-group .btn, .trial-id';
+  const SKIP = '.log, .note-path, textarea, .combopop, .pickerpop, .toast';
+  const shown = function (el) { return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'; };
+  const name = function (el) {
+    return (el.id ? '#' + el.id : (typeof el.className === 'string' && el.className ? '.' + el.className.split(' ')[0] : el.tagName))
+      + ' "' + el.textContent.trim().replace(/\s+/g, ' ').slice(0, 48) + '"';
+  };
+  const clips = function (el) { return getComputedStyle(el).overflowX !== 'visible'; };
+  const roots = ['.app'].concat(LINK.open ? ['#lkSheet'] : []);
+  roots.forEach(function (root) {
+    document.querySelectorAll(root + ' *').forEach(function (el) {
+      if (el.closest(SKIP) || !shown(el)) return;
+      let own = false;
+      el.childNodes.forEach(function (n) { if (n.nodeType === 3 && n.textContent.trim()) own = true; });
+      if (!own) return;
+      const cs = getComputedStyle(el);
+      if (cs.display !== 'inline' && clips(el) && el.scrollWidth > el.clientWidth + 1) { out.push('cut ' + name(el)); return; }
+      const r = el.getBoundingClientRect();
+      for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+        if (!clips(a)) continue;
+        const ar = a.getBoundingClientRect();
+        if (r.right > ar.right + 1 || r.left < ar.left - 1) { out.push('out ' + name(el) + ' of ' + name(a)); break; }
+      }
+    });
+    document.querySelectorAll(root + ' :is(' + ONE + ')').forEach(function (el) {
+      if (el.closest(SKIP) || !shown(el) || !el.textContent.trim()) return;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      let lines = 0, last = -1e9;
+      Array.from(range.getClientRects()).filter(function (x) { return x.width > 0.5 && x.height > 0.5; })
+        .map(function (x) { return x.bottom; }).sort(function (a, b) { return a - b; })
+        .forEach(function (b) { if (b - last > 6) { lines++; last = b; } });
+      if (lines > 1) out.push('wraps ' + name(el));
+    });
+  });
+  return JSON.stringify(Array.from(new Set(out)));
+};
+"""
+
+# The sweep: every page and panel, its Advanced part open, every kind of step, the Phone pane on the cable
+# and pairing on Wi-Fi, at the smallest window and at 1440 x 900, in the six languages. (name, script, wait ms,
+# picture). Pictures in English and Italian at 1440 x 900 and in German, the longest, at the smallest window.
+SWEEP = [
+    ("live_on", "LINK.hide(); __closeAdv(); go('live'); LIVE.settings({board: 'sheet'});"
+                "setTimeout(function () { if (!(LIVE.state && (LIVE.state.running || LIVE.state.starting))) $('lvStart').click(); }, 400)",
+     6500, True),
+    ("live_on_adv", "__adv('lvAdv', true); $('lvAdv').scrollIntoView()", 900, True),
+    ("live_patient", "__adv('lvAdv', false); LIVE.settings({board: 'patient'})", 900, True),
+    ("live_off", "LIVE.settings({board: 'sheet'}); LIVE.stop()", 1500, True),
+    ("home", "go('home')", 1300, True),
+    ("calibration", "go('calibration')", 1300, True),
+    ("calibration_adv", "__adv('calAdv', true); $('calAdv').scrollIntoView()", 900, True),
+    ("calibration_printed", "BOARD.set({kind: 'printed'}); setTimeout(function () { $('calAdv').scrollIntoView(); }, 500)", 1300, True),
+    ("calibration_screen", "BOARD.set({kind: 'screen'}); __adv('calAdv', false)", 1000, False),
+    ("trials_plan", "go('trials'); TRIALS.setView('guide')", 1300, True),
+    ("trials_plan_adv", "__adv('planAdv', true); TRIALS.extraOpen = true; TRIALS.renderPlan(TRIALS.state)", 900, True),
+    ("step_holder", "__step('holder')", 700, True),
+    ("step_pendulum", "__step('pendulum')", 700, False),
+    ("step_ref_scan", "__step('ref_scan')", 700, True),
+    ("step_release", "__step('release')", 700, False),
+    ("step_spheres", "__step('spheres')", 700, True),
+    ("step_photo", "__step('drape_photo', true)", 700, True),
+    ("step_video", "__step('drape_video')", 700, False),
+    ("step_close", "__step('close')", 700, True),
+    ("trials_back", "TRIALS.extraOpen = false; __adv('planAdv', false); __adv('stAdv', false); TRIALS.refresh()", 900, False),
+    ("log", "TRIALS.setView('log'); __adv('lgAdv', true)", 1300, True),
+    ("sequence", "TRIALS.setView('sequence')", 1300, True),
+    ("config", "TRIALS.setView('config'); __adv('cfgAdv', true)", 1300, True),
+    ("soon", "go('scans')", 900, True),
+    ("phone", "go('home'); LINK.show()", 1600, True),
+    ("phone_adv", "__adv('lkAdv', true); $('lkAdv').scrollIntoView()", 900, True),
+    ("phone_pair", "clearInterval(LINK.timer); __adv('lkAdv', false);"
+                   "LINK.render(Object.assign({}, LINK.state, {mode: 'wifi', state: 'none', cause: 'wifi_none', qr: ''}))", 500, True),
+    ("phone_closed", "LINK.hide(); __closeAdv(); LINK.refresh()", 700, False),
+]
+SIZES = (("min", 1180, 700), ("wide", 1440, 900))
+SHOTS = {("wide", "en"), ("wide", "it"), ("min", "de")}
+
 
 def Qt_key(name):
     from slantui.shell.qt import Qt
@@ -520,10 +637,10 @@ def Qt_key(name):
 def test_ui(work, shots):
     from slantui.shell.qt import QTimer
     shots.mkdir(parents=True, exist_ok=True)
-    app, win, backend = ig.build(ig.parse(["--simulate", str(work), "--lang", "en", "--page", "trials"]))
+    app, win, backend = ig.build(ig.parse(["--simulate", str(work), "--lang", "en"]))
     log = []
-    plan = []          # (name, js, wait ms), run in order
     taken = set()
+    misfits = []       # (size, language, state, what) for every word that does not fit
 
     board = {}
 
@@ -579,8 +696,6 @@ def test_ui(work, shots):
         def got(v):
             v = str(v)
             log.append(v)
-            if v.startswith("confirm photo_az40") and "photo" not in taken:
-                pass
             if v.startswith("closed"):
                 finish()
                 return
@@ -594,57 +709,77 @@ def test_ui(work, shots):
             QTimer.singleShot(2200 if v.startswith(("shoot", "stop")) else 700, drive)
         js(DRIVE, got)
 
+    def lang(code):
+        return f"$('lang').value='{code}'; $('lang').dispatchEvent(new Event('change'));"
+
     def finish():
+        # (name, script, wait ms, what to read after the wait or None); a name starting with "-" takes no picture
         steps = [
-            ("ui_05_closed", "", 900),
-            ("ui_06_log", "TRIALS.setView('log')", 1200),
-            ("ui_07_sequence", "TRIALS.setView('sequence')", 1200),
-            ("ui_08_config", "TRIALS.setView('config')", 1200),
-            ("ui_08b_home", "document.querySelector('.tbar-logo-btn').click()", 1200),
-            ("ui_09_calibration", "go('calibration')", 1500),
-            ("ui_10_it_guide", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change')); go('trials'); TRIALS.setView('guide')", 1800),
-            ("ui_11_it_calibration", "go('calibration')", 1500),
-            ("ui_12_it_live", "go('live')", 1500),
-            ("ui_13_it_live_on", "$('lvStart').click()", 7000),
-            ("ui_14_live_patient", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
-                                   "LIVE.settings({board: 'patient', mandible: true})", 4000),
-            ("ui_15_live_left", "window.__live = LIVE.state && LIVE.state.tracked; go('trials')", 1500),
+            ("ui_05_closed", "", 900, None),
+            ("ui_06_log", "TRIALS.setView('log')", 1200, None),
+            ("ui_07_sequence", "TRIALS.setView('sequence')", 1200, None),
+            ("ui_08_config", "TRIALS.setView('config')", 1200, None),
+            ("ui_08b_home", "document.querySelector('.tbar-logo-btn').click()", 1200,
+             ("home", "JSON.stringify([page, !!document.querySelector('.tbar-logo-btn'),"
+                      " document.querySelector('.app').classList.contains('at-home'),"
+                      " document.querySelector('.tbar-logo-btn').title === T('win.home.hint'),"
+                      " getComputedStyle(document.querySelector('.rp')).display])")),
+            ("ui_08c_tile", "document.querySelector('.home-tile[data-go=trials]').click()", 1200,
+             ("tile", "JSON.stringify([page, trialsView])")),
+            ("ui_09_calibration", "go('calibration')", 1500, None),
+            ("ui_10_it_home", lang("it") + " go('home')", 1800, None),
+            ("ui_11_it_calibration", "go('calibration')", 1500, None),
+            ("ui_12_it_live", "go('live')", 1500, None),
+            ("ui_13_it_live_on", "$('lvStart').click()", 7000, None),
+            # the opacity of the virtual elements, from its slider: the live setting `opacity` through live_settings
+            ("ui_13b_opacity", "$('lvOpacity').value = '0.65'; $('lvOpacity').dispatchEvent(new Event('input'));"
+                               "$('lvOpacity').dispatchEvent(new Event('change'))", 1200,
+             ("opacity", "JSON.stringify([LIVE.sentAt > 0, LIVE.state && LIVE.state.opacity, $('lvOpacityV').textContent])")),
+            ("ui_14_live_patient", lang("en") + "LIVE.settings({board: 'patient', mandible: true})", 4000, None),
+            ("ui_15_live_left", "window.__live = LIVE.state && LIVE.state.tracked; go('trials')", 1500, None),
             # the Phone pane: the cable, then Wi-Fi paired with the QR code the simulated phone scans
-            ("ui_16_phone_cable", "$('lkBtn').click()", 2000),
-            ("ui_17_phone_wifi_qr", "LINK.setMode('wifi'); setTimeout(function () { $('lkQrBtn').click(); }, 800)",
-             2200),
-            ("ui_18_phone_wifi_paired", "", 4500),
+            ("ui_16_phone_cable", "$('lkBtn').click()", 2000, None),
+            ("ui_17_phone_wifi_qr", "LINK.setMode('wifi'); setTimeout(function () { $('lkQrBtn').click(); }, 800)", 2200, None),
+            ("ui_18_phone_wifi_paired", "", 4500, None),
             ("ui_19_phone_live", "go('live'); $('lvStart').click(); window.__wifi = LINK.state && LINK.state.mode"
-                                 " === 'wifi' && LINK.state.state === 'ready'", 6000),
-            ("ui_20_phone_it", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change'));", 2000),
-            ("ui_21_phone_closed", "LINK.setMode('usb'); $('lkClose').click(); go('trials')", 2000),
+                                 " === 'wifi' && LINK.state.state === 'ready'", 6000, None),
+            ("ui_20_phone_it", lang("it"), 2000, None),
+            ("ui_21_phone_closed", "LINK.setMode('usb'); $('lkClose').click(); go('trials')", 2000, None),
             # the calibration board on a monitor, from the Calibration page: shown, grabbed off the screen, closed
-            ("ui_22_board_controls", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
-                                     "setTimeout(function () { go('calibration'); }, 900)", 2400),
-            ("board_23_window", "$('calBdShow').click()", 2500),
-            ("ui_24_board_shown", "", 600),
-            ("ui_25_board_closed", lambda: board_key(Qt_key("Escape")), 1500),
-            ("ui_26_board_advanced", "$('calBdMoreBtn').click()", 1200),
+            ("ui_22_board_controls", lang("en") + "setTimeout(function () { go('calibration'); }, 900)", 2400, None),
+            ("board_23_window", "$('calBdShow').click()", 2500, None),
+            ("ui_24_board_shown", "", 600, None),
+            ("ui_25_board_closed", lambda: board_key(Qt_key("Escape")), 1500,
+             ("board", "JSON.stringify([!!(BOARD.state && BOARD.state.shown), BOARD.state && BOARD.state.kind])")),
+            ("ui_26_board_advanced", "__adv('calAdv', true)", 1200, None),
             ("ui_27_board_ruler", "$('calBdRuler').value = (BOARD.state.layout.width_mm * 1.003).toFixed(1);"
-                                  "$('calBdRuler').dispatchEvent(new Event('change'))", 1500),
+                                  "$('calBdRuler').dispatchEvent(new Event('change'))", 1500, None),
             ("ui_28_board_printed", "window.__ruler = BOARD.state.mon.source; BOARD.set({forget: true});"
-                                    "setTimeout(function () { BOARD.set({kind: 'printed'}); }, 300)", 1500),
-            ("ui_29_it_board", "$('lang').value='it'; $('lang').dispatchEvent(new Event('change'));"
-                               "setTimeout(function () { go('calibration'); BOARD.set({kind: 'screen'}); }, 900)", 2400),
-            ("ui_30_it_live_board", "LIVE.settings({board: 'sheet'}); go('live');"
-                                    "setTimeout(function () { $('lvBd').scrollIntoView(); }, 900)", 2000),
-            ("ui_31_en_live_board", "$('lang').value='en'; $('lang').dispatchEvent(new Event('change'));"
-                                    "setTimeout(function () { go('live'); }, 900);"
-                                    "setTimeout(function () { $('lvBd').scrollIntoView(); }, 1600)", 2600),
+                                    "setTimeout(function () { BOARD.set({kind: 'printed'}); }, 300)", 1500, None),
+            ("-board_back", "BOARD.set({kind: 'screen'}); __closeAdv()", 1200, None),
         ]
+        # the sweep of every page and panel, at two sizes and in six languages
+        for size, w, h in SIZES:
+            steps.append((f"-size_{size}", (lambda w=w, h=h: win.resize(w, h)), 1200, None))
+            for code in ig.LANGS:
+                steps.append((f"-lang_{size}_{code}", lang(code), 1500, None))
+                for n, (state, script, wait, pic) in enumerate(SWEEP):
+                    shot = pic and (size, code) in SHOTS
+                    steps.append(((f"{size}_{code}_{n:02d}_{state}" if shot else f"-{size}_{code}_{state}"), script, wait,
+                                  ("fit", "__fit()", size, code, state)))
+        steps.append(("-restore", lambda: win.resize(1440, 900), 800, None))
+
+        def measured(what, v):
+            if what[0] == "fit":
+                try:
+                    for m in json.loads(v):
+                        misfits.append((what[2], what[3], what[4], m))
+                except (TypeError, ValueError):
+                    misfits.append((what[2], what[3], what[4], f"no answer ({v})"))
+            else:
+                log.append(what[0] + " " + str(v))
 
         def nxt():
-            if name_done and name_done[-1] == "ui_08b_home":
-                js("JSON.stringify([page, trialsView, !!document.querySelector('.tbar-logo-btn')])",
-                   lambda v: log.append("home " + str(v)))
-            if name_done and name_done[-1] == "ui_25_board_closed":
-                js("JSON.stringify([!!(BOARD.state && BOARD.state.shown), BOARD.state && BOARD.state.kind])",
-                   lambda v: log.append("board " + str(v)))
             if not steps:
                 js("JSON.stringify(window.__ruler || '')", lambda v: log.append("ruler " + str(v)))
                 js("JSON.stringify([!!window.__live, !!(LIVE.state && LIVE.state.running)])",
@@ -653,22 +788,34 @@ def test_ui(work, shots):
                    lambda v: log.append("phone " + str(v)))
                 js("JSON.stringify(window.__errs||[])", lambda v: (log.append("errors " + str(v)), app.quit()))
                 return
-            name, script, wait = steps.pop(0)
+            name, script, wait, what = steps.pop(0)
             if callable(script):
                 script()
             elif script:
                 js(script)
-            QTimer.singleShot(wait, lambda: (grab(name), name_done.append(name), nxt()))
-        name_done = []
+
+            def after():
+                if not name.startswith("-"):
+                    grab(name)
+                if what is not None:
+                    js(what[1], lambda v: (measured(what, v), nxt()))
+                else:
+                    nxt()
+            QTimer.singleShot(wait, after)
         nxt()
 
     def first():
         js("window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(e.message+' line '+e.lineno)});")
-        grab("ui_00_plan")
+        js(FIT)
+        js("JSON.stringify([page, document.querySelector('.app').classList.contains('at-home')])",
+           lambda v: log.append("start " + str(v)))
+        grab("ui_00_home")
+        js("go('trials')")
         # the drape slot comes first, so the run shows both kinds of views
-        drive_drape()
+        QTimer.singleShot(1500, drive_drape)
 
     def drive_drape():
+        grab("ui_00_plan")
         run = backend.run()
         slot = next(r for r in run.pending() if r["drape"] == "1")
         js("TRIALS.extraOpen=true; TRIALS.renderPlan(TRIALS.state);"
@@ -677,7 +824,7 @@ def test_ui(work, shots):
         QTimer.singleShot(1200, lambda: (grab("ui_00_plan_drape"), drive()))
 
     QTimer.singleShot(4000, first)
-    QTimer.singleShot(400000, app.quit)
+    QTimer.singleShot(1500000, app.quit)
     app.run()
     errors = next((x for x in log if x.startswith("errors")), "errors none")
     run = trials.Run("campaign", work / "raw", work / "protocol")
@@ -685,9 +832,20 @@ def test_ui(work, shots):
     expect(rows and rows[-1]["status"] == "ok" and rows[-1]["drape"] == "1" and not run.missing(rows[-1]["trial"]),
            f"window: drape trial {rows[-1]['trial'] if rows else '?'} run with the page's buttons, nothing missing")
     expect(errors in ("errors []", "errors none"), f"window: no script errors ({errors})")
+    start = next((x for x in log if x.startswith("start")), "start ?")
+    expect(start == 'start ["home",true]', f"window: the app opens at home, no panel and no toolbar ({start})")
     home = next((x for x in log if x.startswith("home")), "home ?")
-    expect(home == 'home ["trials","guide",true]',
-           f"window: the mark on the band leads back to the trial guide and stays a raised button there ({home})")
+    expect(home == 'home ["home",true,true,true,"none"]',
+           f"window: the mark on the band leads home, stays a raised button with its hint, the panel hidden ({home})")
+    tile = next((x for x in log if x.startswith("tile")), "tile ?")
+    expect(tile == 'tile ["trials","guide"]', f"window: the Trials tile of home opens the trial guide ({tile})")
+    opacity = next((x for x in log if x.startswith("opacity")), "opacity ?")
+    try:
+        sent, got, label = json.loads(opacity.split(" ", 1)[1])
+    except (ValueError, IndexError):
+        sent, got, label = False, None, ""
+    expect(sent and "65" in label and got == 0.65,
+           f"window: the opacity slider sends `opacity` 0.65 through live_settings ({label}), the live view reports {got}")
     live = next((x for x in log if x.startswith("live")), "live ?")
     expect(live == "live [true,false]",
            f"window: live view started from the page, board tracked, stopped when the page is left ({live})")
@@ -703,8 +861,16 @@ def test_ui(work, shots):
     expect(closed == 'board [false,"screen"]' and ruler == 'ruler "ruler"',
            f"window: Esc closed the board and the page knew ({closed}); the ruler check typed in the page "
            f"corrected the size ({ruler})")
+    checked = len(SIZES) * len(ig.LANGS) * len(SWEEP)
+    for m in misfits[:60]:
+        print("      " + " · ".join(m), flush=True)
+    expect(not misfits, f"window: every word fits on {len(SWEEP)} pages and panels, at {SIZES[0][1]} x {SIZES[0][2]} "
+                        f"and {SIZES[1][1]} x {SIZES[1][2]}, in the six languages ({checked} views, "
+                        f"{len(misfits)} words that do not fit)")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
-    print("page actions: " + ", ".join(log[:-1]), flush=True)
+    print("page actions: " + ", ".join(x for x in log if not x.startswith(("confirm", "shoot", "record", "stop",
+                                                                            "recording", "waiting", "disabled"))),
+          flush=True)
 
 
 def main():

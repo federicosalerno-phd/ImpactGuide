@@ -18,6 +18,57 @@
 /* A page on the stage is a column that scrolls, centred on the backdrop. */
 .view{position:absolute;inset:0;overflow-y:auto;display:none;padding:18px 24px 28px}
 .view.show{display:block}
+
+/* ── home ─────────────────────────────────────────────────────────────────
+   The start, as UniGuide's entry: a title, four large choices and the state of
+   the bench, in the middle of the stage, with no panel and no toolbar. The
+   middle is found with automatic margins, so a home taller than the window
+   scrolls from its top instead of losing it over the edge. */
+.app.at-home .toolbar,.app.at-home .rp{display:none}
+.view.home-view{padding:32px 40px}
+.view.home-view.show{display:flex}
+.home{margin:auto;width:760px;max-width:100%;display:flex;flex-direction:column}
+.home-top{display:flex;align-items:center;gap:12px;min-height:60px}
+.home-titles{flex:1;min-width:0}
+.home-hd{font-size:20px;font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;
+         overflow:hidden;text-overflow:ellipsis}
+.home-sub{font-size:var(--fs-lg);color:var(--text-3);margin-top:6px;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
+/* Two columns of equal width by construction: a long word does not widen its
+   tile, it is caught by the test instead. Name and line stay on one line each. */
+.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:28px}
+.home-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+           min-width:0;padding:24px 16px;background:var(--control);color:var(--text-2);
+           border-radius:var(--r);transition:background var(--t-out),transform var(--t-out)}
+.home-tile:hover:not(:disabled){background:var(--control-hover);transform:translateY(-1px);
+                                transition-duration:var(--t-in)}
+.home-tile:active:not(:disabled){transform:none}
+.home-tile svg{width:30px;height:30px;margin-bottom:4px;flex:none}
+.home-tile b{font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1);line-height:1.3;
+             max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.home-line{font-size:var(--fs-sm);color:var(--text-3);line-height:1.35;max-width:100%;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Not built yet: there, and not ready, which reads without trying it. */
+.home-tile:disabled{background:var(--surface-2);color:var(--text-4)}
+.home-tile:disabled b,.home-tile:disabled .home-line{color:var(--text-4)}
+/* The state of the bench: three cells, a light, a label and a value each. */
+.home-status{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}
+.home-st{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:10px;row-gap:3px;align-items:center;
+         min-width:0;padding:10px 14px;background:var(--surface-2);border-radius:var(--r)}
+.home-st .live-dot{grid-row:1/3}
+.home-st-l{font-size:var(--fs-xs);font-weight:var(--w-strong);letter-spacing:.6px;text-transform:uppercase;
+           color:var(--text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.home-st-v{font-size:var(--fs);color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#hsPhone{cursor:pointer;transition:background var(--t-out)}
+#hsPhone:hover{background:var(--control);transition-duration:var(--t-in)}
+
+/* ── Advanced ─────────────────────────────────────────────────────────────
+   What is rarely needed, after a button that opens it; the button is lit while
+   it is open and its chevron turns. */
+.stack>.adv-btn{margin-top:16px}
+.adv-btn svg.r{transition:transform var(--t-out)}
+.adv-btn.on svg.r{transform:rotate(180deg)}
+.adv-box>.sec-lbl:first-child,.adv-box>.stack:first-child>.sec-lbl:first-child{margin-top:4px}
 .sheet-col{max-width:980px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
 .cards2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .cards2>.card{min-width:0}
@@ -102,20 +153,19 @@
 .live-tags .live-demo{color:var(--warn-text);font-weight:var(--w-strong);letter-spacing:.4px}
 .live-lights{left:auto;right:10px;color:var(--text-1)}
 .live-light{display:flex;align-items:center;gap:9px;white-space:nowrap}
-.live-light.live-later{color:var(--text-3)}
+.live-why{font-size:var(--fs-sm);color:var(--text-2);margin-top:4px;max-width:260px}
 .live-dot{width:11px;height:11px;border-radius:50%;background:var(--text-4);flex:none}
 .live-dot.ok{background:var(--ok)}
 .live-dot.off{background:var(--control-hover)}
+.live-dot.warn{background:var(--warn)}
 .live-idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
 .live-idle .done-card{max-width:560px}
 .live-idle .trial-id{font-size:24px;white-space:normal}
 
-/* The light in the panel, larger, and the one still to come beside its note. */
+/* The state of the link in the Phone pane, larger. */
 .live-state{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--surface-3);
             border-radius:var(--r-xs);font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1)}
 .live-state .live-dot{width:14px;height:14px}
-.live-state.live-later{align-items:flex-start;font-size:var(--fs);font-weight:normal;background:var(--surface-2)}
-.live-state.live-later .live-dot{margin-top:3px}
 
 /* ── the phone: link and phone screen ────────────────────────────────────
    SlantUI's docked pane (.sheet-side); the rail button that opens it wears

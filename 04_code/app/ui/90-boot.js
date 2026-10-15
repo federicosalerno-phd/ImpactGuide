@@ -18,6 +18,7 @@ function boot() {
   initSelects();
   placeIcons(document);
   initTitlebar();
+  wireAdvanced(document);
   Bridge.on('happened', onEvent);
   // Everything that holds words: run at start and again when the language changes
   // (the handlers are assigned, not added, so wiring twice changes nothing).
@@ -25,6 +26,7 @@ function boot() {
     setLang(lang);
     setWindowHints({ maximise: T('win.maximise.hint'), restore: T('win.restore.hint') });
     wireRail();
+    HOME.wire();
     CAL.wire();
     TRIALS.wire();
     LIVE.wire();
@@ -33,9 +35,9 @@ function boot() {
   };
   beJson('app_info', function (info) {
     speak(info.lang);
-    // SlantUI's picker with flags: flag and tag on the button; flag, tag and the name in the
-    // language itself in the list, at most 300 px and then it scrolls. The list comes from
-    // the host (impactguide_app.py, LANGUAGES), the flags from ui/flags/ (flag-icons, MIT).
+    // SlantUI's picker with flags, on the home page as in UniGuide: flag and tag on the button; flag,
+    // tag and the name in the language itself in the list, at most 300 px and then it scrolls. The
+    // list comes from the host (impactguide_app.py, LANGUAGES), the flags from ui/flags/ (flag-icons, MIT).
     setPicker($('lang'), info.langs.map(function (l) {
       return { code: l.code, tag: l.code.toUpperCase(), label: l.native, flag: 'ui/flags/' + l.flag + '.svg' };
     }), info.lang, { maxHeight: 300 });
@@ -47,7 +49,8 @@ function boot() {
     $('simChip').classList.toggle('hidden', !info.simulate);
     PHONE.link = info.link;
     LINK.btn();
-    go(info.page);
+    // the app opens at home; a page asked for on the command line opens instead
+    go(info.page || 'home');
   });
 }
 

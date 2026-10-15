@@ -14,7 +14,8 @@
 
   <!-- The title band. SlantUI's titlebar.js cuts it, writes the credit line
        and wires the three buttons; the page gives the name and the mark,
-       which app.css sets from ui/impactguide-mark.svg. -->
+       which app.css sets from ui/impactguide-mark.svg. The mark is the way
+       home (ui/01-shell.js, showHome). -->
   <div class="titlebar">
     <div class="tbar-band"></div>
     <div class="tbar-brand">
@@ -29,8 +30,8 @@
     </div>
   </div>
 
-  <!-- The rail: the seven pages of the bench, in the order of the work. All of
-       them can be opened; the ones not built yet say so on their page. -->
+  <!-- The rail: the seven pages of the bench, in the order of the work. Home is
+       not a step: it is the start, reached from the mark on the band. -->
   <div class="topbar">
     <div class="tabbar" id="rail">
       <div class="tab" data-page="calibration"><div class="tn">1</div><span data-t="page.calibration.title"></span></div>
@@ -43,7 +44,6 @@
     </div>
     <div class="tb-gap"></div>
     <div class="tb-r">
-      <div class="picker" id="lang" tabindex="0" data-t-title="win.lang.hint"></div>
       <!-- the link to the phone, cable or Wi-Fi: the button says which and opens the Phone pane -->
       <button class="btn btn-2 btn-sm" id="lkBtn" type="button" data-t-title="link.btn.hint"><span data-icon="phone"></span><span class="btn-label" id="lkBtnL"></span></button>
       <div class="stpill" id="pill"><div class="sd" id="sd"></div><span id="st"></span></div>
@@ -53,7 +53,7 @@
   <div class="work">
     <div class="main">
 
-      <!-- One toolbar for every page; each page shows its own group. -->
+      <!-- One toolbar for every page; each page shows its own group. Hidden at home. -->
       <div class="toolbar">
         <div class="tool-group" data-for="live">
           <button class="btn btn-2 btn-sm layer-btn" data-layer="face" data-t="live.layer.face"></button>
@@ -73,24 +73,38 @@
 
       <div class="stage">
 
+        <!-- ── home: the start. A few large choices and the state of the bench;
+             the language is chosen here (ui/05-home.js) ─────────────────────── -->
+        <div class="view home-view" data-view="home">
+          <div class="home">
+            <div class="home-top">
+              <div class="home-titles">
+                <div class="home-hd" data-t="home.title"></div>
+                <div class="home-sub" data-t="home.sub"></div>
+              </div>
+              <div class="picker" id="lang" tabindex="0" data-t-title="win.lang.hint"></div>
+            </div>
+            <div class="home-grid">
+              <button class="home-tile" type="button" data-go="calibration"><span data-icon="grid"></span><b data-t="home.cal"></b><span class="home-line" data-t="home.cal.sub"></span></button>
+              <button class="home-tile" type="button" data-go="live"><span data-icon="camera"></span><b data-t="home.live"></b><span class="home-line" data-t="home.live.sub"></span></button>
+              <button class="home-tile" type="button" data-go="trials"><span data-icon="pendulum"></span><b data-t="home.trials"></b><span class="home-line" data-t="home.trials.sub"></span></button>
+              <button class="home-tile" type="button" data-go="scans" disabled><span data-icon="chart"></span><b data-t="home.scans"></b><span class="home-line" data-t="home.scans.sub"></span></button>
+            </div>
+            <div class="home-status">
+              <div class="home-st" id="hsPhone" role="button" tabindex="0" data-t-title="link.btn.hint"><span class="live-dot" id="hsPhoneDot"></span><span class="home-st-l" data-t="home.st.phone"></span><span class="home-st-v" id="hsPhoneV"></span></div>
+              <div class="home-st" id="hsCal"><span class="live-dot" id="hsCalDot"></span><span class="home-st-l" data-t="home.st.cal"></span><span class="home-st-v" id="hsCalV"></span></div>
+              <div class="home-st" id="hsTrial"><span class="live-dot" id="hsTrialDot"></span><span class="home-st-l" data-t="home.st.trial"></span><span class="home-st-v" id="hsTrialV"></span></div>
+            </div>
+          </div>
+        </div>
+
         <!-- ── calibration ─────────────────────────────────────────────── -->
         <div class="view" data-view="calibration">
           <div class="sheet-col">
             <div class="cards2" id="calModes"></div>
-            <div class="cards2">
-              <div class="card col">
-                <div class="sec-lbl" data-t="cal.board.sec"></div>
-                <div id="calBoard"></div>
-                <div class="row" id="calBoardPrint">
-                  <button class="btn btn-2 grow" id="calBoardBtn"><span class="btn-label" data-t="cal.board.action"></span></button>
-                  <button class="btn btn-2 grow" id="calBoardOpen"><span class="btn-label" data-t="cal.board.open"></span></button>
-                </div>
-              </div>
-              <div class="card col">
-                <div class="sec-lbl" data-t="cal.last.sec"></div>
-                <div class="row" id="calLastHead"></div>
-                <div class="log tall" id="calLog"></div>
-              </div>
+            <div class="card col hidden" id="calLast">
+              <div class="row" id="calLastHead"></div>
+              <div class="log tall" id="calLog"></div>
             </div>
             <div class="sec-lbl" data-t="cal.folders.sec"></div>
             <div class="mlist slim" id="calFolders"></div>
@@ -107,7 +121,7 @@
               <div class="covl live-tags hidden" id="lvTags"></div>
               <div class="covl live-lights hidden" id="lvLights">
                 <div class="live-light"><span class="live-dot" id="lvDot"></span><span id="lvLight"></span></div>
-                <div class="live-light live-later"><span class="live-dot off"></span><span data-t="live.light.check"></span></div>
+                <div class="live-why hidden" id="lvWhy"></div>
               </div>
               <div class="czoom hidden" id="lvRate"></div>
               <div class="live-idle" id="lvIdle">
@@ -166,7 +180,7 @@
               </div>
               <div class="split-side">
                 <div class="card col">
-                  <div class="sec-lbl" id="lgDetail"></div>
+                  <div class="sec-lbl" id="lgDetail" data-t="log.detail"></div>
                   <div id="lgFields"></div>
                 </div>
                 <div class="card col">
@@ -201,7 +215,7 @@
             <div class="card col">
               <div class="sec-lbl" data-t="cfg.check.sec"></div>
               <div class="row">
-                <label class="toggle grow"><input type="checkbox" id="chkDeep"/><span data-t="cfg.check.deep"></span></label>
+                <label class="toggle grow" data-t-title="cfg.check.deep.hint"><input type="checkbox" id="chkDeep"/><span data-t="cfg.check.deep"></span></label>
                 <button class="btn btn-2" id="chkRun"><span class="btn-label" data-t="cfg.check.action"></span></button>
               </div>
               <div class="log tall" id="chkLog"></div>
@@ -221,7 +235,9 @@
       </div>
     </div>
 
-    <!-- ══ side panel: one page per view, the current one carries .show ══ -->
+    <!-- ══ side panel: one page per view, the current one carries .show. The
+         common case in plain view; what is rarely needed under Advanced,
+         closed until asked for (ui/01-shell.js, wireAdvanced). Hidden at home. -->
     <div class="rp">
 
       <!-- calibration -->
@@ -234,54 +250,57 @@
           <div class="sec-lbl" data-t="cal.mode.sec"></div>
           <div class="combo" id="calMode" tabindex="0" role="button"><span class="combo-v"></span></div>
           <div class="sec-lbl" data-t="board.sec"></div>
-          <div id="calBd">
+          <div class="stack" id="calBd">
             <div class="mlist" id="calBdKinds">
-              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.screen"></span></span><span class="mbadge" data-t="board.badge.screen"></span></div>
-              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.printed"></span></span><span class="mbadge">A4</span></div>
+              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.screen"></span></div>
+              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.printed"></span></div>
             </div>
-            <div class="stack" id="calBdScreen">
-              <div id="calBdSquare"></div>
-              <div class="callout callout-warn hidden" id="calBdWarn"></div>
-              <button class="btn btn-2 btn-wide" id="calBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
-              <button class="btn btn-2 btn-wide" id="calBdMoreBtn"><span class="btn-label" data-t="board.more"></span></button>
-              <div class="stack hidden" id="calBdMore">
-                <div class="sec-lbl" data-t="board.monitor.sec"></div>
-                <div class="combo" id="calBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
-                <div id="calBdRows"></div>
-                <div class="note" id="calBdSure"></div>
-                <div class="sec-lbl" data-t="board.ruler.sec"></div>
-                <div class="row">
-                  <input class="input" type="number" id="calBdRuler" min="50" max="2000" step="0.1"/>
-                  <span class="input-unit">mm</span>
-                </div>
-                <div class="note" id="calBdRulerNote"></div>
-                <button class="btn btn-2 btn-wide hidden" id="calBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
-              </div>
-            </div>
+            <div id="calBdSquare"></div>
+            <div class="callout callout-warn hidden" id="calBdWarn"></div>
+            <button class="btn btn-2 btn-wide" id="calBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
             <div class="stack" id="calBdPrinted">
               <div class="sec-lbl" data-t="cal.square.sec"></div>
-              <div class="row">
+              <div class="row" data-t-title="cal.square.hint">
                 <input class="input" type="number" id="calBdLong" min="50" max="1100" step="0.1"/>
                 <span class="input-unit">mm</span>
               </div>
-              <div class="note" id="calBdLongNote"></div>
             </div>
           </div>
-          <div class="sec-lbl" data-t="cal.folder.sec"></div>
-          <div class="note note-path" id="calFolder"></div>
-          <div class="note hidden" id="calFolderBoard"></div>
-          <button class="btn btn-2 btn-wide" id="calNewCal"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.new"></span></button>
-          <button class="btn btn-2 btn-wide" id="calNewChk"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.check"></span></button>
           <div class="sec-lbl" data-t="cal.photos.sec"></div>
-          <div class="pi-row"><span class="pi-l" data-t="cal.photos.count"></span><span id="calCount">0</span></div>
           <button class="btn btn-2 btn-wide" id="calShoot"><span data-icon="camera"></span><span class="btn-label" data-t="cal.photos.shoot"></span></button>
-          <div class="row">
-            <button class="btn btn-2 grow" id="calImport"><span class="btn-label" data-t="cal.photos.import"></span></button>
-            <button class="btn btn-2 grow" id="calOpen"><span class="btn-label" data-t="cal.photos.open"></span></button>
+          <button class="btn btn-2 btn-wide" id="calNewCal" data-t-title="cal.folder.new.hint"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.new"></span></button>
+          <button class="btn btn-2 btn-wide" id="calNewChk" data-t-title="cal.folder.check.hint"><span data-icon="add"></span><span class="btn-label" data-t="cal.folder.check"></span></button>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="calAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="calAdv">
+            <div class="stack" id="calBdMore">
+              <div class="sec-lbl" data-t="board.monitor.sec"></div>
+              <div class="combo" id="calBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
+              <div id="calBdRows"></div>
+              <div class="note" id="calBdSure"></div>
+              <div class="sec-lbl" data-t="board.ruler.sec"></div>
+              <div class="row" data-t-title="board.ruler.hint">
+                <input class="input" type="number" id="calBdRuler" min="50" max="2000" step="0.1"/>
+                <span class="input-unit">mm</span>
+              </div>
+              <div class="note" id="calBdRulerNote"></div>
+              <button class="btn btn-2 btn-wide hidden" id="calBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
+            </div>
+            <div class="stack" id="calBoardPrint">
+              <div class="sec-lbl" data-t="cal.board.sec"></div>
+              <div id="calBoard"></div>
+              <button class="btn btn-2 btn-wide" id="calBoardBtn"><span class="btn-label" data-t="cal.board.action"></span></button>
+              <button class="btn btn-2 btn-wide" id="calBoardOpen"><span class="btn-label" data-t="cal.board.open"></span></button>
+            </div>
+            <div class="sec-lbl" data-t="cal.folder.sec"></div>
+            <div class="note note-path" id="calFolder"></div>
+            <div class="row">
+              <button class="btn btn-2 grow" id="calImport"><span class="btn-label" data-t="cal.photos.import"></span></button>
+              <button class="btn btn-2 grow" id="calOpen"><span class="btn-label" data-t="cal.photos.open"></span></button>
+            </div>
           </div>
         </div>
         <div class="rp-foot">
-          <button class="btn btn-2 btn-wide" id="calCheck"><span class="btn-label" data-t="cal.check.action"></span></button>
+          <button class="btn btn-2 btn-wide" id="calCheck" data-t-title="cal.check.hint"><span class="btn-label" data-t="cal.check.action"></span></button>
           <button class="btn btn-2 btn-wide hidden" id="calSave"><span class="btn-label" data-t="cal.save.action"></span></button>
           <button class="btn btn-primary btn-wide" id="calRun"><span class="btn-label" data-t="cal.run.action"></span></button>
         </div>
@@ -294,61 +313,56 @@
           <div class="rp-sub" data-t="page.live.sub"></div>
         </div>
         <div class="rp-scroll stack">
-          <div class="sec-lbl" data-t="live.status.sec"></div>
-          <div class="live-state"><span class="live-dot" id="lvStDot"></span><span id="lvStWord"></span></div>
-          <div id="lvStatus"></div>
-          <div class="note" id="lvWhy"></div>
-          <div class="sec-lbl" data-t="live.check.sec"></div>
-          <div class="live-state live-later"><span class="live-dot off"></span><span class="note" data-t="live.check.note"></span></div>
-          <div class="sec-lbl" id="lvSpeedLbl" data-t="live.speed.sec"></div>
-          <div id="lvSpeed"></div>
-          <div class="note" id="lvLatency"></div>
           <div class="sec-lbl" data-t="live.board.sec"></div>
           <div class="combo" id="lvBoard" tabindex="0" role="button"><span class="combo-v"></span></div>
-          <div class="note" id="lvBoardNote"></div>
-          <div id="lvBd">
+          <div class="stack" id="lvBd">
             <div class="mlist" id="lvBdKinds">
-              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.screen"></span></span><span class="mbadge" data-t="board.badge.screen"></span></div>
-              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name"><span data-t="board.kind.printed"></span></span><span class="mbadge">A4</span></div>
+              <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.screen"></span></div>
+              <div class="mitem" data-kind="printed" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.printed"></span></div>
             </div>
-            <div class="stack" id="lvBdScreen">
-              <div id="lvBdSquare"></div>
-              <div class="callout callout-warn hidden" id="lvBdWarn"></div>
-              <button class="btn btn-2 btn-wide" id="lvBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
-              <button class="btn btn-2 btn-wide" id="lvBdMoreBtn"><span class="btn-label" data-t="board.more"></span></button>
-              <div class="stack hidden" id="lvBdMore">
-                <div class="sec-lbl" data-t="board.monitor.sec"></div>
-                <div class="combo" id="lvBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
-                <div id="lvBdRows"></div>
-                <div class="note" id="lvBdSure"></div>
-                <div class="sec-lbl" data-t="board.ruler.sec"></div>
-                <div class="row">
-                  <input class="input" type="number" id="lvBdRuler" min="50" max="2000" step="0.1"/>
-                  <span class="input-unit">mm</span>
-                </div>
-                <div class="note" id="lvBdRulerNote"></div>
-                <button class="btn btn-2 btn-wide hidden" id="lvBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
-              </div>
-            </div>
+            <div id="lvBdSquare"></div>
+            <div class="callout callout-warn hidden" id="lvBdWarn"></div>
+            <button class="btn btn-2 btn-wide" id="lvBdShow"><span data-icon="screen"></span><span class="btn-label" data-t="board.show"></span></button>
             <div class="stack" id="lvBdPrinted">
               <div class="sec-lbl" data-t="cal.square.sec"></div>
-              <div class="row">
+              <div class="row" data-t-title="cal.square.hint">
                 <input class="input" type="number" id="lvBdLong" min="50" max="1100" step="0.1"/>
                 <span class="input-unit">mm</span>
               </div>
-              <div class="note" id="lvBdLongNote"></div>
             </div>
           </div>
-          <div class="sec-lbl" data-t="live.reg.sec"></div>
-          <div class="note" id="lvRegNote"></div>
-          <button class="btn btn-2 btn-wide" id="lvRegLoad"><span data-icon="open"></span><span class="btn-label" data-t="live.reg.load"></span></button>
-          <button class="btn btn-2 btn-wide" id="lvRegDemo"><span class="btn-label" data-t="live.reg.demo"></span></button>
-          <div class="sec-lbl" data-t="live.cam.sec"></div>
-          <div class="note" id="lvCamNote"></div>
-          <div class="note note-path" id="lvCamPath"></div>
-          <div class="sec-lbl" data-t="live.phone.sec"></div>
-          <div id="lvPhone"></div>
-          <button class="btn btn-2 btn-wide" id="lvPhoneBtn"><span data-icon="phone"></span><span class="btn-label" data-t="live.phone.open"></span></button>
+          <div class="sec-lbl" data-t="live.overlay.sec"></div>
+          <div class="slrow" data-t-title="live.opacity.hint">
+            <span class="sl-l" data-t="live.opacity"></span>
+            <input type="range" id="lvOpacity" min="0" max="1" step="0.05" value="0.3"/>
+            <span class="sl-v" id="lvOpacityV"></span>
+          </div>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="lvAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="lvAdv">
+            <div class="stack" id="lvBdMore">
+              <div class="sec-lbl" data-t="board.monitor.sec"></div>
+              <div class="combo" id="lvBdMonitor" tabindex="0" role="button"><span class="combo-v"></span></div>
+              <div id="lvBdRows"></div>
+              <div class="note" id="lvBdSure"></div>
+              <div class="sec-lbl" data-t="board.ruler.sec"></div>
+              <div class="row" data-t-title="board.ruler.hint">
+                <input class="input" type="number" id="lvBdRuler" min="50" max="2000" step="0.1"/>
+                <span class="input-unit">mm</span>
+              </div>
+              <div class="note" id="lvBdRulerNote"></div>
+              <button class="btn btn-2 btn-wide hidden" id="lvBdForget"><span class="btn-label" data-t="board.ruler.forget"></span></button>
+            </div>
+            <div class="sec-lbl" id="lvStatusLbl" data-t="live.status.sec"></div>
+            <div id="lvStatus"></div>
+            <div class="sec-lbl" data-t="live.reg.sec"></div>
+            <div id="lvReg"></div>
+            <div class="row">
+              <button class="btn btn-2 grow" id="lvRegLoad" data-t-title="live.reg.load.hint"><span class="btn-label" data-t="live.reg.load"></span></button>
+              <button class="btn btn-2 grow" id="lvRegDemo"><span class="btn-label" data-t="live.reg.demo"></span></button>
+            </div>
+            <div class="sec-lbl" data-t="live.cam.sec"></div>
+            <div id="lvCam"></div>
+          </div>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide hidden" id="lvStop"><span data-icon="stop"></span><span class="btn-label" data-t="live.stop"></span></button>
@@ -363,28 +377,30 @@
           <div class="rp-sub" id="planSub"></div>
         </div>
         <div class="rp-scroll stack">
-          <label class="toggle"><input type="checkbox" id="planRef"/><span data-t="trials.plan.reference"></span>
-            <span class="aside" data-t="trials.plan.reference.aside"></span></label>
           <div class="sec-lbl" data-t="trials.plan.mass.sec"></div>
-          <div class="row">
+          <div class="row" data-t-title="trials.plan.mass.hint">
             <input class="input" type="number" id="planMass" min="1" step="0.1"/>
             <span class="input-unit">g</span>
           </div>
-          <div class="sec-lbl" data-t="trials.plan.extra.sec"></div>
-          <div class="stack hidden" id="extraForm">
-            <div class="combo" id="exHolder" tabindex="0" role="button"><span class="combo-v"></span></div>
-            <div class="combo" id="exAngle" tabindex="0" role="button"><span class="combo-v"></span></div>
-            <div class="combo" id="exDir" tabindex="0" role="button"><span class="combo-v"></span></div>
-            <label class="toggle"><input type="checkbox" id="exDrape"/><span data-t="trials.tile.drape"></span></label>
-            <div class="row">
-              <button class="btn btn-2 grow" id="exApply"><span class="btn-label" data-t="trials.plan.extra.apply"></span></button>
-              <button class="btn btn-2 grow" id="exCancel"><span class="btn-label" data-t="trials.plan.extra.cancel"></span></button>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="planAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="planAdv">
+            <label class="toggle" data-t-title="trials.plan.reference.hint"><input type="checkbox" id="planRef"/><span data-t="trials.plan.reference"></span></label>
+            <div class="sec-lbl" data-t="trials.plan.extra.sec"></div>
+            <div class="stack hidden" id="extraForm">
+              <div class="combo" id="exHolder" tabindex="0" role="button"><span class="combo-v"></span></div>
+              <div class="combo" id="exAngle" tabindex="0" role="button"><span class="combo-v"></span></div>
+              <div class="combo" id="exDir" tabindex="0" role="button"><span class="combo-v"></span></div>
+              <label class="toggle"><input type="checkbox" id="exDrape"/><span data-t="trials.tile.drape"></span></label>
+              <div class="row">
+                <button class="btn btn-2 grow" id="exApply"><span class="btn-label" data-t="trials.plan.extra.apply"></span></button>
+                <button class="btn btn-2 grow" id="exCancel"><span class="btn-label" data-t="trials.plan.extra.cancel"></span></button>
+              </div>
             </div>
+            <button class="btn btn-2 btn-wide" id="extraBtn" data-t-title="trials.plan.extra.hint"><span class="btn-label" data-t="trials.plan.extra.action"></span></button>
+            <div class="sec-lbl" data-t="trials.scanner.sec"></div>
+            <div class="note note-path" id="planScanner"></div>
+            <button class="btn btn-2 btn-wide" id="planScannerBtn"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
           </div>
-          <button class="btn btn-2 btn-wide" id="extraBtn"><span class="btn-label" data-t="trials.plan.extra.action"></span></button>
-          <div class="sec-lbl" data-t="trials.scanner.sec"></div>
-          <div class="note note-path" id="planScanner"></div>
-          <button class="btn btn-2 btn-wide" id="planScannerBtn"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
         </div>
         <div class="rp-foot">
           <button class="btn btn-primary btn-wide" id="planStart"><span data-icon="play"></span><span class="btn-label" id="planStartL"></span></button>
@@ -406,21 +422,21 @@
           </div>
           <div class="stack hidden" data-kind="scan">
             <div class="row" id="stWait"><span class="spinner spinner-sm"></span><span class="note" data-t="step.ctl.waiting"></span></div>
-            <div class="note note-path" id="stScanner"></div>
             <button class="btn btn-2 btn-wide" id="stScannerBtn"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
           </div>
-          <div class="stack hidden" data-kind="file">
-            <button class="btn btn-2 btn-wide" id="stImport"><span class="btn-label" data-t="step.ctl.import"></span></button>
-            <button class="btn btn-2 btn-wide hidden" id="stDiscard"><span class="btn-label" data-t="step.ctl.discard"></span></button>
+          <div class="stack hidden" data-kind="highspeed">
+            <button class="btn btn-2 btn-wide" id="stImportHs"><span class="btn-label" data-t="step.ctl.import"></span></button>
+          </div>
+          <div class="stack hidden" data-kind="staged">
+            <button class="btn btn-2 btn-wide" id="stDiscard"><span class="btn-label" data-t="step.ctl.discard"></span></button>
           </div>
           <div class="stack hidden" data-kind="spheres">
             <label class="toggle"><input type="checkbox" id="stSpheres"/><span data-t="step.ctl.spheres"></span></label>
             <div class="sec-lbl" data-t="step.ctl.capshift.sec"></div>
-            <div class="row">
+            <div class="row" data-t-title="step.ctl.capshift.hint">
               <input class="input" type="number" id="stShift" min="0" step="0.01"/>
               <span class="input-unit">mm</span>
             </div>
-            <div class="note" data-t="step.ctl.capshift.note"></div>
           </div>
           <div class="stack hidden" data-kind="close">
             <label class="toggle"><input type="checkbox" id="stSecond"/><span data-t="step.ctl.second"></span></label>
@@ -428,9 +444,16 @@
             <div class="sec-lbl" data-t="step.ctl.notes.sec"></div>
             <textarea class="input" id="stNotes" rows="3"></textarea>
           </div>
-          <div class="sec-lbl" data-t="step.ctl.void.sec"></div>
-          <input class="input" type="text" id="stVoidReason" data-t-ph="step.ctl.void.ph"/>
-          <button class="btn btn-danger btn-wide" id="stVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="stAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="stAdv">
+            <button class="btn btn-2 btn-wide" id="stImport"><span class="btn-label" data-t="step.ctl.import"></span></button>
+            <div class="sec-lbl" data-t="trials.scanner.sec"></div>
+            <div class="note note-path" id="stScanner"></div>
+            <button class="btn btn-2 btn-wide" id="stScannerBtn2"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
+            <div class="sec-lbl" data-t="step.ctl.void.sec"></div>
+            <input class="input" type="text" id="stVoidReason" data-t-ph="step.ctl.void.ph"/>
+            <button class="btn btn-danger btn-wide" id="stVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
+          </div>
         </div>
         <div class="rp-foot">
           <div class="rp-nav">
@@ -452,9 +475,12 @@
           <input class="input" type="text" id="lgValue" data-t-ph="log.edit.value"/>
           <input class="input" type="text" id="lgReason" data-t-ph="log.edit.reason"/>
           <button class="btn btn-2 btn-wide" id="lgSave"><span class="btn-label" data-t="log.edit.action"></span></button>
-          <div class="sec-lbl" id="lgVoidLbl" data-t="step.ctl.void.sec"></div>
-          <input class="input" type="text" id="lgVoidReason" data-t-ph="step.ctl.void.ph"/>
-          <button class="btn btn-danger btn-wide" id="lgVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="lgAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="lgAdv">
+            <div class="sec-lbl" id="lgVoidLbl" data-t="step.ctl.void.sec"></div>
+            <input class="input" type="text" id="lgVoidReason" data-t-ph="step.ctl.void.ph"/>
+            <button class="btn btn-danger btn-wide" id="lgVoid"><span class="btn-label" data-t="step.ctl.void.action"></span></button>
+          </div>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide" id="lgOpen"><span data-icon="open"></span><span class="btn-label" data-t="log.open.action"></span></button>
@@ -489,18 +515,21 @@
             <div class="col"><div class="sec-lbl" data-t="cfg.repetitions"></div><input class="input" type="number" id="cfgReps" min="1" step="1"/></div>
             <div class="col"><div class="sec-lbl" data-t="cfg.drape"></div><input class="input" type="number" id="cfgDrape" min="0" step="1"/></div>
           </div>
-          <div class="sec-lbl" data-t="cfg.order"></div>
-          <div class="combo" id="cfgOrder" tabindex="0" role="button"><span class="combo-v"></span></div>
-          <div class="cfg-pair">
-            <div class="col"><div class="sec-lbl" data-t="cfg.run"></div><input class="input" type="number" id="cfgRun" min="1" step="1"/></div>
-            <div class="col"><div class="sec-lbl" data-t="cfg.seed"></div><input class="input" type="number" id="cfgSeed" step="1"/></div>
-          </div>
-          <div class="cfg-pair">
-            <div class="col"><div class="sec-lbl" data-t="cfg.washers"></div><input class="input" type="number" id="cfgWashers" min="0" step="1"/></div>
-            <div class="col"><div class="sec-lbl" data-t="cfg.reposition"></div><input class="input" type="number" id="cfgRepos" min="0.1" step="0.1"/></div>
-          </div>
-          <label class="toggle"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
           <div class="note" id="cfgPreview"></div>
+          <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="cfgAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+          <div class="stack adv-box hidden" id="cfgAdv">
+            <div class="sec-lbl" data-t="cfg.order"></div>
+            <div class="combo" id="cfgOrder" tabindex="0" role="button"><span class="combo-v"></span></div>
+            <div class="cfg-pair">
+              <div class="col"><div class="sec-lbl" data-t="cfg.run"></div><input class="input" type="number" id="cfgRun" min="1" step="1"/></div>
+              <div class="col"><div class="sec-lbl" data-t="cfg.seed"></div><input class="input" type="number" id="cfgSeed" step="1"/></div>
+            </div>
+            <div class="cfg-pair">
+              <div class="col"><div class="sec-lbl" data-t="cfg.washers"></div><input class="input" type="number" id="cfgWashers" min="0" step="1"/></div>
+              <div class="col"><div class="sec-lbl" data-t="cfg.reposition"></div><input class="input" type="number" id="cfgRepos" min="0.1" step="0.1"/></div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
+          </div>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide" id="cfgReset"><span data-icon="reset"></span><span class="btn-label" data-t="cfg.reset"></span></button>
@@ -522,9 +551,9 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- The phone: the link (cable or Wi-Fi) with its pairing steps, its state and its quality, and the
-     live view on the phone's own screen. SlantUI's pane docked down the side of the work area,
-     opened from the Phone button on the rail (ui/40-phone.js). -->
+<!-- The phone: the link (cable or Wi-Fi) with its pairing, its state, and the
+     live view on the phone's own screen. SlantUI's pane docked down the side of
+     the work area, opened from the Phone button on the rail (ui/40-phone.js). -->
 <div class="sheet sheet-side" id="lkSheet" role="dialog" aria-labelledby="lkTitle">
   <div class="sheet-hd">
     <div class="sheet-title" id="lkTitle" data-t="link.title"></div>
@@ -532,20 +561,18 @@
   </div>
   <div class="sheet-body">
     <div class="stack">
-      <div class="sec-lbl" data-t="link.mode.sec"></div>
       <div class="mlist" id="lkModes">
-        <div class="mitem" data-mode="usb" tabindex="0" role="button"><span class="mitem-name"><span data-t="link.mode.usb"></span> <span class="mitem-det" data-t="link.mode.usb.det"></span></span><span class="mbadge">USB</span></div>
-        <div class="mitem" data-mode="wifi" tabindex="0" role="button"><span class="mitem-name"><span data-t="link.mode.wifi"></span> <span class="mitem-det" data-t="link.mode.wifi.det"></span></span><span class="mbadge">WI-FI</span></div>
+        <div class="mitem" data-mode="usb" tabindex="0" role="button" data-t-title="link.mode.usb.det"><span class="mitem-name" data-t="link.mode.usb"></span></div>
+        <div class="mitem" data-mode="wifi" tabindex="0" role="button" data-t-title="link.mode.wifi.det"><span class="mitem-name" data-t="link.mode.wifi"></span></div>
       </div>
       <div class="live-state"><span class="live-dot" id="lkDot"></span><span id="lkWord"></span></div>
       <div class="note" id="lkWhy"></div>
       <div id="lkRows"></div>
-      <div class="note" id="lkNote"></div>
 
-      <!-- Wi-Fi, not connected: pairing, once per PC -->
+      <!-- Wi-Fi, not connected: pairing with the QR code, once per PC -->
       <div class="stack" id="lkPair">
         <div class="sec-lbl" data-t="link.pair.sec"></div>
-        <div class="lk-step"><span class="tn">1</span><span data-t="link.pair.s1"></span></div>
+        <div class="lk-step" data-t-title="link.pair.s1.hint"><span class="tn">1</span><span data-t="link.pair.s1"></span></div>
         <div class="lk-step"><span class="tn">2</span><span data-t="link.pair.s2"></span></div>
         <div class="lk-step"><span class="tn">3</span><span data-t="link.pair.s3"></span></div>
         <div class="lk-qr-row">
@@ -555,31 +582,40 @@
             <button class="btn btn-2" id="lkQrBtn"><span class="btn-label" id="lkQrBtnL"></span></button>
           </div>
         </div>
-        <div class="lk-step"><span class="tn">4</span><span data-t="link.pair.or"></span></div>
-        <div class="cfg-pair">
-          <input class="input" type="text" id="lkPairAddr" data-t-ph="link.pair.addr.ph"/>
-          <input class="input" type="text" id="lkPairCode" inputmode="numeric" maxlength="7" data-t-ph="link.pair.code.ph"/>
-        </div>
-        <button class="btn btn-2 btn-wide" id="lkPairBtn"><span class="btn-label" data-t="link.pair.action"></span></button>
-        <div class="note" data-t="link.connect.note"></div>
-        <div class="row">
-          <input class="input grow" type="text" id="lkAddr" data-t-ph="link.connect.ph"/>
-          <button class="btn btn-2" id="lkConnect"><span class="btn-label" data-t="link.connect.action"></span></button>
-        </div>
       </div>
 
       <!-- the live view on the phone's own screen -->
       <div class="sec-lbl" data-t="view.sec"></div>
-      <div class="note" data-t="view.note"></div>
-      <button class="btn btn-primary btn-wide" id="vwOpen"><span data-icon="play"></span><span class="btn-label" data-t="view.open"></span></button>
+      <button class="btn btn-primary btn-wide" id="vwOpen" data-t-title="view.open.hint"><span data-icon="play"></span><span class="btn-label" data-t="view.open"></span></button>
       <div id="vwRows"></div>
-      <div class="lk-qr-row">
-        <div class="lk-qr" id="vwQr"></div>
-        <div class="lk-qr-side">
-          <div class="note" data-t="view.qr.note"></div>
-          <div class="note note-path" id="vwUrl"></div>
-          <div class="note" data-t="view.firewall"></div>
+
+      <button class="btn btn-2 btn-wide adv-btn" type="button" data-adv="lkAdv"><span class="btn-label" data-t="word.advanced"></span><span data-icon="chevron-down"></span></button>
+      <div class="stack adv-box hidden" id="lkAdv">
+        <div id="lkMore"></div>
+        <!-- Wi-Fi: pairing with a code, and connecting by address -->
+        <div class="stack" id="lkByHand">
+          <div class="sec-lbl" data-t="link.pair.code.sec"></div>
+          <div class="cfg-pair">
+            <input class="input" type="text" id="lkPairAddr" data-t-ph="link.pair.addr.ph" data-t-title="link.pair.or"/>
+            <input class="input" type="text" id="lkPairCode" inputmode="numeric" maxlength="7" data-t-ph="link.pair.code.ph"/>
+          </div>
+          <button class="btn btn-2 btn-wide" id="lkPairBtn"><span class="btn-label" data-t="link.pair.action"></span></button>
+          <div class="sec-lbl" data-t="link.connect.sec"></div>
+          <div class="row" data-t-title="link.connect.note">
+            <input class="input grow" type="text" id="lkAddr" data-t-ph="link.connect.ph"/>
+            <button class="btn btn-2" id="lkConnect"><span class="btn-label" data-t="link.connect.action"></span></button>
+          </div>
         </div>
+        <!-- another screen on the same network: the code to scan -->
+        <div class="sec-lbl" data-t="view.other.sec"></div>
+        <div class="lk-qr-row">
+          <div class="lk-qr" id="vwQr" data-t-title="view.firewall"></div>
+          <div class="lk-qr-side">
+            <div class="note" data-t="view.qr.note"></div>
+            <div class="note note-path" id="vwUrl"></div>
+          </div>
+        </div>
+        <div id="vwMore"></div>
       </div>
     </div>
   </div>
@@ -606,6 +642,7 @@
 <script src="ui/slantui.js"></script>
 <script src="ui/00-strings.js"></script>
 <script src="ui/01-shell.js"></script>
+<script src="ui/05-home.js"></script>
 <script src="ui/10-calibration.js"></script>
 <script src="ui/15-board.js"></script>
 <script src="ui/20-trials.js"></script>
