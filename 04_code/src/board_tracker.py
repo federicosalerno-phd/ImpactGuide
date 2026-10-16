@@ -10,13 +10,15 @@ runs the detection in a worker thread, every TRACK["detect_every_s"] or as soon 
              adaptive threshold windows sized to the markers, a lower minimum perimeter, sub-pixel marker corners; then
              the chessboard corners interpolated and refined by OpenCV's ChArUco detector.
   Tracker    each frame: the corners of the previous frame moved by pyramidal Lucas-Kanade optical flow (on the box
-             around the board, scaled so that a square is about TRACK["klt_square_px"] wide; forward and backward,
-             a corner that does not come back to itself is dropped), then put back on the true saddle point of the
-             chessboard at full resolution (cornerSubPix), so they never drift; the pose by Levenberg-Marquardt from the
-             pose of the previous frame, corners far from the pose dropped (and RANSAC when many are), accepted under
-             the reprojection limit. A detection comes back a few frames late: its corners are carried to the current
-             frame by the same flow (from the frame it was made on) and take the place of the tracked ones (the
-             re-anchoring); a disagreement between the two is counted.
+             around the board, on the image halved until a square is about TRACK["klt_square_px"] wide; started where
+             their speed takes them, with a wider window and a deeper pyramid when they move fast, and again from where
+             they were when the motion turns; forward and backward, a corner that does not come back to itself is
+             dropped), then put back on the true saddle point of the chessboard at full resolution (cornerSubPix), so
+             they never drift; the pose by Levenberg-Marquardt from the pose of the previous frame, corners far from
+             the pose dropped (and RANSAC when many are), accepted under the reprojection limit. A detection comes
+             back a few frames late: its corners are carried to the current frame by the same flow (from the frame it
+             was made on) and re-anchor the ones that drifted (by more than TRACK["reanchor_px"]) or were lost; the
+             others stay as tracked, so a detection makes no twitch.
   ambiguity  a small board seen nearly face on has two poses (IPPE) that fit almost equally well, mirrored about the
              line of sight; on the face 15 cm away they can differ by centimetres. The tracker keeps the one it has
              (the pose of each frame starts from the previous one), weighs the two on every frame (log ratio of their
@@ -46,8 +48,8 @@ TRACK = {
     "few_corners": 10,          # with fewer, the corners must spread over the board and fit tighter
     "few_rms_share": 0.5,       #   (RMS under this share of the limit)
     "klt_square_px": 20.0,      # the optical flow runs on the image halved until a square is about this wide
-    "klt_win": 15,              # Lucas-Kanade window (px, scaled image)
-    "klt_levels": 3,
+    "klt_win": 15,              # Lucas-Kanade window (px, scaled image), 21 when the corners move fast
+    "klt_levels": 3,            #   pyramid levels, up to 5 when they move fast
     "fb_px": 0.8,               # forward-backward error allowed (px, scaled image)
     "subpix_px": 1.6,           # cornerSubPix may move a corner at most this far from the flow (and half its window)
     "outlier_px": 2.0,          # a corner farther than this (and than 3 sigma) from the pose is dropped
@@ -61,6 +63,7 @@ TRACK = {
     "evidence_sure": 3.0,       # evidence for the pose kept to call it sure
     "evidence_keep": 0.92,      # forgetting per frame
     "corner_noise_px": 0.15,    # noise of a tracked corner from frame to frame (px), for the expected noise of the pose
+    "reanchor_px": 0.75,        # a detection re-anchors only the corners it moves more than this: no twitch
 }
 
 _SUBPIX = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 20, 0.01)
@@ -184,6 +187,7 @@ class TrackResult:
         self.box, self.marker_px, self.square_px = None, None, None
         self.ambiguity_px, self.evidence = 0.0, 0.0
         self.noise_px = None        # expected noise of the overlay from the rotation alone, px per frame (see _noise)
+        self.noise_pos_px = None    # and of the anchor (the board's centre), px per frame
         self.tm = {}
         self.why = ""
         self.counts = None          # corners before, after the flow, after the saddle point refinement
@@ -204,6 +208,7 @@ class Tracker:
         self.margin_share = (spec["square_mm"] - spec["marker_mm"]) / 2 / spec["square_mm"]
         self.anchor = np.asarray(anchor_points if anchor_points is not None else self.outline, np.float64)
         self.noise_points = np.ascontiguousarray(self.anchor[:: max(1, len(self.anchor) // 24)])
+        self.centre = np.array([nx * sq / 2, ny * sq / 2, 0.0])
         self.min_detect = self.s["min_corners_sheet"] if spec.get("name") == "sheet" else self.s["min_corners"]
         self.counts = {"frames": 0, "tracked": 0, "lost": 0, "detections": 0, "reanchors": 0, "disagreements": 0,
                        "flips": 0, "rejected": 0}
@@ -279,15 +284,26 @@ class Tracker:
         c0, c1 = pyr0[lv][y0:y1, x0:x1], pyr1[lv][y0:y1, x0:x1]
         off = np.array([x0, y0], np.float32)
         a = ((p0 + 0.5) * s - 0.5 - off).astype(np.float32).reshape(-1, 1, 2)
-        b = ((guess + 0.5) * s - 0.5 - off).astype(np.float32).reshape(-1, 1, 2)
-        win = (self.s["klt_win"], self.s["klt_win"])
-        n_lv = self.s["klt_levels"]
-        b, st, _ = cv2.calcOpticalFlowPyrLK(c0, c1, a, b, winSize=win, maxLevel=n_lv, criteria=_LK,
-                                            flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
-        back, st2, _ = cv2.calcOpticalFlowPyrLK(c1, c0, b, a.copy(), winSize=win, maxLevel=n_lv, criteria=_LK,
+        b0 = ((guess + 0.5) * s - 0.5 - off).astype(np.float32).reshape(-1, 1, 2)
+        # fast motion (the guess far from where the corners were): wider window, deeper pyramid
+        move = float(np.median(np.linalg.norm((b0 - a).reshape(-1, 2), axis=1)))
+        w_ = self.s["klt_win"] + (6 if move > 8 else 0)
+        n_lv = self.s["klt_levels"] + (move > 20) + (move > 40)
+        win = (w_, w_)
+
+        def lk(start):
+            b, st, _ = cv2.calcOpticalFlowPyrLK(c0, c1, a, start.copy(), winSize=win, maxLevel=n_lv, criteria=_LK,
                                                 flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
-        fb = np.linalg.norm((back - a).reshape(-1, 2), axis=1)
-        ok = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < self.s["fb_px"])
+            back, st2, _ = cv2.calcOpticalFlowPyrLK(c1, c0, b, a.copy(), winSize=win, maxLevel=n_lv, criteria=_LK,
+                                                    flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
+            fb = np.linalg.norm((back - a).reshape(-1, 2), axis=1)
+            return b, (st.ravel() == 1) & (st2.ravel() == 1) & (fb < self.s["fb_px"]), fb
+        b, ok, fb = lk(b0)
+        if move > 2 and (~ok).sum() > 0.2 * len(ok):
+            # where the motion turned (the end of a swing) the guess from the speed overshoots: from where they were
+            b2, ok2, fb2 = lk(a)
+            better = ok2 & (~ok | (fb2 < fb))
+            b[better], ok = b2[better], ok | ok2
         p1 = (b.reshape(-1, 2) + off + 0.5) / s - 0.5
         return p1.astype(np.float32), ok
 
@@ -364,7 +380,11 @@ class Tracker:
         X = self.noise_points
         _, Jf = cv2.projectPoints(X, rvec, tvec, K, dist)
         Jr = Jf[:, :3]
-        return float(np.sqrt(max(np.trace(Jr @ cov[:3, :3] @ Jr.T), 0.0) / len(X)))
+        rot = float(np.sqrt(max(np.trace(Jr @ cov[:3, :3] @ Jr.T), 0.0) / len(X)))
+        _, Jc = cv2.projectPoints(self.centre[None], rvec, tvec, K, dist)
+        Jc = Jc[:, :6]
+        pos = float(np.sqrt(max(np.trace(Jc @ cov @ Jc.T), 0.0)))
+        return rot, pos
 
     def _overlay_shift(self, Ta, Tb, K):
         return float(np.sqrt(np.mean(np.sum((project(self.anchor, Ta, K, np.zeros(5))
@@ -471,7 +491,7 @@ class Tracker:
         res.sure = bool(res.ok and self.sure)
         if res.ok:
             res.T = self.T
-            res.noise_px = self._noise(self.ids, self.T, K, dist)
+            res.noise_px, res.noise_pos_px = self._noise(self.ids, self.T, K, dist) or (None, None)
             self.history[n] = (self.ids.copy(), self.pts.copy())
             res.square_px = self._square_px(self.T, K)
             res.box, res.marker_px = self.box_for(self.T, K, dist, (w, h))
@@ -511,12 +531,24 @@ class Tracker:
         ids, pts = d.ids[ok], pts[ok]
         if len(ids) < self.min_detect:
             return
-        # the tracked corners the detection missed
+        motion = None
         if self.T is not None and len(self.ids):
+            # where the detection agrees with the tracked corners they stay as they are (and keep their speed): the
+            # pose does not twitch at every detection; it moves only the corners that drifted or were lost
+            common, ia, ib = np.intersect1d(ids, self.ids, return_indices=True)
+            agree = np.linalg.norm(pts[ia] - self.pts[ib], axis=1) < self.s["reanchor_px"]
+            pts[ia[agree]] = self.pts[ib[agree]]
+            if self.motion is not None and len(self.motion) == len(self.ids):
+                mean = self.motion.mean(0)
+                motion = np.tile(mean, (len(ids), 1)).astype(np.float32)
+                motion[ia] = self.motion[ib]
+            # the tracked corners the detection missed
             extra = ~np.isin(self.ids, ids)
             if extra.any():
                 ids = np.concatenate([ids, self.ids[extra]])
                 pts = np.vstack([pts, self.pts[extra]])
+                if motion is not None:
+                    motion = np.vstack([motion, self.motion[extra]])
         if self.T is not None:
             T, rms, keep = self._fit(ids, pts, K, dist, self.T)
         else:
@@ -524,6 +556,8 @@ class Tracker:
         if T is None:
             return
         ids, pts = ids[keep], pts[keep]
+        if motion is not None:
+            motion = motion[keep]
         was_ok = res.ok
         if not self._accept(res, T, rms, ids, pts, limit, K, dist, "detected" if d.n == n else "carried"):
             self.counts["rejected"] += 1
@@ -531,7 +565,7 @@ class Tracker:
                 res.ok = True
             return
         self.best = len(ids)
-        self.motion = None
+        self.motion = motion
         res.reanchored = True
         self.counts["reanchors"] += 1
         if before is None:

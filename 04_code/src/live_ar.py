@@ -3,17 +3,21 @@
 Three threads work on the frames of the stream (live.py), always on the newest one, never on a queue:
   track     every frame: the board's ChArUco corners followed from the previous frame by optical flow and put back on
             the chessboard's saddle points, the pose from them (board_tracker.py), then the temporal filter
-            (pose_filter.py: One Euro filter on SE(3) with a dead band, outlier gate, glide, hold and fade). A few
-            milliseconds, so it keeps the rate of the stream.
+            (pose_filter.py: One Euro filter on SE(3) in two channels that follow the noise the tracker expects, so a
+            precise pose is drawn as it comes and stays glued to the board; outlier gate, glide, hold and fade). A
+            frame where the board is lost shortly after it was followed is searched at once where the pose carried on
+            puts it. A few milliseconds, so it keeps the rate of the stream.
   detect    now and then (TRACK["detect_every_s"], or at once when the tracking weakens or the board is lost): the
             full ChArUco detection, in a box around the board or in the whole frame; its corners re-anchor the
             tracking a few frames later.
   compose   the newest frame tracked: the face (and the mandible) drawn at its filtered pose with gl_overlay.py, a fill
-            and an outline at the opacity asked for, board axes and corners on request, JPEG. It owns the OpenGL
-            context.
+            and an outline at the opacity asked for (soft edges and shading: no shimmer), board axes and corners on
+            request, the picture turned by quarter turns to stand the way the phone is held (the pose stays in the
+            sensor's frame), JPEG. It owns the OpenGL context.
 So each frame is drawn at the pose found on that same frame, at the rate of the stream; when the computer falls
 behind, frames are skipped, never queued. The overlay comes late by the stream's latency (about 150 ms on the cable)
-plus the processing, but on its own frame. The page's calls (status, configure, next_jpeg) only read or set values.
+plus the processing, but on its own frame. The page's calls (status, configure, next_jpeg) only read or set values;
+only a change of the board starts the tracking again (not the layers, the opacity or the rotation).
 
 Frames as ai_design.md (Notazione): C camera (OpenCV), M board (cv2.aruco.CharucoBoard: origin at the outer corner of
 the first square, x along the printed columns, y along the rows, z into the board), B head (bench scene, mm).
@@ -52,7 +56,8 @@ For the app:
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
     ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...,
-                 opacity=...)                        # opacity 0-1 of the overlay's fill and outline (default OPACITY)
+                 opacity=..., view_rotation=...)     # opacity 0-1 of the overlay's fill and outline (default OPACITY);
+                                                     # view_rotation None (the phone's way up) or 0/90/180/270
     ar.set_registration(path or None)
     ar.set_tracking(hold_s=..., ...)                 # TRACKING and board_tracker.TRACK overrides
     ar.stop(); ar.shutdown()
@@ -117,6 +122,7 @@ JPEG_QUALITY = 80
 # 0 flat, 1 black where the surface is seen edge on). Their opacity is the setting `opacity` (0-1) times fill and line
 # (capped at 1): at the default OPACITY a soft tint and a clear outline, at 1 a nearly opaque face.
 OPACITY = 0.3
+SOFT = {"feather_px": 0.8, "smooth_px": 2.0}   # the overlay's edge feathered and its shading blurred (display px)
 STYLE = {"face": {"fill": 0.85, "line": 2.5, "shade": 0.6}, "mandible": {"fill": 0.9, "line": 2.2, "shade": 0.6}}
 COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC"}
 BOARDS = ("patient", "sheet")
@@ -127,15 +133,18 @@ TRACKING = {
     "beta": 0.25,             # cutoff added per px/s of the model's speed past the dead band: higher lags less
     "d_cutoff_hz": 2.0,       # smoothing of that speed
     "lead": True,             # moving, the filter carries the pose on by its speed first: no lag at a steady speed
-    "still_px_s": 15.0,       # dead band: slower than this (px/s at the stream size) is noise, not motion
-    "predict_s": 0.1,         # a frame without its own pose is drawn at the pose carried on at most this far
+    "still_px_s": 8.0,        # dead band at least this (px/s at the stream size): slower is noise, not motion
+    "predict_s": 0.3,         # a frame without its own pose is drawn at the pose carried on, at most this far,
+    "predict_tau_s": 0.12,    #   the speed dying away with this time constant (no freeze, no running off)
+    "glide_gap_s": 0.1,       # a jump after this long without the board is taken at once (no glide from a stale pose)
     "gate_px": 40.0,          # a pose moving the model more than this (px, stream size) from the prediction is a jump:
     "strong_corners": 0.5,    #   believed with at least this share of the board's corners
     "strong_rms": 0.6,        #   and an RMS under this share of the limit (gliding there), otherwise only if the next
     "glide_s": 0.15,          #   pose agrees
-    "noise_k": 2.0,           # the rotation's dead band: this many times the speed its expected noise gives
-    "noise_ref_px": 0.5,      # rotation noise (px per frame at the model) up to which it is smoothed like the position;
-    "min_cutoff_floor": 0.4,  #   noisier, its lowest cutoff goes down in proportion, to this share at most
+    "noise_k": 2.0,           # each channel's dead band: this many times the speed its expected noise gives
+    "noise_ref_px": 0.5,      # the lowest cutoff scales with noise_ref_px over the expected noise (px per frame),
+    "min_cutoff_floor": 0.4,  #   down to this share for a noisy measure (a small board far away)
+    "min_cutoff_cap": 3.0,    #   and up to this many times for a precise one: the overlay stays glued to the board
     "wait_sure": True,        # a new acquisition is drawn once its mirrored pose is ruled out (board_tracker.py)
     # loss of the board
     "hold_s": 0.7,            # the last pose stays drawn this long
@@ -143,6 +152,9 @@ TRACKING = {
     "fade_in_s": 0.1,         # and fades in when the board is found again,
     "acquire_frames": 2,      #   after this many poses in a row
     "roi_s": 0.4,             # after the board was lost the detection looks where it was for this long
+    "recover_s": 0.8,         # and for this long each frame without the board is searched at once where the board
+                              #   should be (the pose carried on): the overlay picks it up again on the next frame,
+    "recover_px": 250000,     #   when that box, at the scale of the search, is at most this many px (a few ms)
     "views": False,           # separate views, not a video (tests): every frame detected on its own, nothing carried
 }
 _GL_THREAD = None                       # the thread that owns gl_overlay's OpenGL context
@@ -696,7 +708,7 @@ class LiveAR:
                       "marker_mm": float(marker_mm) if marker_mm else None,
                       "registration": str(registration) if registration else "", "face": bool(face),
                       "mandible": bool(mandible), "axes": bool(axes),
-                      "opacity": float(np.clip(opacity, 0.0, 1.0)), "version": 1}
+                      "opacity": float(np.clip(opacity, 0.0, 1.0)), "view_rotation": None, "version": 1}
         self._tracking_version = 1
         self._stream = None
         self._starting = False
@@ -744,6 +756,7 @@ class LiveAR:
         self._served = deque(maxlen=60)
         self._verdicts = deque(maxlen=90)
         self._skipped = 0                 # frames tracked but not drawn (the compose thread was busy)
+        self._view_k = None               # quarter turns of the composed frame (_view_quarter)
         self._cpu = deque(maxlen=40)      # (wall, process CPU time) for the load
 
     # ── control, from any thread ─────────────────────────────────────────
@@ -808,9 +821,13 @@ class LiveAR:
 
     def configure(self, **kw):
         """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
-        mandible, axes, opacity (0-1, of the overlay's fill and outline): applied from the next frame."""
+        mandible, axes, opacity (0-1, of the overlay's fill and outline), view_rotation (None: the phone's way up,
+        else 0, 90, 180 or 270 degrees clockwise): applied from the next frame. Only a change of the board starts the
+        tracking again; the layers, the opacity and the rotation do not touch it."""
         if kw.get("board") is not None and kw["board"] not in BOARDS:
             raise LiveARError(f"unknown board {kw['board']}")
+        if "view_rotation" in kw and kw["view_rotation"] not in (None, 0, 90, 180, 270):
+            raise LiveARError(f"view_rotation {kw['view_rotation']}: None, 0, 90, 180 or 270")
         with self._lock:
             before = {k: self._want[k] for k in ("board", "square_mm", "squares", "marker_mm")}
             if kw.get("board") is not None:
@@ -826,9 +843,12 @@ class LiveAR:
                     self._want[k] = bool(kw[k])
             if kw.get("opacity") is not None:
                 self._want["opacity"] = float(np.clip(float(kw["opacity"]), 0.0, 1.0))
-            self._want["version"] += 1
+            if "view_rotation" in kw:
+                self._want["view_rotation"] = kw["view_rotation"]
+            board_changed = before != {k: self._want[k] for k in before}
+            if board_changed:
+                self._want["version"] += 1
             want = dict(self._want)
-        board_changed = before != {k: want[k] for k in before}
         if not self.running:
             self._apply(want)
         elif self.synthetic and board_changed and (want["board"] != self._spec["name"] or want["board"] == "sheet"):
@@ -982,8 +1002,12 @@ class LiveAR:
             if T is None and "face" in self._models:
                 T, reg["demo"] = demo_registration(spec, self._models["face"][0])
             # one assignment, so a worker never sees the board of one setting with the detector of another
+            # the way up of the model in M: +z of the bench frame (the top of the head); the top of the board without
+            # a registration
+            up = T[:3, :3] @ np.array([0, 0, 1.0]) if T is not None else np.array([0, -1.0, 0])
             self._setup = {"board": board, "spec": spec, "detector": detector, "T_M_B": T, "registration": reg,
-                           "version": want["version"], "obj": board.getChessboardCorners().astype(np.float64)}
+                           "version": want["version"], "obj": board.getChessboardCorners().astype(np.float64),
+                           "up_M": up / np.linalg.norm(up)}
             self._applied = want["version"]
 
     @property
@@ -1104,12 +1128,19 @@ class LiveAR:
         t1 = time.perf_counter()
         res = tracker.step(gray, item.t_capture, item.n, K, dist, limit, det)
         t2 = time.perf_counter()
+        if not res.ok and not s.get("views"):
+            res = self._recover(tracker, filt, setup, gray, item, K, dist, limit, res)
+        if res.ok and not res.sure and filt.t_good is not None and item.t_capture - filt.t_good <= s["hold_s"]:
+            # found again after a short loss where the overlay still is: the same of the two mirrored poses
+            prior = filt.prior(item.t_capture)
+            if prior is not None and tracker._overlay_shift(res.T, prior, K) < 3 * tracker.s["ambiguous_px"]:
+                tracker.sure = res.sure = True
         spec = setup["spec"]
         strong = res.ok and res.n >= s["strong_corners"] * spec["corners"] and res.rms <= s["strong_rms"] * limit
         use = res.T if (res.ok and (res.sure or not s.get("wait_sure", True))) else None
         if not s.get("smooth", True) and use is not None:
             strong = True
-        verdict = filt.measure(item.t_capture, use, strong, res.noise_px)
+        verdict = filt.measure(item.t_capture, use, strong, res.noise_px, res.noise_pos_px)
         T, vis, state = filt.pose_at(item.t_capture)
         t3 = time.perf_counter()
         # the next detection: in the box around the board, or where it was last, or in the whole frame
@@ -1153,8 +1184,34 @@ class LiveAR:
                                    "sure": res.sure, "T_raw": res.T, "T": T, "vis": vis, "state": state,
                                    "verdict": verdict, "corners": res.n, "rms_px": res.rms, "source": res.source,
                                    "reanchored": res.reanchored, "shift_px": res.shift_px, "flipped": res.flipped,
-                                   "noise_px": res.noise_px,
+                                   "noise_px": res.noise_px, "noise_pos_px": res.noise_pos_px,
+                                   "recovered": res.source == "recovered",
                                    "t_done": t3, "tm": tm, "detection": None if det is None else det.n})
+
+    def _recover(self, tracker, filt, setup, gray, item, K, dist, limit, res):
+        """The board lost on this frame shortly after it was followed: searched at once in the box where the pose
+        carried on puts it (grown by its speed), on this same frame, so the overlay does not wait for the worker."""
+        lb = self._lost_box
+        if lb is None or item.t_capture - lb[2] > self.tracking["recover_s"]:
+            return res
+        prior = filt.prior(item.t_capture)
+        box, mpx = (tracker.box_for(prior, K, dist, item.size) if prior is not None else (None, None))
+        if box is None:
+            box, mpx = lb[0], lb[1]
+        # only where it is quick (a small board, or a large one far away): a large box is left to the worker, which
+        # takes this same frame at once
+        scale = min(1.0, self.tracking["marker_px"] / max(mpx or 1.0, 1.0))
+        if (box[2] - box[0]) * (box[3] - box[1]) * scale * scale > self.tracking["recover_px"]:
+            return res
+        d = setup["detector"].detect(gray, box, mpx, n=item.n, t=item.t_capture)
+        if len(d.ids) < tracker.min_detect:
+            return res
+        res2 = tracker.step(gray, item.t_capture, item.n, K, dist, limit, d)
+        if res2.ok:
+            res2.source = "recovered"
+            res2.tm = {**res.tm, **res2.tm, "recover_ms": d.ms}
+            return res2
+        return res
 
     # ── thread 2: the detection, now and then ────────────────────────────
     def _detect_loop(self):
@@ -1227,10 +1284,13 @@ class LiveAR:
                     masks[name] = r.mask
                     st = STYLE[name]
                     shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
-                    self._paint(img, r, self.colors[name], st, alpha, shade)
+                    self._paint(img, r, self.colors[name], st, alpha, shade, SOFT["feather_px"], SOFT["smooth_px"])
         t3 = time.perf_counter()
         if want["axes"] and T is not None and vis > 0.5:
             self._draw_board(img, T, Kd, dist, spec, setup, res, s)
+        k = self._view_quarter(T if T is not None else res.T, setup, want, job["stream"])
+        if k:
+            img = cv2.rotate(img, (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE)[k - 1])
         t4 = time.perf_counter()
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         t5 = time.perf_counter()
@@ -1244,6 +1304,8 @@ class LiveAR:
             self._tm_show.append(tm_show)
             self._shown_times.append(t5)
             st = self._status_of(job["filter"], state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, t5 - item.t)
+            st["view_rotation"] = 90 * k
+            st["display"] = [img.shape[1], img.shape[0]]
             self._status = st
             if kind == "measured" and res.ok:
                 self._masks = (item.n, masks)
@@ -1251,8 +1313,33 @@ class LiveAR:
                 self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = buf.tobytes(), self._jpeg_n + 1, img, t5
             if self.trace is not None:
                 self.trace.append({"what": "shown", "n": item.n, "t": item.t, "tc": item.t_capture, "t_done": t5,
-                                   "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show})
+                                   "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show,
+                                   "size": [w, h], "view": 90 * k})
             self._frame_ready.notify_all()
+
+    def _view_quarter(self, T, setup, want, stream):
+        """Quarter turns (clockwise) of the composed frame so that it stands the way the phone is held, as in the
+        phone's own camera app: the frames come as the sensor gives them, the pose stays in the sensor's frame (the
+        intrinsics never change) and only the picture is turned. The way up is the model's: the top of the head
+        (+z of the bench frame through the registration), which on the bench and on a board on a monitor is up in
+        the room; it changes only once the picture would stand more than 70 degrees off (no flapping near 45) and
+        stays when the camera looks along it. Before the first pose: the phone held upright (the sensor's mounting, 90 degrees on the Poco X7
+        Pro). view_rotation set to 0, 90, 180 or 270 fixes it."""
+        fixed = want.get("view_rotation")
+        if fixed in (0, 90, 180, 270):
+            return fixed // 90
+        if T is not None:
+            u = T[:3, :3] @ setup["up_M"]
+            if np.hypot(u[0], u[1]) > 0.35:
+                theta = np.degrees(np.arctan2(u[1], u[0]))       # the way up in the image (x right, y down)
+
+                def off(k):                                     # how far a turn of k quarters leaves it from up
+                    return abs((theta + 90 * k + 90 + 180) % 360 - 180)
+                if self._view_k is None or off(self._view_k) > 70:
+                    self._view_k = int(min(range(4), key=off))
+        if self._view_k is None:
+            return int(getattr(stream, "sensor_orientation", 0) or 0) // 90 % 4
+        return self._view_k
 
     def _draw_board(self, img, T, Kd, dist, spec, setup, res, s):
         """Board axes at the drawn pose and the corners where the tracker has them on this frame (dots): only what is
@@ -1327,25 +1414,39 @@ class LiveAR:
         return np.concatenate([[0], np.rint(255 * (1 - depth * (1 - cos)))]).astype(np.uint8)
 
     @staticmethod
-    def _paint(img, r, colour, style, alpha=1.0, shade=None):
+    def _paint(img, r, colour, style, alpha=1.0, shade=None, feather=0.8, smooth=2.0):
         """The visible model as a tint over the image and a thin smooth outline; alpha (the opacity setting times
-        the fade) scales both."""
-        x0, y0 = r.offset
+        the fade) scales both. Against shimmer the silhouette is feathered by about a pixel (feather, px) and the flat
+        shading of the triangles blurred inside it (smooth, px; normalised, so the edges do not darken): a pose that
+        moves by a fraction of a pixel changes the picture by less than with a hard mask and flat facets (16/10:
+        flicker under a smooth sub-pixel motion 0.41 to 0.36 grey levels, 99th percentile 8.3 to 5.7)."""
         bh, bw = r.faces.shape
         if not (bh and bw) or alpha <= 0:
             return
-        roi = img[y0:y0 + bh, x0:x0 + bw]
-        m = r.mask[y0:y0 + bh, x0:x0 + bw]
+        x0, y0 = r.offset
+        H, W = img.shape[:2]
+        pad = int(np.ceil(3 * max(feather, 0.5)))
+        xa, ya, xb, yb = max(0, x0 - pad), max(0, y0 - pad), min(W, x0 + bw + pad), min(H, y0 + bh + pad)
+        roi = img[ya:yb, xa:xb]
+        m = r.mask[ya:yb, xa:xb]
         if not cv2.countNonZero(m):
             return
+        a_fill = min(1.0, style["fill"] * alpha)
+        soft = cv2.GaussianBlur(m, (0, 0), feather) if feather > 0 else m
+        w = soft.astype(np.float32) * (a_fill / 255)
         if shade is None:
-            tint = np.empty_like(roi)
-            tint[:] = colour
+            light = np.full(m.shape, 255, np.uint8)
         else:
-            light = cv2.cvtColor(shade[r.faces + 1], cv2.COLOR_GRAY2BGR)
-            tint = cv2.multiply(light, tuple(c / 255 for c in colour) + (0,))
-        a = min(1.0, style["fill"] * alpha)
-        cv2.copyTo(cv2.addWeighted(roi, 1 - a, tint, a, 0), m, roi)
+            sh = np.zeros(m.shape, np.uint8)
+            sh[y0 - ya:y0 - ya + bh, x0 - xa:x0 - xa + bw] = shade[r.faces + 1]
+            if smooth > 0:      # blurred inside the silhouette only: sum of shade over sum of mask
+                num = cv2.GaussianBlur(cv2.bitwise_and(sh, m), (0, 0), smooth)
+                den = cv2.GaussianBlur(m, (0, 0), smooth)
+                light = cv2.divide(num, cv2.max(den, 1), scale=255)
+            else:
+                light = sh
+        tint = cv2.multiply(cv2.cvtColor(light, cv2.COLOR_GRAY2BGR), tuple(c / 255 for c in colour) + (0,))
+        roi[:] = cv2.blendLinear(roi, tint, 1.0 - w, w)
         outline, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
         lines = []
         for c in outline:
@@ -1962,6 +2063,7 @@ def run_test():
         twin_check(ar, expect)
         hand_check(ar, expect)
         opacity_check(ar, expect)
+        settings_check(ar, expect)
         turn_check(ar, expect)
         burst_check(ar, expect)
     finally:
@@ -2002,6 +2104,31 @@ def opacity_check(ar, expect):
                                                                                 for k, v in tints.items()))
 
 
+def settings_check(ar, expect):
+    """The opacity slider moved and the layers switched while the board is tracked (a change every 150 ms, as the
+    page sends them): the tracking goes on, no frame loses its pose or its overlay (16/10: in the version before, each
+    change started the tracking again, and 3 frames in 4 lost the overlay)."""
+    ar.configure(board="sheet", mandible=False, axes=False, opacity=OPACITY)
+    ar.trace = []
+    ar.start()
+    time.sleep(1.5)
+    t0 = time.perf_counter()
+    for k in range(20):
+        ar.configure(opacity=0.3 + 0.7 * (k % 2), axes=bool(k % 4 < 2), face=True)
+        time.sleep(0.15)
+    rows = [r for r in ar.trace if r["t"] >= t0 + 0.1]
+    ar.trace = None
+    ar.stop()
+    ar.configure(opacity=OPACITY, axes=True)
+    tr = [r for r in rows if r["what"] == "track"]
+    sh = [r for r in rows if r["what"] == "shown"]
+    lost = sum(not r["ok"] for r in tr)
+    hidden = sum(r["vis"] <= 0 for r in sh)
+    expect(tr and lost == 0 and hidden == 0 and not any(r.get("verdict") == "restarted" for r in tr),
+           f"opacity and layers changed 20 times while tracking: {lost} of {len(tr)} frames without a pose, {hidden} "
+           f"of {len(sh)} drawn without the overlay")
+
+
 def turn_check(ar, expect):
     """Frames that turn upright (1440 x 1920) and back, as a phone turned in the hand could send: no error, the
     video goes on at every size, the board is found again across."""
@@ -2026,14 +2153,19 @@ def turn_check(ar, expect):
     ar.replay, ar.replay_truth = saved
     shown = [r for r in rows if r["what"] == "shown"]
     sizes = {tuple(r.get("size", ())) for r in rows if r["what"] == "track"}
-    found = {}
+    found, views = {}, {}
     for r in rows:
         if r["what"] == "track":
             found.setdefault(tuple(r["size"]), []).append(r["ok"])
+        elif r["what"] == "shown" and r["T"] is not None:
+            views.setdefault(tuple(r["size"]), []).append(r["view"])
+    # the board stands upright in the frames across; turned a quarter clockwise, the picture is turned back
+    upright = {k: (np.mean(np.array(v) == (0 if k[0] > k[1] else 270)) if v else 0.0) for k, v in views.items()}
     expect(not st.get("error") and len(shown) >= 25 and len(sizes) == 2
-           and all(np.mean(v) > 0.5 for v in found.values()),
+           and all(np.mean(v) > 0.5 for v in found.values()) and all(u > 0.8 for u in upright.values()),
            f"frames turned upright and back: no error ({st.get('error') or 'none'}), {len(shown)} frames shown, "
-           f"board found on " + ", ".join(f"{k[0]}x{k[1]} {np.mean(v):.0%}" for k, v in found.items()))
+           f"board found on " + ", ".join(f"{k[0]}x{k[1]} {np.mean(v):.0%}" for k, v in found.items())
+           + "; picture turned to stand up on " + ", ".join(f"{k[0]}x{k[1]} {u:.0%}" for k, u in upright.items()))
 
 
 def burst_check(ar, expect):

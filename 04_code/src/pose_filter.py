@@ -52,19 +52,20 @@ def smoothing(cutoff_hz, dt):
 
 class OneEuroPose:
     """One Euro filter on a rigid transform T (4 x 4, camera from board, mm), in two channels: the position of the
-    anchor (the board's centre, which the corners give precisely) and the rotation (which a small board gives far
-    less precisely, and which the lever of the model, radius mm from the anchor, magnifies in the image). Each channel
-    has its own cutoff from its own speed in the image (px/s: the anchor's; radius times the angular speed) past its
-    own dead band. The rotation's dead band and lowest cutoff follow the noise the tracker expects for the rotation
-    (noise_px, px per frame at the model): a small board far away has its rotation smoothed more, while the position
-    still follows the hand without lag."""
+    anchor (the board's centre) and the rotation (which a small board gives far less precisely, and which the lever of
+    the model, radius mm from the anchor, magnifies in the image). Each channel has its own cutoff from its own speed
+    in the image (px/s: the anchor's; radius times the angular speed) past its own dead band, and both follow the noise
+    the tracker expects on this frame (noise_px for the rotation at the model, noise_pos_px for the anchor, px per
+    frame): a precise measure (many corners, a large board) is followed almost as it comes, so the overlay stays glued
+    to the board even when the hand trembles; a noisy one (a small board far away) is smoothed while still."""
 
     def __init__(self, settings, anchor, radius_mm, f_px):
         self.s = settings
         self.anchor = np.asarray(anchor, np.float64).reshape(3)
         self.radius, self.f = float(radius_mm), float(f_px)
         self.t = None
-        self.noise = None
+        self.noise = None           # expected noise of the rotation at the model, px per frame (smoothed)
+        self.noise_pos = None       # and of the anchor
 
     def reset(self, T, t):
         self.R = np.array(T[:3, :3], np.float64)
@@ -80,21 +81,29 @@ class OneEuroPose:
     def speed(self):
         return sum(self.speeds())
 
-    def dead_bands(self, dt=1 / 30):
+    def _channel(self, noise, dt):
+        """(dead band px/s, lowest cutoff Hz) of a channel whose measure has this noise (px per frame; None: unknown)."""
         s = self.s
-        noise = self.noise or 0.0
-        return s["still_px_s"], max(s["still_px_s"], s.get("noise_k", 1.5) * noise / max(dt, 1e-3))
+        if noise is None:
+            return s["still_px_s"], s["min_cutoff_hz"]
+        ratio = s.get("noise_ref_px", 0.5) / max(noise, 1e-6)
+        cut = s["min_cutoff_hz"] * float(np.clip(ratio, s.get("min_cutoff_floor", 0.3), s.get("min_cutoff_cap", 1.0)))
+        return max(s["still_px_s"], s.get("noise_k", 1.5) * noise / max(dt, 1e-3)), cut
 
-    def update(self, T, t, noise_px=None):
+    def dead_bands(self, dt=1 / 30):
+        return self._channel(self.noise_pos, dt)[0], self._channel(self.noise, dt)[0]
+
+    def update(self, T, t, noise_px=None, noise_pos_px=None):
+        def mix(old, new):
+            return None if new is None else float(new) if old is None else 0.8 * old + 0.2 * float(new)
         if self.t is None:
             self.reset(T, t)
-            if noise_px is not None:
-                self.noise = float(noise_px)
+            self.noise, self.noise_pos = mix(None, noise_px), mix(None, noise_pos_px)
             return
         s = self.s
         dt = max(float(t) - self.t, 1e-3)
-        if noise_px is not None:
-            self.noise = float(noise_px) if self.noise is None else 0.8 * self.noise + 0.2 * float(noise_px)
+        self.noise = mix(self.noise, noise_px) if noise_px is not None else self.noise
+        self.noise_pos = mix(self.noise_pos, noise_pos_px) if noise_pos_px is not None else self.noise_pos
         R_m = np.asarray(T[:3, :3], np.float64)
         p_m = R_m @ self.anchor + T[:3, 3]
         dw = rotvec(self.R.T @ R_m)
@@ -102,11 +111,9 @@ class OneEuroPose:
         self.v += a_d * ((p_m - self.p) / dt - self.v)
         self.w += a_d * (dw / dt - self.w)
         v_px, w_px = self.speeds()
-        dead_t, dead_r = self.dead_bands(1 / 30)
-        ref = s.get("noise_ref_px", 0.5)
-        min_r = s["min_cutoff_hz"] * float(np.clip(ref / max(self.noise or 0.0, 1e-6), s.get("min_cutoff_floor", 0.3),
-                                                   1.0))
-        a_t = smoothing(s["min_cutoff_hz"] + s["beta"] * max(0.0, v_px - dead_t), dt)
+        dead_t, min_t = self._channel(self.noise_pos, 1 / 30)
+        dead_r, min_r = self._channel(self.noise, 1 / 30)
+        a_t = smoothing(min_t + s["beta"] * max(0.0, v_px - dead_t), dt)
         a_r = smoothing(min_r + s["beta"] * max(0.0, w_px - dead_r), dt)
         lead = s.get("lead", True)
         # moving, blend towards the pose carried on by the filtered velocity: no lag at a steady speed
@@ -116,13 +123,16 @@ class OneEuroPose:
         self.R = R0 @ rotmat(a_r * rotvec(R0.T @ R_m))
         self.t = float(t)
 
-    def predict(self, t, horizon=None, still_px_s=0.0):
-        """T at time t, extrapolated with the filtered velocities for at most `horizon` seconds past the last pose;
-        a channel is not extrapolated while it moves slower than its dead band (the speed of noise)."""
+    def predict(self, t, horizon=None, still_px_s=0.0, tau=None):
+        """T at time t, carried on with the filtered velocities for at most `horizon` seconds past the last pose, the
+        velocity dying away with time constant tau (s; None: kept); a channel moving slower than its dead band (the
+        speed of noise) is not carried on."""
         dt = float(t) - self.t
         if horizon is not None:
             dt = min(dt, horizon)
         dt = max(dt, 0.0)
+        if tau:
+            dt = tau * (1.0 - np.exp(-dt / tau))
         v_px, w_px = self.speeds()
         dead_t, dead_r = self.dead_bands()
         R = self.R @ rotmat(self.w * dt) if w_px >= dead_r else self.R
@@ -163,10 +173,11 @@ class PoseTracker:
         self.glide = None           # (t, anchor offset, rotation offset): the overlay glides from where it was
 
     # ── the processed frames ─────────────────────────────────────────────
-    def measure(self, t, T=None, strong=False, noise_px=None):
+    def measure(self, t, T=None, strong=False, noise_px=None, noise_pos_px=None):
         """A processed frame taken at t: T the PnP pose that passed the RMS limit, None when the board was not found.
-        strong: many corners and a low reprojection error. noise_px: the noise the tracker expects on the model from
-        the rotation (px per frame). Returns accepted, restarted, rejected or missed."""
+        strong: many corners and a low reprojection error. noise_px, noise_pos_px: the noise the tracker expects on
+        the model from the rotation and on the anchor (px per frame). Returns accepted, restarted, rejected or
+        missed."""
         if T is None:
             self.streak = 0
             self.counts["missed"] += 1
@@ -178,28 +189,36 @@ class PoseTracker:
         f = self.filter
         if f.t is None or self.t_good is None or t - self.t_good > s["hold_s"] + s["fade_s"]:
             f.reset(T, t)
-            f.noise = noise_px
+            f.noise, f.noise_pos = noise_px, noise_pos_px
+            self.glide = None
             return self._accept(T, t, "restarted")
         if t <= f.t:            # an older frame than the filter's: it comes too late
             return "rejected"
-        pred = f.predict(t, s["predict_s"], s["still_px_s"])
+        pred = self._predicted(t)
         gate = s["gate_px"] + 2.0 * f.speed() * min(t - f.t, s["predict_s"])
         if image_shift(T, pred, self.anchor, self.radius, self.f) > gate:
             cand, self.candidate = self.candidate, (T, t)
             confirmed = (cand is not None and t - cand[1] <= 2 * s["predict_s"]
                          and image_shift(T, cand[0], self.anchor, self.radius, self.f) < gate)
             if strong or confirmed:
-                self._restart_gliding(T, t)
+                # a jump while the board was followed (a flip, a correction): glide there; after frames without the
+                # board the drawn pose is stale: go there at once
+                if t - self.t_good > s.get("glide_gap_s", 0.1):
+                    f.reset(T, t)
+                    f.noise, f.noise_pos = noise_px, noise_pos_px
+                    self.glide = None
+                else:
+                    self._restart_gliding(T, t)
                 return self._accept(T, t, "restarted")
             self.counts["rejected"] += 1
             return "rejected"
-        f.update(T, t, noise_px)
+        f.update(T, t, noise_px, noise_pos_px)
         return self._accept(T, t, "accepted")
 
     def _restart_gliding(self, T, t):
         """The filter starts again from T; while the overlay is shown it glides there from where it was drawn."""
         f = self.filter
-        old = f.predict(t, self.s["predict_s"], self.s["still_px_s"]) if f.t is not None and self.vis > 0 else None
+        old = self._predicted(t) if f.t is not None and self.vis > 0 else None
         f.reset(T, t)
         gs = self.s.get("glide_s", 0.0)
         if old is None or gs <= 0:
@@ -240,7 +259,7 @@ class PoseTracker:
         """The predicted pose at t for the search of the next frame (None when lost)."""
         if self.filter.t is None or self.t_good is None or t - self.t_good > self.s["hold_s"]:
             return None
-        return self.filter.predict(t, self.s["predict_s"], self.s["still_px_s"])
+        return self._predicted(t)
 
     def pose_at(self, t):
         """(T, visibility 0-1, state) for the frame taken at t: T None when nothing is to be drawn. Frames are asked for
@@ -258,12 +277,18 @@ class PoseTracker:
                 self.shown = False
         if self.vis <= 0.0 or self.filter.t is None:
             return None, 0.0, "acquiring" if self.streak else "lost"
-        T = self._glided(self.filter.predict(t, s["predict_s"], s["still_px_s"]), t)
+        T = self._glided(self._predicted(t), t)
         if on:
             state = "tracking" if age <= max(s["predict_s"], 1e-9) else "holding"
         else:
             state = "fading"
         return T, self.vis, state
+
+    def _predicted(self, t):
+        """The filtered pose carried on to t: at full speed for the frames between poses, then (the board lost while
+        moving) slowing down over predict_tau_s, so the overlay neither freezes nor runs off."""
+        s = self.s
+        return self.filter.predict(t, s["predict_s"], s["still_px_s"], s.get("predict_tau_s"))
 
     @property
     def tracked(self):

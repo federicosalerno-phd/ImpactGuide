@@ -3,10 +3,14 @@
 The phone runs the scrcpy server (shipped with scrcpy, which also brings adb) with the back camera as video source;
 the stream comes over an adb tunnel as H.264 with scrcpy's frame meta (the capture time of each frame on the phone),
 is decoded here with PyAV and only the newest frame is kept, with the time it was decoded and the time it was taken
-(on this computer's clock). Frames that come in a burst are decoded but only the newest is passed on. Nothing is installed on the phone and it needs no app: USB debugging, or
-wireless debugging for Wi-Fi. Which phone, on which link, is phone_link.py's to say (one place for the serial); over
-Wi-Fi the bit rate is lower, and when the link drops the stream waits for phone_link to bring it back (up to
-LINK_WAIT_S) and starts again on the serial the phone has then.
+(on this computer's clock). Frames that come in a burst are decoded but only the newest is passed on. Nothing is
+installed on the phone and it needs no app: USB debugging, or wireless debugging for Wi-Fi. While the stream runs
+the phone's screen is kept on and its auto-rotate is off (put back after): on the Poco X7 Pro both the lock screen
+and a turning screen make the system open the front camera, which takes the back camera from the stream. The frames
+stay as the sensor gives them (sensor_orientation says how it is mounted); live_ar turns the picture. Which phone,
+on which link, is phone_link.py's to say (one place for the serial); over Wi-Fi the bit rate is lower, and when the
+link drops the stream waits for phone_link to bring it back (up to LINK_WAIT_S) and starts again on the serial the
+phone has then.
 
 For the app page:
     s = open_stream(size="1920x1440", fps=30)    # starts the server, returns once the first frame is in
@@ -38,6 +42,7 @@ Environment: IMPACTGUIDE_SCRCPY = folder with scrcpy-server and adb.exe (default
 packages folder).
 """
 import argparse
+import atexit
 import os
 import select
 import socket
@@ -68,6 +73,11 @@ RESTART_GOOD_FRAMES = 30        # a restart that brought this many frames was a 
 # screen's face unlock opens the front camera and the system takes the back camera from the stream (Poco X7 Pro,
 # 15/10). A key event that does nothing (KEYCODE_UNKNOWN) counts as user activity and keeps it on.
 KEEP_AWAKE_S = 10.0
+# the phone's auto-rotate is turned off while the stream runs (and put back after): turning the phone with a page that
+# can turn (the AR view in the browser) makes the phone look for the face with the front camera (mifaced, 16/10), which
+# takes the back camera from the stream. The picture is turned by live_ar instead.
+LOCK_ROTATION = True
+SENSOR_ORIENTATION = 90         # the back camera's mounting when the phone does not say (Poco X7 Pro: 90 degrees)
 LINK_WAIT_S = 60.0              # after the link dropped, the stream waits this long for it to come back
 STALL_S = 3.0                   # no data from the phone this long: the stream is broken (a Wi-Fi link can die silently)
 HOLD_MS = 60.0                  # a decoded frame waits at most this long for the newer ones of a burst
@@ -262,6 +272,9 @@ class PhoneStream:
         self.drop_late = drop_late      # False: every frame is passed on
         self.max_restarts, self.restarts, self.failed_restarts = restarts, 0, 0
         self.keep_awake = True          # the phone's screen kept on (see KEEP_AWAKE_S)
+        self.lock_rotation = LOCK_ROTATION
+        self._rotation_was = None       # the phone's auto-rotate before the stream turned it off
+        self.sensor_orientation = SENSOR_ORIENTATION
         self.waiting = False            # the link dropped: waiting for it to come back
         self.link_drops = 0             # times the stream waited for the link and went on
         self.cause = ""                 # the link cause when the stream gave up because of the link
@@ -283,6 +296,7 @@ class PhoneStream:
     # -- start and stop
     def start(self, timeout=15.0):
         """Starts the server and returns once the first frame is in (raises LiveError otherwise)."""
+        self._phone_setup()
         self._launch()
         self.thread = threading.Thread(target=self._read, args=(timeout,), daemon=True, name="phone_stream")
         self.thread.start()
@@ -312,6 +326,45 @@ class PhoneStream:
             adb("forward", "--remove", f"tcp:{self.port}", serial=self.serial, check=False)
         except (LiveError, subprocess.TimeoutExpired):
             pass
+        self._phone_restore()
+
+    def _phone_setup(self):
+        """The back camera's mounting (dumpsys media.camera) and auto-rotate off (LOCK_ROTATION), quietly: a phone
+        that does not answer keeps the defaults."""
+        try:
+            out = adb("shell", "dumpsys media.camera | grep -E 'Facing:|^ *Orientation:'", serial=self.serial,
+                      timeout=10, check=False)
+            lines = [x.strip() for x in out.splitlines()]
+            want = "Front" if self.camera_id is not None and self.camera_id == 1 else "Back"
+            for a, b in zip(lines, lines[1:]):
+                if a == f"Facing: {want}" and b.startswith("Orientation:"):
+                    self.sensor_orientation = int(b.split(":")[1]) % 360
+                    break
+        except (LiveError, subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        if self.lock_rotation and self._rotation_was is None:
+            try:
+                was = adb("shell", "settings", "get", "system", "accelerometer_rotation", serial=self.serial,
+                          timeout=10, check=False).strip()
+                if was == "1":
+                    adb("shell", "settings", "put", "system", "accelerometer_rotation", "0", serial=self.serial,
+                        timeout=10, check=False)
+                    self._rotation_was = was
+                    _RESTORE.add(self)
+            except (LiveError, subprocess.TimeoutExpired, OSError):
+                pass
+
+    def _phone_restore(self):
+        """Auto-rotate as it was before the stream."""
+        if self._rotation_was is None:
+            return
+        try:
+            adb("shell", "settings", "put", "system", "accelerometer_rotation", self._rotation_was, serial=self.serial,
+                timeout=10, check=False)
+        except (LiveError, subprocess.TimeoutExpired, OSError):
+            pass
+        self._rotation_was = None
+        _RESTORE.discard(self)
 
     def _launch(self):
         """The tunnel (again after a reconnection: adb drops it with the link), the server copied to the phone
@@ -567,6 +620,15 @@ class PhoneStream:
                 relaunch = True
 
 
+_RESTORE = set()       # streams that changed a setting of the phone: put back when Python exits, if not before
+
+
+@atexit.register
+def _restore_all():
+    for s in list(_RESTORE):
+        s._phone_restore()
+
+
 def open_stream(serial=None, size="1920x1440", fps=30, **kw):
     """Start the phone camera stream and return the PhoneStream once the first frame has arrived."""
     return PhoneStream(serial, size, fps, **kw).start()
@@ -748,6 +810,9 @@ class _FakePhone(PhoneStream):
     def _launch(self):
         self.server = None
 
+    def _phone_setup(self):
+        pass
+
     def _link_up(self):
         return True
 
@@ -768,7 +833,8 @@ def _fake_state(port, kw):
     s.__dict__.update(fixed="fake", serial="fake", link="usb", record=None, frame_times=[], frame_pts=[],
                       size="640x480", fps=30, bit_rate=BIT_RATE, camera_id=None, port=port, codec_options="",
                       drop_late=kw.get("drop_late", True), max_restarts=0, restarts=0, failed_restarts=0,
-                      keep_awake=False, waiting=False, link_drops=0, cause="", scid=0, log=lambda m: None,
+                      keep_awake=False, lock_rotation=False, _rotation_was=None, sensor_orientation=90,
+                      waiting=False, link_drops=0, cause="", scid=0, log=lambda m: None,
                       _item=None, _n=0, _session=0, dropped=0, sessions=[], server=None, sock=None, thread=None,
                       error=None, server_lines=[])
     s._lock = threading.Lock()
