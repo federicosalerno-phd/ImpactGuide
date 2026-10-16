@@ -62,7 +62,7 @@
     -1
    ]
   },
-  "corner_bridge_mm": 1.5,
+  "corner_gap_mm": 0.1,
   "min_feature_mm": 1.0
  },
  "files": {
