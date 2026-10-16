@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <title>ImpactGuide</title>
   <circle cx="128" cy="128" r="128" fill="#252A38"/>
-  <g transform="translate(128 123) scale(.9384) translate(-128 -111.7)">
+  <g transform="translate(122 130) scale(1.02) translate(-127.75 -122.75)">
   <path d="M128 60 87 156" fill="none" stroke="#F5C542" stroke-width="14"/>
   <circle cx="87" cy="156" r="35" fill="#F5C542"/>
   <g transform="translate(128 60) scale(1.62) translate(-134 -54)">

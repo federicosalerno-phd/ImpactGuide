@@ -245,6 +245,7 @@ class Backend(Bridge):
 
     @staticmethod
     def _err(e, cause=None):
+        log_error(e, cause)
         if isinstance(e, phone_link.LinkError):
             return {"error": e.cause, "cause": e.cause, "message": ""}
         if isinstance(e, acquisition.AcquisitionError):
@@ -1513,6 +1514,22 @@ def prepare_page(dest):
     (dest / "ui" / "slantui.css").write_text(slantui_css.bundle(), encoding="utf-8")
     (dest / "ui" / "slantui.js").write_text(slantui_js.bundle(), encoding="utf-8")
     return dest / "ui.html"
+
+
+ERROR_LOG = LOCAL / "errors.log"
+
+
+def log_error(e, cause=None):
+    """The whole error, with its trace, in a log beside the preferences: the screen only says what to do."""
+    try:
+        ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if ERROR_LOG.exists() and ERROR_LOG.stat().st_size > 2_000_000:
+            ERROR_LOG.replace(ERROR_LOG.with_suffix(".old.log"))
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__)) if isinstance(e, BaseException) else str(e)
+        with ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {cause or ''}\n{tb}\n")
+    except OSError:
+        pass
 
 
 def mark_file():
