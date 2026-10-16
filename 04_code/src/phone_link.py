@@ -1,11 +1,12 @@
-"""The link to the phone, by cable (USB) or by Wi-Fi (Android 11+ wireless debugging), chosen in ImpactGuide (T20.3).
+"""The link to the phone, by cable (USB) or by Wi-Fi (Android 11+ wireless debugging), found by itself (T20.3).
 
 The one place that knows which device serial to use. Everything that talks to the phone asks here: live.py (the
 camera stream), acquisition.py (photos and videos), live_ar.py (closing the camera app), the app (the choice, the
 pairing, the state of the link). One adb for all of them: the one shipped with scrcpy.
 
-    link = phone_link.get()                          # the link of this process
-    link.configure(mode="wifi")                      # or "usb"; the app keeps the choice in its preferences
+    link = phone_link.get()                          # the link of this process: "auto" unless told otherwise
+    link.configure(mode="wifi")                      # or "usb", or "auto": the cable when the phone is on it, else
+                                                     # the Wi-Fi it was paired on; link.via says which is in use
     link.serial()                                    # the phone on the chosen link, or LinkError(cause)
     link.pair_code("192.168.1.23:37011", "123456")   # the code and the address the phone shows
     payload = link.qr_start(); link.qr_poll()        # a QR code the phone scans: "waiting" until it is paired
@@ -49,8 +50,8 @@ import time
 from collections import deque
 from pathlib import Path
 
-USB, WIFI = "usb", "wifi"
-MODES = (USB, WIFI)
+USB, WIFI, AUTO = "usb", "wifi", "auto"
+MODES = (AUTO, USB, WIFI)           # AUTO: the cable when the phone is on it, else Wi-Fi if it was ever paired
 MDNS_CONNECT = "_adb-tls-connect._tcp"
 MDNS_PAIRING = "_adb-tls-pairing._tcp"
 WATCH_S = 2.0                   # the watch looks at the link this often
@@ -234,7 +235,7 @@ def phone_id_of(serial):
 class Link:
     """The chosen link and what is known of it. Thread-safe; the watch runs on its own thread."""
 
-    def __init__(self, mode=USB, address="", phone_id="", runner=None, clock=time.monotonic, sleep=time.sleep,
+    def __init__(self, mode=AUTO, address="", phone_id="", runner=None, clock=time.monotonic, sleep=time.sleep,
                  log=None):
         self.run = runner or AdbRunner()
         self.clock, self.sleep = clock, sleep
@@ -243,9 +244,12 @@ class Link:
         self._attempting = threading.Lock()
         self._listeners = []
         self._watch, self._stop = None, threading.Event()
-        self.mode = mode if mode in MODES else USB
+        self.mode = mode if mode in MODES else AUTO
+        self.via = WIFI if self.mode == WIFI else USB   # the link in use now: the mode, or what AUTO found
+        self._told = None                   # (state, cause, via) the listeners last heard
         self.address = address or ""        # the last Wi-Fi address that connected (IP:PORT)
         self.phone_id = phone_id or ""      # the phone's ro.serialno, to know it again under another name
+        self.wifi_paired = False            # paired for Wi-Fi with this PC (kept by the app with the address)
         self._ids = {}                      # adb serial -> ro.serialno
         self._info = {}                     # adb serial -> {model, ip}
         self.rtt = deque(maxlen=5)
@@ -261,23 +265,28 @@ class Link:
         self.rtt.clear()
 
     # -- the choice
-    def configure(self, mode=None, address=None, phone_id=None):
+    def configure(self, mode=None, address=None, phone_id=None, paired=None):
         with self._lock:
             changed = mode in MODES and mode != self.mode
             if changed:
                 self.mode = mode
+                if mode != AUTO:
+                    self.via = mode
                 self._reset_state()
             if address is not None:
                 self.address = address
             if phone_id is not None:
                 self.phone_id = phone_id
+            if paired is not None:
+                self.wifi_paired = bool(paired)
         if changed:
             self._notify()
         return self
 
     def remembered(self):
         """What the app keeps between sessions."""
-        return {"link": self.mode, "wifi_address": self.address, "phone_id": self.phone_id}
+        return {"link": self.mode, "wifi_address": self.address, "phone_id": self.phone_id,
+                "wifi_paired": self._paired()}
 
     # -- what adb sees
     def _adb(self, args, serial=None, timeout=20.0, cause=None):
@@ -327,10 +336,66 @@ class Link:
             return [last or named or ready[0]]
         return ready
 
+    def _paired(self):
+        """Wi-Fi was paired with this PC: a pairing here, an address that connected, or the app remembers one."""
+        return bool(self.address or self.wifi_paired)
+
+    def _use(self, via):
+        """AUTO found the phone on this link (or looks for it there)."""
+        with self._lock:
+            if via != self.via:
+                self.via = via
+                self.down_since, self.tries, self.next_try, self.silent = None, 0, 0.0, 0
+                self.rtt.clear()
+                self._event("via " + via)
+
+    def _auto(self, found):
+        """AUTO: the phone on the cable if it is there, else the one on Wi-Fi; nothing there, the Wi-Fi it was paired on
+        (to bring back) or no phone at all."""
+        usb = [d for d in found if d["transport"] == USB]
+        ready = [d for d in usb if d["state"] == "device"]
+        if len(ready) > 1 and self.phone_id:
+            ready = [d for d in ready if d["serial"] == self.phone_id] or ready
+        if len(ready) == 1:
+            self._use(USB)
+            return ready[0]["serial"]
+        if len(ready) > 1:
+            raise LinkError("many_devices", ", ".join(d["serial"] for d in ready))
+        wifi = [d for d in found if d["transport"] == WIFI]
+        on_air = self._one_phone([d for d in wifi if d["state"] == "device"])
+        if len(on_air) == 1:
+            self._use(WIFI)
+            return on_air[0]["serial"]
+        if len(on_air) > 1:
+            raise LinkError("many_devices", ", ".join(d["serial"] for d in on_air))
+        waiting = [d for d in usb + wifi if d["state"] in ("unauthorized", "authorizing")]
+        if waiting:
+            self._use(waiting[0]["transport"] if waiting[0]["transport"] in (USB, WIFI) else USB)
+            raise LinkError("unauthorized")
+        if usb:
+            self._use(USB)
+            raise LinkError("offline")
+        if self._paired():
+            self._use(WIFI)
+            return self._wifi_cause()
+        self._use(USB)
+        raise LinkError("no_device")
+
+    def _wifi_cause(self):
+        with self._lock:
+            if self.state in ("ready", "reconnecting"):
+                raise LinkError("wifi_reconnecting")
+            if self.state == "lost":
+                raise LinkError("wifi_lost")
+            raise LinkError("wifi_connecting" if self.address or self.serial_now else "wifi_none")
+
     def serial(self):
-        """The adb serial of the phone on the chosen link. LinkError: no_adb, no_device, unauthorized, many_devices,
-        offline (USB); wifi_none, wifi_connecting, wifi_reconnecting, wifi_lost, unauthorized, many_devices (Wi-Fi)."""
+        """The adb serial of the phone on the chosen link (AUTO: on the cable, else on Wi-Fi; `via` says which).
+        LinkError: no_adb, no_device, unauthorized, many_devices, offline (USB); wifi_none, wifi_connecting,
+        wifi_reconnecting, wifi_lost, unauthorized, many_devices (Wi-Fi)."""
         found = self.devices()
+        if self.mode == AUTO:
+            return self._auto(found)
         mine = [d for d in found if d["transport"] == self.mode]
         ready = [d for d in mine if d["state"] == "device"]
         if self.mode == WIFI:
@@ -343,12 +408,7 @@ class Link:
             raise LinkError("unauthorized")
         if self.mode == USB:
             raise LinkError("offline" if mine else "no_device")
-        with self._lock:
-            if self.state in ("ready", "reconnecting"):
-                raise LinkError("wifi_reconnecting")
-            if self.state == "lost":
-                raise LinkError("wifi_lost")
-            raise LinkError("wifi_connecting" if self.address or self.serial_now else "wifi_none")
+        return self._wifi_cause()
 
     def ready(self):
         """True when the phone is there on the chosen link (never raises)."""
@@ -438,8 +498,9 @@ class Link:
         ok, cause, pid = parse_pair(out)
         if not ok:
             raise LinkError(cause, out.strip()[-200:])
-        if pid:
-            with self._lock:
+        with self._lock:
+            self.wifi_paired = True
+            if pid:
                 self.phone_id = pid
         self._event("paired")
 
@@ -548,7 +609,7 @@ class Link:
         except LinkError as e:
             self._down(e)
             return self.status()
-        if not self._up(serial) and self.mode == WIFI:
+        if not self._up(serial) and self.via == WIFI:
             # adb still lists the phone but no round trip comes back twice in a row: the Wi-Fi link died without
             # adb noticing. Dropping the entry lets the reconnection start.
             with self._lock:
@@ -567,11 +628,11 @@ class Link:
     def _down(self, e):
         now = self.clock()
         with self._lock:
-            wifi = self.mode == WIFI
+            wifi = self.via == WIFI
             if not wifi or e.cause in ("no_adb", "many_devices", "unauthorized", "timeout"):
                 self._set("none", e.cause)
                 return
-            if not self.address and not self.serial_now:
+            if not self._paired() and not self.serial_now:
                 self._set("unpaired", "wifi_none")
                 return
             if self.state == "ready":
@@ -624,7 +685,7 @@ class Link:
 
     def _up(self, serial, why=None):
         with self._lock:
-            back = self.mode == WIFI and self.state in ("reconnecting", "lost")
+            back = self.via == WIFI and self.state in ("reconnecting", "lost")
             if back:
                 self.reconnects += 1
                 self._event("reconnected")
@@ -633,7 +694,7 @@ class Link:
             self.down_since, self.tries = None, 0
             new = serial != self.serial_now
             self.serial_now = serial
-            if self.mode == WIFI and ADDRESS_RE.fullmatch(serial):
+            if self.via == WIFI and ADDRESS_RE.fullmatch(serial):
                 self.address = serial
         if new:
             self._identify(serial)
@@ -678,9 +739,11 @@ class Link:
         self.log(f"link {what}")
 
     def _set(self, state, cause):
-        """Under the lock. Listeners hear of a change of state or cause."""
+        """Under the lock. Listeners hear of a change of state, cause or link in use."""
         if (state, cause) != (self.state, self.cause):
             self.state, self.cause, self.since = state, cause, self.clock()
+        if (state, cause, self.via) != self._told:
+            self._told = (state, cause, self.via)
             if self._listeners:
                 threading.Thread(target=self._notify, daemon=True).start()
 
@@ -696,7 +759,8 @@ class Link:
         with self._lock:
             info = self._info.get(self.serial_now, {}) if self.state == "ready" else {}
             rtt = sorted(self.rtt)
-            return {"mode": self.mode, "state": self.state, "cause": self.cause, "ok": self.state == "ready",
+            return {"mode": self.mode, "via": self.via, "state": self.state, "cause": self.cause,
+                    "ok": self.state == "ready", "paired": self._paired(),
                     "serial": self.serial_now if self.state == "ready" else "", "model": info.get("model", ""),
                     "phone_ip": info.get("ip", "") or host_of(self.address), "address": self.address,
                     "rtt_ms": round(rtt[len(rtt) // 2], 1) if rtt else None, "drops": self.drops,
@@ -745,6 +809,20 @@ class Link:
         if code != 0 or "Error" in out:
             raise LinkError("unreachable", out.strip()[-200:])
         return serial
+
+    def wifi_debugging_on(self):
+        """With the phone on the cable, Wireless debugging is switched on from here (a setting adb's shell may
+        write), one step less for pairing. True if the phone took it; False otherwise, never raises."""
+        try:
+            serial = self.serial()
+            if self.via != USB:
+                return False
+            self._adb(["shell", "settings", "put", "global", "adb_wifi_enabled", "1"], serial=serial, timeout=8)
+            code, out = self._adb(["shell", "settings", "get", "global", "adb_wifi_enabled"], serial=serial,
+                                  timeout=8)
+            return code == 0 and out.strip() == "1"
+        except LinkError:
+            return False
 
 
 _DEFAULT = None
@@ -889,6 +967,11 @@ class SimulatedAdb:
             if "android.intent.action.VIEW" in line:
                 self.opened.append(args[-1])
                 return 0, "Starting: Intent { act=android.intent.action.VIEW }\n"
+            if line.startswith("settings put global adb_wifi_enabled"):
+                self.debugging = args[-1] == "1"
+                return 0, ""
+            if line.startswith("settings get global adb_wifi_enabled"):
+                return 0, ("1" if self.debugging else "0") + "\n"
             return 0, ""
         return 0, ""
 
@@ -1053,6 +1136,45 @@ def run_test():
            "cable chosen while the phone is also on Wi-Fi: the cable")
     sim2.usb = False
     expect(raises(link2.serial, "no_device"), "cable chosen, no cable: no_device")
+
+    # AUTO: the cable when the phone is on it, else the Wi-Fi it was paired on, found and followed by itself
+    clock4 = FakeClock()
+    sim4 = SimulatedAdb(clock=clock4, auto_connect=False)
+    link4 = Link(runner=sim4, clock=clock4, sleep=clock4.sleep)
+    heard4 = []
+    link4._listeners.append(lambda s: heard4.append(s["via"]))
+    st = link4.check()
+    expect(link4.mode == AUTO and st["via"] == USB and st["state"] == "ready" and st["serial"] == "PX7P0042"
+           and not st["paired"], "auto: the phone on the cable, found at once, nothing paired yet")
+    sim4.debugging = False
+    expect(link4.wifi_debugging_on() and sim4.debugging, "auto, on the cable: Wireless debugging switched on from the PC")
+    link4.pair_code(f"{sim4.ip}:{sim4.pair_port}", sim4.code)
+    st = link4.check()
+    expect(st["via"] == USB and st["serial"] == "PX7P0042" and st["paired"],
+           "auto, paired on Wi-Fi with the cable in: still the cable")
+    sim4.usb = False
+    st = link4.check()
+    expect(st["via"] == WIFI and st["state"] == "ready" and st["serial"] == f"{sim4.ip}:{sim4.connect_port}"
+           and not link4.wifi_debugging_on(), f"auto, cable out: the paired Wi-Fi at once ({st['serial']})")
+    sim4.usb = True
+    st = link4.check()
+    expect(st["via"] == USB and st["state"] == "ready", "auto, cable in again: the cable")
+    sim4.usb = False
+    link4.check()
+    sim4.drop()
+    st = link4.check()
+    dropped = st["via"] == WIFI and st["state"] == "reconnecting"
+    sim4.back()
+    for _ in range(4):
+        clock4.t += BACKOFF_S[-1]
+        st = link4.check()
+    expect(dropped and st["state"] == "ready" and st["via"] == WIFI, "auto, on Wi-Fi: a drop, then back by itself")
+    time.sleep(0.2)
+    expect(USB in heard4 and WIFI in heard4, f"auto: the listeners hear the link in use change ({heard4})")
+    link5 = Link(runner=SimulatedAdb(usb=False))
+    st = link5.check()
+    expect(st["state"] == "none" and st["cause"] == "no_device" and st["via"] == USB and not st["paired"],
+           "auto, no phone and never paired: no phone, said as such")
 
     # the browser of the phone on a page of this PC
     link.configure(mode=USB)

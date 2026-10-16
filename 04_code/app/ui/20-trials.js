@@ -1,5 +1,5 @@
-// ImpactGuide · the Trials page: the trial to do now, step by step, the log
-// with its audit trail, the sequence and its configuration. The protocol is
+// ImpactGuide · Trials, four steps on the rail: the trial to do now, step by
+// step, the log with its audit trail, the sequence and its setup. The protocol is
 // trials.py's (sequence, steps, names, log, completeness); the page only shows
 // it and asks the backend, which also drives the phone and watches the scanner.
 
@@ -17,8 +17,7 @@ const TRIALS = {
 
   setView: function (v) {
     trialsView = v;
-    showHome();
-    document.querySelectorAll('.view-btn').forEach(function (b) { b.classList.toggle('on', b.dataset.view === v); });
+    rail();
     showView('trials-' + v);
     if (v === 'guide') TRIALS.refresh();
     else if (v === 'log') TRIALS.loadLog();
@@ -156,7 +155,13 @@ const TRIALS = {
     const sel = list.querySelector('.mitem.sel');
     if (sel && TRIALS._lastKey !== (t.trial + st.key)) {
       TRIALS._lastKey = t.trial + st.key;
-      sel.scrollIntoView({ block: 'center' });
+      // the step to do now in the middle of its own column; on a narrow stage the column is the page,
+      // which stays where it is so the step's card stays in view
+      const side = sel.closest('.split-side');
+      if (side && getComputedStyle(side).overflowY !== 'visible') {
+        side.scrollTop += sel.getBoundingClientRect().top - side.getBoundingClientRect().top
+          - side.clientHeight / 2 + sel.offsetHeight / 2;
+      }
     }
 
     if (t.open) { showPanel('trials-step'); TRIALS.renderStep(s); }
@@ -493,7 +498,6 @@ const TRIALS = {
   },
 
   wire: function () {
-    document.querySelectorAll('.view-btn').forEach(function (b) { b.onclick = function () { TRIALS.setView(b.dataset.view); }; });
     $('planRef').onchange = function () { TRIALS.options(); };
     $('planStart').onclick = TRIALS.start;
     $('extraBtn').onclick = function () { TRIALS.extraOpen = true; TRIALS.renderPlan(TRIALS.state); };

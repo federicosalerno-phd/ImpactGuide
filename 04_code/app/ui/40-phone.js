@@ -1,10 +1,14 @@
-// ImpactGuide · the phone: the link (cable or Wi-Fi) with its pairing steps,
-// its state, and the live view sent back to the phone's own screen. SlantUI's
-// pane docked down the side of the work area (.sheet-side), opened from the
-// Phone button on the rail. In plain view: the link, its state, pairing with the
-// QR code and Open on the phone; the measures, pairing with a code, connecting
-// by address and the code for another screen sit under Advanced. The work is
-// phone_link.py's and phone_view.py's; the pane shows their state and asks.
+// ImpactGuide · the phone: how it is linked, and the live view sent back to its
+// own screen. The app finds the phone by itself and keeps watching it
+// (phone_link.py, "auto"): the cable when the phone is on it, else the Wi-Fi it
+// was paired on; nothing is chosen here. Wi-Fi is paired only when it is asked
+// for (Use Wi-Fi), once per PC: with the cable in, the app switches Wireless
+// debugging on by itself and one step is left on the phone. The panel takes
+// the place of the step's panel down the right of the window (at home too), so
+// it is part of the window and never covers the page; it is opened from the
+// phone button on the rail or the phone cell of home. The measures, pairing
+// with a code, connecting by address and the code for another screen sit under
+// Advanced. The work is phone_link.py's and phone_view.py's.
 
 // The sign of the phone, on SlantUI's 24 grid.
 ICONS.phone = { s: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 17.5h2"/>' };
@@ -13,18 +17,19 @@ const LINK = {
   state: null,
   timer: null,
   open: false,
+  pairing: false,    // Use Wi-Fi was pressed: the pairing steps are on show
   svg: { lkQr: '', vwQr: '' },   // what each QR tile holds, written only when it changes
 
-  // The rail button says the link in use.
+  // The rail button says how the phone is linked: cable, Wi-Fi, or no phone (the backend's phone events).
   btn: function () {
-    const m = (LINK.state && LINK.state.mode) || PHONE.link || 'usb';
-    $('lkBtnL').textContent = T('link.btn.' + (m === 'wifi' ? 'wifi' : 'usb'));
+    $('lkBtnL').textContent = PHONE.ok ? T('link.btn.' + (PHONE.link === 'wifi' ? 'wifi' : 'usb')) : T('link.btn.none');
   },
 
   show: function () {
     LINK.open = true;
     $('lkBtn').classList.add('on');
-    showSheet($('lkSheet'));
+    document.querySelector('.app').classList.add('phone-open');
+    document.querySelectorAll('.rp-page').forEach(function (p) { p.classList.toggle('show', p.dataset.panel === 'phone'); });
     LINK.refresh();
     clearInterval(LINK.timer);
     LINK.timer = setInterval(LINK.refresh, 1000);
@@ -33,9 +38,10 @@ const LINK = {
   hide: function () {
     LINK.open = false;
     $('lkBtn').classList.remove('on');
-    hideSheet($('lkSheet'));
+    document.querySelector('.app').classList.remove('phone-open');
     clearInterval(LINK.timer);
     LINK.timer = null;
+    showPanel(panelNow);          // the step's own panel comes back
   },
 
   toggle: function () { if (LINK.open) LINK.hide(); else LINK.show(); },
@@ -52,22 +58,22 @@ const LINK = {
     LINK.state = s;
     LINK.btn();
     if (!LINK.open) return;
-    const ok = s.state === 'ready', wifi = s.mode === 'wifi', busy = s.busy || [];
-    document.querySelectorAll('#lkModes .mitem').forEach(function (it) {
-      it.classList.toggle('sel', it.dataset.mode === s.mode);
-    });
+    const ok = s.state === 'ready', wifi = s.via === 'wifi', busy = s.busy || [];
 
-    // the state, in words
-    $('lkDot').className = 'live-dot' + (ok ? ' ok' : '');
-    $('lkWord').textContent = ok && s.model ? T('link.state.ready.model', s.model)
+    // the state, in words: on the cable, on Wi-Fi, or no phone and why
+    $('lkDot').className = 'live-dot' + (ok ? ' ok' : s.state === 'reconnecting' || s.state === 'connecting' ? ' busy' : '');
+    $('lkWord').textContent = ok ? T(wifi ? 'link.on.wifi' : 'link.on.usb')
       : T('link.state.' + (hasT('link.state.' + s.state) ? s.state : 'unknown'));
     const why = !ok && s.cause && hasT('link.cause.' + s.cause) ? T('link.cause.' + s.cause) : '';
     $('lkWhy').textContent = why;
     $('lkWhy').classList.toggle('hidden', !why);
 
-    // the round trip in plain view; the address, the stream, the delay from the camera and the drops under Advanced
-    $('lkRows').replaceChildren.apply($('lkRows'),
-      ok ? [piRow(T('link.f.rtt'), s.rtt_ms === null ? '-' : T('live.f.ms', cifre(s.rtt_ms, 0)))] : []);
+    // the phone and its round trip in plain view; the address, the stream, the delay and the drops under Advanced
+    const rows = [];
+    if (ok && s.model) rows.push(piRow(T('link.f.phone'), s.model));
+    if (ok) rows.push(piRow(T('link.f.rtt'), s.rtt_ms === null ? '-' : T('live.f.ms', cifre(s.rtt_ms, 0))));
+    if (s.paired && !(ok && wifi)) rows.push(piRow(T('link.f.wifi'), T('link.f.wifi.paired')));
+    $('lkRows').replaceChildren.apply($('lkRows'), rows);
     const more = [];
     if (ok && wifi && s.address) more.push(piRow(T('link.f.address'), s.address));
     const st = s.stream || {};
@@ -79,12 +85,19 @@ const LINK = {
     if (wifi && (s.drops || s.reconnects)) more.push(piRow(T('link.f.drops'), T('link.f.drops.v', s.drops, s.reconnects)));
     $('lkMore').replaceChildren.apply($('lkMore'), more);
 
-    // pairing: on Wi-Fi while the phone is not there; by hand (code, address) under Advanced, on Wi-Fi
-    $('lkPair').classList.toggle('hidden', !wifi || ok);
-    $('lkByHand').classList.toggle('hidden', !wifi);
+    // Wi-Fi only when wanted: Use Wi-Fi while it was never paired; its steps once pressed, until it is paired.
+    // Paired once, the app goes on Wi-Fi by itself when the cable is out; pairing again is under Advanced.
+    if (ok && wifi) LINK.pairing = false;
+    $('lkWifi').classList.toggle('hidden', !!s.paired || LINK.pairing);
+    $('lkPair').classList.toggle('hidden', !LINK.pairing);
+    // with the cable in, the app has switched Wireless debugging on: one step on the phone is left
+    const short = !!s.wifi_on;
+    $('lkS1').classList.toggle('hidden', short);
+    $('lkS2').classList.toggle('hidden', short);
+    $('lkS3n').textContent = short ? '1' : '3';
     LINK.qr('lkQr', s.qr || '');
     $('lkQrWait').classList.toggle('hidden', !s.qr);
-    $('lkQrBtnL').textContent = T(s.qr ? 'link.pair.qr.new' : 'link.pair.qr.show');
+    $('lkQrBtn').disabled = busy.indexOf('qr') >= 0 && !s.qr;
     $('lkPairBtn').disabled = busy.indexOf('pair') >= 0;
     $('lkConnect').disabled = busy.indexOf('connect') >= 0;
     if (s.address && !$('lkAddr').value && document.activeElement !== $('lkAddr')) $('lkAddr').value = s.address;
@@ -108,21 +121,18 @@ const LINK = {
     $('vwOpen').disabled = !ok || busy.indexOf('view_open') >= 0;
   },
 
-  setMode: function (mode) {
-    if (LINK.state && LINK.state.mode === mode) return;
-    ask('link_mode', mode, function (s) {
-      if (!s) return;
-      PHONE.link = mode;
-      LINK.render(s);
-      toast(T('link.said.' + mode));
-    });
+  // Use Wi-Fi: the pairing steps and the QR code (Wireless debugging switched on from here when on the cable)
+  wifi: function () {
+    LINK.pairing = true;
+    ask('link_wifi', function (s) { if (s) LINK.render(s); });
   },
 
   onEvent: function (e) {
-    if (e.type === 'phone') { LINK.btn(); return; }
+    if (e.type === 'phone') { LINK.btn(); if (LINK.open) LINK.refresh(); return; }
     if (e.type === 'link') {
       if (e.action === 'state' && e.back) toast(T('link.said.back'), 3500);
-      else if (e.action === 'paired') toast(T('link.said.paired'), 3500);
+      else if (e.action === 'via') toast(T('link.said.' + (e.via === 'wifi' ? 'wifi' : 'usb')), 3500);
+      else if (e.action === 'paired') { LINK.pairing = false; toast(T('link.said.paired'), 3500); }
       else if (e.action === 'connected') toast(T('link.said.connected'), 3500);
       else if (e.action === 'failed') toast(sayError(e.cause || e.error, ''), 6000);
       if (LINK.open) LINK.refresh();
@@ -138,10 +148,8 @@ const LINK = {
   wire: function () {
     $('lkBtn').onclick = LINK.toggle;
     $('lkClose').onclick = LINK.hide;
-    document.querySelectorAll('#lkModes .mitem').forEach(function (it) {
-      it.onclick = function () { LINK.setMode(it.dataset.mode); };
-      it.onkeydown = function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); it.click(); } };
-    });
+    $('lkWifi').onclick = LINK.wifi;
+    $('lkWifiAgain').onclick = LINK.wifi;
     $('lkQrBtn').onclick = function () { ask('link_qr', function (s) { if (s) LINK.render(s); }); };
     $('lkPairBtn').onclick = function () {
       ask('link_pair', $('lkPairAddr').value.trim(), $('lkPairCode').value.trim(), function (s) {

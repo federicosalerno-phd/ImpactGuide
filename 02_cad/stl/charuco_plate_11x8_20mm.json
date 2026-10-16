@@ -1,0 +1,79 @@
+{
+ "name": "charuco_plate_11x8_20mm",
+ "board": {
+  "dictionary": "DICT_5X5_100",
+  "squares": [
+   11,
+   8
+  ],
+  "square_mm": 20.0,
+  "marker_mm": 15.0,
+  "legacy_pattern": false,
+  "size_mm": [
+   220.0,
+   160.0
+  ],
+  "corners": 70,
+  "same_as": "calibrate_charuco.BOARD at this square"
+ },
+ "measure": {
+  "long": {
+   "nominal_mm": 220.0,
+   "squares": 11,
+   "axis": "board x",
+   "between": "outer faces of the two black ticks above the board, flush with its left and right edges"
+  },
+  "short": {
+   "nominal_mm": 160.0,
+   "squares": 8,
+   "axis": "board y",
+   "between": "outer faces of the two black ticks right of the board, flush with its top and bottom edges"
+  },
+  "tool": "caliper, outside jaws square to the face, tips on the white face"
+ },
+ "plate": {
+  "size_mm": [
+   240.0,
+   196.0,
+   8.4
+  ],
+  "base_mm": 8.0,
+  "ink_mm": 0.4,
+  "corner_radius_mm": 5.0,
+  "board_origin_mm": [
+   6.0,
+   182.0,
+   8.4
+  ],
+  "board_axes": {
+   "x": [
+    1,
+    0,
+    0
+   ],
+   "y": [
+    0,
+    -1,
+    0
+   ],
+   "z": [
+    0,
+    0,
+    -1
+   ]
+  },
+  "corner_bridge_mm": 1.5,
+  "min_feature_mm": 1.0
+ },
+ "files": {
+  "white": "charuco_plate_11x8_20mm_white.stl",
+  "black": "charuco_plate_11x8_20mm_black.stl",
+  "3mf": "charuco_plate_11x8_20mm.3mf"
+ },
+ "print": {
+  "layer_mm": 0.2,
+  "colour_change_mm": 8.0,
+  "filament_1": "white",
+  "filament_2": "black"
+ }
+}

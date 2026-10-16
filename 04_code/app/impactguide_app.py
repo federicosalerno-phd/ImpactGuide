@@ -1,21 +1,28 @@
 """ImpactGuide: the desktop app of the marker impact bench.
 
 A frameless SlantUI window hosting a page (ui.html and ui/) that talks to this
-backend over QWebChannel. The app guides the protocol step by step and keeps
-what the bench produces: the phone calibration, the live AR view and the
-impact trials today; scans, analysis, charts and the dataset are the next pages.
-The calibration board is shown full screen on a monitor (board_window.py,
-screen_board.py) or printed.
+backend over QWebChannel. As UniGuide, it opens at home, four large choices, and
+each choice is a module with its own steps on the rail: Calibrate the phone
+(board, photos, calibration), Live AR (board, view), Trials (next trial, log,
+sequence, setup) and Scans and results (the next pages). The app guides the
+protocol step by step and keeps what the bench produces.
+
+The calibration board is shown on a monitor (board_window.py, screen_board.py):
+full screen on a monitor of its own when there are two, else in a window beside
+the app on the same monitor, at any split, sized from the pixels of that window
+and the pitch of its monitor; or it is printed.
 
 This file is the host: the window, the bridge, the background jobs. The logic
 is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py,
 phone_link.py, phone_view.py, screen_board.py), which the host only calls; everything there also
 runs without the app. The live frames reach the page as MJPEG from 127.0.0.1
 (live_ar.MjpegServer), and the phone's own screen from a port of this PC
-(phone_view.ViewServer). The link to the phone, cable or Wi-Fi, is chosen on
-the Phone pane and kept by phone_link, which every part asks for the serial.
+(phone_view.ViewServer). The link to the phone is found and watched by itself
+(phone_link, "auto": the cable when the phone is on it, else the Wi-Fi it was
+paired on); every part asks phone_link for the serial, and the Phone panel only
+shows the link and pairs Wi-Fi when that is wanted.
 
-    python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it|fr|es|de|zh] [--page NAME]
+    python impactguide_app.py [--simulate DIR] [--replay PATH] [--lang en|it|fr|es|de|zh] [--page MODULE]
 
 --simulate keeps every file under DIR and stands in for the phone and the
 scanner (a simulated phone on the cable that can also be paired on Wi-Fi with
@@ -51,7 +58,7 @@ from datetime import date, datetime  # noqa: E402
 import slantui.css as slantui_css  # noqa: E402
 import slantui.js as slantui_js  # noqa: E402
 from slantui.shell import Application, Bridge, Splash, Window, pyqtSignal, pyqtSlot  # noqa: E402
-from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialog, QTimer, QUrl,  # noqa: E402
+from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialog, QRect, QTimer, QUrl,  # noqa: E402
                               USE_QT6)
 from slantui.tokens import PALETTES  # noqa: E402
 
@@ -75,7 +82,7 @@ PALETTE = "gold-dark"
 LANGUAGES = (("en", "English", "gb"), ("it", "Italiano", "it"), ("fr", "Français", "fr"),
              ("es", "Español", "es"), ("de", "Deutsch", "de"), ("zh", "中文", "cn"))
 LANGS = tuple(code for code, _, _ in LANGUAGES)
-PAGES = ("calibration", "live", "trials", "scans", "analysis", "charts", "dataset")
+PAGES = ("calibration", "live", "trials", "results")     # the modules of home, each with its steps (ui/01-shell.js)
 ICON = APP / "ui" / "impactguide-icon.svg"  # the round app icon: desktop, taskbar, window
 MARK = APP / "ui" / "impactguide-mark.svg"  # the same drawing without its disc, cut to fill the band's square
 CALIB_MODES = ("photo", "video")
@@ -83,6 +90,10 @@ IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
                 "cx_change", "cy_change")
 BOARD_KINDS = ("screen", "printed")
+BOARD_PLACES = ("auto", "beside", "full")   # auto: full screen on another monitor if there is one, else beside the app
+MIN_WINDOW = (720, 560)     # the app's least size: room for the board beside it on one monitor
+# Photos of a calibration series: enough for a calibration (protocol T5.1: 40, at least 30), and for a session check
+ENOUGH = {"calibration": 30, "check": 10}
 GUESS_PITCH = 25.4 / 96     # mm: a monitor that says nothing of its size is laid out as a 96 dpi one, to be measured
 COMMA_LANGS = ("it", "fr", "es", "de")
 
@@ -113,14 +124,14 @@ class Prefs:
     """What outlives a session on this computer: language, page, phase, scanner folder, phone."""
 
     DEFAULTS = {"lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "", "square_mm": 24.0,
-                "calib_mode": "photo", "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down",
-                                                  "switch_modes": True, "link": phone_link.USB, "wifi_address": "",
-                                                  "phone_id": ""},
+                "calib_mode": "photo", "calib_kind": "calibration",
+                "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down", "switch_modes": True,
+                          "link": phone_link.AUTO, "wifi_address": "", "phone_id": "", "wifi_paired": False},
                 "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": "",
                          "opacity": live_ar.OPACITY},
-                # the calibration board: on a monitor (the one chosen, else screen_board.default_monitor) or printed;
-                # last: the board last laid out on a monitor, for when that monitor is away
-                "board": {"kind": "screen", "monitor": "", "last": None},
+                # the calibration board: on a monitor or printed. On a monitor it goes full screen on another monitor
+                # (the one chosen, else the smallest without the app) or beside the app at a split (the board's share)
+                "board": {"kind": "screen", "monitor": "", "place": "auto", "split": 0.5},
                 # the ruler check of each monitor (screen_board.with_ruler): pitch_mm, measured_mm, data_mm, date
                 "monitors": {}}
 
@@ -188,10 +199,14 @@ class Backend(Bridge):
         self._view = None           # the live AR for the phone's screen (phone_view.ViewServer), made at first use
         self._view_opened = False   # opened on the phone through adb: its tunnel is laid again after a reconnection
         self._qr = ""               # the pairing QR code on show, while it waits for the phone
+        self._wifi_on = False       # Wireless debugging switched on from the PC, over the cable
         self._svgs = {}
         self._link_was = {}
         self._board_win = None      # the board on a monitor (board_window.BoardWindow), while it is shown
+        self._dock = None           # the board docked beside the app (board_window.Dock), while it is
         self._win_mons = (None, {})  # what Windows says of the monitors, read again when Qt's screens change
+        self.window = None          # the app's window (build), for the board beside it
+        self._via = None            # the link the phone was last found on (cable or Wi-Fi)
         self.link = self._make_link()
         app = QApplication.instance()
         if app is not None:
@@ -273,7 +288,7 @@ class Backend(Bridge):
                            "langs": [{"code": c, "native": n, "flag": f} for c, n, f in LANGUAGES],
                            "page": self.start_page,
                            "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5",
-                           "link": self.link.mode})
+                           "link": self.link.via})
 
     @pyqtSlot(str)
     def set_lang(self, code):
@@ -282,6 +297,9 @@ class Backend(Bridge):
             self.prefs.set("lang", code)
             if self._view is not None:
                 self._view.words, self._view.lang = view_words(code), code
+            if self._board_win is not None:
+                self._board_win.words = self._board_words()
+                self._board_win.update()
 
     @pyqtSlot(str)
     def set_page(self, page):
@@ -313,7 +331,7 @@ class Backend(Bridge):
     def phone_refresh(self):
         def done(status, error):
             self.phone_status = status if status else {"ok": False, **self._err(error)}
-            self.phone_status["link"] = self.link.mode
+            self.phone_status["link"] = self.link.via
             self._emit({"type": "phone", **self.phone_status})
         self._spawn("phone_status", lambda: self.phone().status(), done)
 
@@ -323,15 +341,16 @@ class Backend(Bridge):
 
     # ── the link: cable or Wi-Fi ─────────────────────────────────────────
     def _make_link(self):
-        """The process's link (phone_link.get()), set as the operator left it; in simulation a simulated phone
-        on the cable that pairs on Wi-Fi with the code 123456 or the QR code."""
+        """The process's link (phone_link.get()), found by itself: the cable when the phone is on it, else the Wi-Fi
+        it was paired on (remembered between sessions). In simulation a simulated phone on the cable that pairs on
+        Wi-Fi with the code 123456 or the QR code."""
         p = self.prefs["phone"]
         if self.roots.simulate:
             link = phone_link.set_default(phone_link.Link(runner=phone_link.SimulatedAdb()))
         else:
             link = phone_link.get()
-        return link.configure(mode=p.get("link") if p.get("link") in phone_link.MODES else phone_link.USB,
-                              address=p.get("wifi_address", ""), phone_id=p.get("phone_id", ""))
+        return link.configure(mode=phone_link.AUTO, address=p.get("wifi_address", ""), phone_id=p.get("phone_id", ""),
+                              paired=bool(p.get("wifi_paired")))
 
     def _on_link(self, status):
         """From the link's own thread: handed to the GUI thread through the pump."""
@@ -339,13 +358,24 @@ class Backend(Bridge):
 
     def _link_changed(self, st, _error):
         was, self._link_was = self._link_was, st
-        if self.link.remembered() != {k: self.prefs["phone"].get(k) for k in ("link", "wifi_address", "phone_id")}:
-            self.prefs.set("phone", {**self.prefs["phone"], **self.link.remembered()})
+        kept = self.link.remembered()
+        if kept != {k: self.prefs["phone"].get(k) for k in kept}:
+            self.prefs.set("phone", {**self.prefs["phone"], **kept})
         self.phone_status = {**self.phone_status, "ok": st["ok"], "cause": st["cause"] or ("" if st["ok"] else "unknown"),
-                             "link": st["mode"], "state": st["state"], "model": st["model"], "serial": st["serial"]}
+                             "link": st["via"], "state": st["state"], "model": st["model"], "serial": st["serial"]}
         self._emit({"type": "phone", **self.phone_status})
-        back = st["ok"] and was.get("state") in ("reconnecting", "lost") and was.get("mode") == st["mode"]
+        back = st["ok"] and was.get("state") in ("reconnecting", "lost") and was.get("via") == st["via"]
         self._emit({"type": "link", "action": "state", "back": back, **st})
+        if st["ok"] and self._via is not None and st["via"] != self._via:
+            # the phone is now on the other link (cable plugged in or out): the app goes on with it, a live view too
+            self._emit({"type": "link", "action": "via", "via": st["via"]})
+            if self._live is not None and self._live.running and not self._live.synthetic:
+                self._live.stop()
+                self._spawn("live", self._live.start,
+                            lambda _, error: self._emit({"type": "live", "action": "failed", **self._err(error, "live_failed")}
+                                                        if error is not None else {"type": "live", "action": "started"}))
+        if st["ok"]:
+            self._via = st["via"]
         if back and self._view_opened and self._view is not None:
             # adb drops its tunnels with the link: the phone's page goes on once the tunnel is laid again
             port = self._view.port
@@ -359,7 +389,8 @@ class Backend(Bridge):
                         "link": live.get("link")}
         st["latency_ms"] = live_ar.STREAM_LATENCY_MS.get(st["mode"])
         st["qr"] = self._svg(self._qr) if self._qr and st["qr_waiting"] else ""
-        st["busy"] = sorted(self._busy & {"link", "pair", "qr", "connect", "view_open"})
+        st["busy"] = sorted(self._busy & {"link", "pair", "qr", "connect", "view_open", "wifi_on"})
+        st["wifi_on"] = self._wifi_on
         st["simulate"] = bool(self.roots.simulate)
         st["view"] = self._view_state()
         return st
@@ -368,9 +399,29 @@ class Backend(Bridge):
     def link_state(self):
         return self._answer(self._link_state)
 
+    @pyqtSlot(result=str)
+    def link_wifi(self):
+        """Wi-Fi wanted: with the phone on the cable, Wireless debugging is switched on from here (one step less on
+        the phone), then a pairing QR code is shown; the phone that scans it is paired and connected, and the app
+        goes on with it by itself when the cable is unplugged."""
+        def go():
+            def done(on, _error):
+                self._wifi_on = bool(on)
+                self.link_qr()
+                self._emit({"type": "link", "action": "pairing"})
+            if self.link.status()["via"] == phone_link.USB and self.link.status()["ok"]:
+                if not self._spawn("wifi_on", self.link.wifi_debugging_on, done):
+                    return {"error": "busy"}
+            else:
+                self._wifi_on = False
+                self.link_qr()
+            return self._link_state()
+        return self._answer(go)
+
     @pyqtSlot(str, result=str)
     def link_mode(self, mode):
-        """Cable or Wi-Fi, kept for the next session. A live view running on the other link stops."""
+        """auto (the cable when the phone is on it, else Wi-Fi), or only the cable, or only Wi-Fi: for the tests and
+        the command line; the panel never asks. A live view running on the other link stops."""
         def go():
             if mode not in phone_link.MODES:
                 return {"error": "bad_value", "message": "link"}
@@ -943,6 +994,20 @@ class Backend(Bridge):
                 "fx": K[0][0], "fy": K[1][1], "cx": K[0][2], "cy": K[1][2], "dropped": cal.get("dropped", []),
                 "skipped": cal.get("skipped", {}), "square_mm": (cal.get("board") or {}).get("square_mm")}
 
+    def _folders(self):
+        """The folders of calibration photos, newest first: name, path, number of photos, kind, board.json."""
+        folders = []
+        if self.roots.calib_raw.is_dir():
+            for d in sorted((d for d in self.roots.calib_raw.iterdir() if d.is_dir()), key=lambda d: d.name,
+                            reverse=True):
+                n = sum(1 for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+                board = None
+                with contextlib.suppress(OSError, ValueError):
+                    board = json.loads((d / calibrate_charuco.BOARD_FILE).read_text(encoding="utf-8"))
+                folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1],
+                                "board": board})
+        return folders
+
     def _calib_state(self):
         r = self.roots
         modes = {}
@@ -958,21 +1023,22 @@ class Backend(Bridge):
         last = {}
         for c in checks:
             last[c["mode"]] = c
-        folders = []
-        if r.calib_raw.is_dir():
-            for d in sorted((d for d in r.calib_raw.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True):
-                n = sum(1 for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
-                board = None
-                with contextlib.suppress(OSError, ValueError):
-                    board = json.loads((d / calibrate_charuco.BOARD_FILE).read_text(encoding="utf-8"))
-                folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1],
-                                "board": board})
+        folders = self._folders()
         b = calibrate_charuco.BOARD
         nx, ny = b["squares"]
         board_file = r.board / f"charuco_{nx}x{ny}_{float(self.prefs['square_mm']):g}mm_{b['dictionary'].lower()}_a4.pdf"
         bs = self._board_state()
+        kind = self._series_kind()
+        f = self._series(folders)
+        series = None
+        if f is not None:
+            photos = sorted((p for p in Path(f["path"]).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES),
+                            key=lambda p: p.stat().st_mtime)
+            same = f["n"] == 0 or self._same_board(f["board"], bs["active"])
+            series = {**f, "same": same, "last": file_url(photos[-1]) if photos and same else ""}
         return {"board": {**b, "squares": list(b["squares"])}, "square_mm": self.prefs["square_mm"],
-                "active": bs["active"], "board_ui": bs, "mode": self.prefs["calib_mode"], "modes": modes, "last_check": last, "folders": folders,
+                "active": bs["active"], "board_ui": bs, "mode": self.prefs["calib_mode"], "kind": kind,
+                "enough": ENOUGH[kind], "series": series, "modes": modes, "last_check": last, "folders": folders,
                 "raw": str(r.calib_raw), "out": str(r.calib_out), "board_file": str(board_file) if board_file.exists() else "",
                 "board_dir": str(r.board), "phone": self.phone_status, "busy": sorted(self._busy),
                 "min_views": calibrate_charuco.MIN_VIEWS, "max_rms": calibrate_charuco.MAX_RMS}
@@ -980,6 +1046,93 @@ class Backend(Bridge):
     @pyqtSlot(result=str)
     def calib_state(self):
         return self._answer(self._calib_state)
+
+    # ── calibration: the series of photos ───────────────────────────────
+    def _series_kind(self):
+        """What the photos are for: a calibration, or the session check of the one stored (Advanced)."""
+        k = self.prefs["calib_kind"]
+        return k if k in ENOUGH else "calibration"
+
+    def _series_tag(self):
+        mode = self.prefs["calib_mode"] if self.prefs["calib_mode"] in CALIB_MODES else "photo"
+        return mode if self._series_kind() == "calibration" else "check_" + mode
+
+    def _series(self, folders=None):
+        """The folder the photos go to now: the newest of today's for this mode and kind, or None (one is made at the
+        first photo). A folder of another day is a series of its own, kept as it is."""
+        if folders is None:
+            folders = self._folders()
+        today = f"{date.today():%Y%m%d}"
+        return next((f for f in folders if f["kind"] == self._series_tag() and f["name"].startswith(today)), None)
+
+    @staticmethod
+    def _same_board(folder_board, active):
+        """The photos of a folder are of the board in use now: the same squares, square and marker."""
+        if not folder_board or not active:
+            return False
+        return (list(folder_board.get("squares") or []) == list(active.get("squares") or [])
+                and abs(float(folder_board.get("square_mm", 0)) - float(active["square_mm"])) < 1e-6
+                and abs(float(folder_board.get("marker_mm", 0)) - float(active["marker_mm"])) < 1e-6)
+
+    def _new_series(self):
+        """A new folder for today's photos of this mode and kind: 20261016_photo, then 20261016b_photo..."""
+        today, tag = f"{date.today():%Y%m%d}", self._series_tag()
+        for suffix in [""] + list("bcdefghijklmnopqrstuvwxyz"):
+            d = self.roots.calib_raw / f"{today}{suffix}_{tag}"
+            if not d.exists():
+                d.mkdir(parents=True)
+                return d
+        raise RuntimeError("too many series today")
+
+    def _series_folder(self):
+        """The folder for the next photo: the series of today if it has no photos yet or its photos are of the board
+        in use; else a new one (the board changed: the photos start again)."""
+        f = self._series()
+        if f is not None and (f["n"] == 0 or self._same_board(f["board"], self._board()["active"])):
+            return Path(f["path"])
+        return self._new_series()
+
+    def _series_hold(self):
+        """The board of the series in progress, kept on the monitor while it fits (board_window, hold)."""
+        f = self._series()
+        b = f["board"] if f is not None and f["n"] > 0 else None
+        return b if b and b.get("kind") == "screen" and b.get("square_px") else None
+
+    @pyqtSlot(str, result=str)
+    def calib_set(self, payload):
+        """{mode: photo or video, kind: calibration or check}: what the next photos are for."""
+        def go():
+            c = json.loads(payload)
+            if c.get("mode") in CALIB_MODES:
+                self.prefs.set("calib_mode", c["mode"])
+            if c.get("kind") in ENOUGH:
+                self.prefs.set("calib_kind", c["kind"])
+            if self._board_win is not None:
+                self._board_win.hold = self._series_hold()
+            return self._calib_state()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def calib_series_new(self):
+        """Start again: today's photos go to a new folder from the next one on."""
+        def go():
+            d = self._new_series()
+            self._folder_board(d)
+            if self._board_win is not None:
+                self._board_win.hold = None
+            return {**self._calib_state(), "folder": d.name}
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def calib_take(self):
+        """A photo from the phone into the series. The board must be on show when it is the one on a monitor."""
+        def go():
+            st = self._board()
+            if st["kind"] == "screen" and (self._board_win is None or self._board_win.lay is None):
+                return {"error": "board_hidden" if self._board_win is None else "board_small"}
+            d = self._series_folder()
+            return self._shoot_into(d)
+        return self._answer(go)
 
     @pyqtSlot(str, float, result=str)
     def calib_settings(self, mode, square):
@@ -1042,32 +1195,35 @@ class Backend(Bridge):
 
     @pyqtSlot(str, result=str)
     def calib_shoot(self, name):
-        """A photo from the phone into the folder, under the name the phone gave it."""
-        def go():
-            d = self._calib_dir(name)
-            blocked = self._free_camera()
-            if blocked:
-                return blocked
-            self._folder_board(d)
+        """A photo from the phone into a folder chosen by name, under the name the phone gave it."""
+        return self._answer(lambda: self._shoot_into(self._calib_dir(name)))
 
-            def done(path, error):
-                if error is not None:
-                    self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
-                    return
-                dest = d / Path(path).name
-                if dest.exists():
-                    self._emit({"type": "acquire_failed", "key": "calibration", "error": "exists", "message": dest.name})
-                    return
-                shutil.move(str(path), str(dest))
-                self._emit({"type": "calib_photo", "folder": name, "name": dest.name})
-            ok = self._spawn("phone", lambda: self.phone().shoot(self.roots.staging / "calibration"), done)
-            return {"ok": ok} if ok else {"error": "busy"}
-        return self._answer(go)
+    def _shoot_into(self, d):
+        blocked = self._free_camera()
+        if blocked:
+            return blocked
+        self._folder_board(d)
+
+        def done(path, error):
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                return
+            dest = d / Path(path).name
+            if dest.exists():
+                self._emit({"type": "acquire_failed", "key": "calibration", "error": "exists", "message": dest.name})
+                return
+            shutil.move(str(path), str(dest))
+            if self._board_win is not None:
+                self._board_win.hold = self._series_hold()     # the board of these photos stays while it fits
+            self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name})
+        ok = self._spawn("phone", lambda: self.phone().shoot(self.roots.staging / "calibration"), done)
+        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
 
     @pyqtSlot(str, result=str)
     def calib_import(self, name):
+        """Photo files added to a folder by name, or to the series (name empty)."""
         def go():
-            d = self._calib_dir(name)
+            d = self._calib_dir(name) if name else self._series_folder()
             pattern = " ".join("*" + s for s in IMAGE_SUFFIXES)
             paths, _ = QFileDialog.getOpenFileNames(None, "ImpactGuide", str(Path.home()), f"photos ({pattern})")
             if paths:
@@ -1169,29 +1325,70 @@ class Backend(Bridge):
         mons = screen_board.monitors(qt, self._win_mons[1], self.prefs["monitors"])
         return mons, {m["key"]: sc for m, sc in zip(mons, screens)}
 
+    def _monitor_of(self, device):
+        """The monitor (screen_board.monitors, with its ruler check) of a device name: the board window asks it each
+        time it is laid out, so a ruler check or a monitor changed is taken at once."""
+        mons, _ = self._screens()
+        return next((m for m in mons if m["device"] == device), None)
+
+    def _app_screen(self):
+        """The screen the app's window is on (the main one without a window: the tests)."""
+        app = QApplication.instance()
+        sc = self.window.screen() if self.window is not None else None
+        return sc or (app.primaryScreen() if app is not None else None)
+
+    def _split(self):
+        """The board's share of the monitor's width beside the app, as the operator last left it."""
+        try:
+            return min(0.8, max(0.2, float(self.prefs["board"].get("split", 0.5))))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _beside_rect(self, screen):
+        """Where the board goes beside the app before the dock places it: the right share of the work area."""
+        g = screen.availableGeometry()
+        bw = round(g.width() * self._split())
+        return QRect(g.x() + g.width() - bw, g.y(), bw, g.height())
+
     def _board(self):
-        """The board as it stands: kind, the monitor chosen (or the default one) with its layout, the printed
-        board, and the active board (what the Calibration and Live AR pages use)."""
+        """The board as it stands: kind; where it goes on a monitor (full screen on another monitor, or beside the app
+        on the app's own) with its layout there, the real one while it is shown; the printed board; and the active
+        board, what the Calibration and Live AR modules use."""
         mons, screens = self._screens()
         b = self.prefs["board"]
         kind = b.get("kind") if b.get("kind") in BOARD_KINDS else "screen"
-        mon = next((m for m in mons if m["key"] == b.get("monitor")), None)
-        if mon is None:
-            mon = next((m for m in mons if m["key"] == screen_board.default_monitor(mons)), None)
+        place = b.get("place") if b.get("place") in BOARD_PLACES else "auto"
+        app_sc = self._app_screen()
+        app_dev = app_sc.name() if app_sc is not None else ""
+        others = [m for m in mons if m["device"] != app_dev]
+        if place == "auto":
+            place = "full" if others else "beside"
+        if place == "full":
+            mon = next((m for m in mons if m["key"] == b.get("monitor")), None) or next(
+                (m for m in mons if m["key"] == screen_board.default_monitor(others or mons)), None)
+        else:
+            mon = next((m for m in mons if m["device"] == app_dev), None) or (mons[0] if mons else None)
+        win = self._board_win
         lay, error = None, ""
-        if mon is not None:
+        if win is not None:
+            lay, error, mon = win.lay, win.error, win.mon or mon
+        elif mon is not None:
+            sc = screens.get(mon["key"])
+            if place == "full" or sc is None:
+                px = mon["px"]
+            else:
+                r, dpr = self._beside_rect(sc), float(sc.devicePixelRatio())
+                px = (int(round(r.width() * dpr)), int(round(r.height() * dpr)))
             try:
-                lay = screen_board.layout(mon["px"], mon["pitch_mm"] or GUESS_PITCH)
+                lay = screen_board.layout(px, mon["pitch_mm"] or GUESS_PITCH)
             except ValueError:
                 error = "too_small"
-        screen = screen_board.spec(lay, mon) if lay else b.get("last")
-        if lay and b.get("last") != screen:
-            self.prefs.set("board", {**b, "last": screen})
+        screen = screen_board.spec(lay, mon) if lay else None
         printed = {"kind": "printed",
                    **calibrate_charuco.board_spec(calibrate_charuco.make_board(float(self.prefs["square_mm"])))}
         active = screen if kind == "screen" and screen else printed
-        return {"kind": kind, "mons": mons, "screens": screens, "mon": mon, "lay": lay, "error": error,
-                "printed": printed, "active": active}
+        return {"kind": kind, "place": place, "mons": mons, "screens": screens, "mon": mon, "lay": lay,
+                "error": error, "printed": printed, "active": active, "others": bool(others)}
 
     def _board_state(self):
         st = self._board()
@@ -1200,14 +1397,19 @@ class Backend(Bridge):
         if lay:
             view = {k: lay[k] for k in ("squares", "square_px", "marker_px", "square_mm", "marker_mm", "width_mm",
                                         "height_mm", "pitch_mm")}
-            view["width_u_mm"] = lay["width_mm"] * (mon["rel_u"] or 0.0)
+            view["width_u_mm"] = lay["width_mm"] * ((mon or {}).get("rel_u") or 0.0)
         keys = ("key", "label", "device", "primary", "px", "native", "is_native", "dpr", "diag_in", "pitch_mm",
                 "pitch_data_mm", "rel_u", "source", "sources", "agree", "spread", "ruler")
-        shown = self._board_win is not None
-        return {"kind": st["kind"], "monitors": [{k: m[k] for k in keys} for m in st["mons"]],
+        win = self._board_win
+        return {"kind": st["kind"], "place": self.prefs["board"].get("place", "auto"), "placed": st["place"],
+                "others": st["others"], "monitors": [{k: m[k] for k in keys} for m in st["mons"]],
                 "monitor": mon["key"] if mon else "", "mon": {k: mon[k] for k in keys} if mon else None,
                 "layout": view, "error": st["error"], "printed": st["printed"], "active": st["active"],
-                "shown": shown, "shown_on": self._board_win.key if shown else ""}
+                "shown": win is not None, "shown_on": win.key if win is not None else "",
+                "docked": bool(self._dock is not None and self._dock.docked),
+                "held": bool(win is not None and win.hold and win.lay
+                              and win.lay["square_px"] == win.hold.get("square_px")
+                              and list(win.lay["squares"]) == list(win.hold.get("squares") or []))}
 
     @pyqtSlot(result=str)
     def board_state(self):
@@ -1219,15 +1421,20 @@ class Backend(Bridge):
 
     @pyqtSlot(str, result=str)
     def board_set(self, payload):
-        """{kind, monitor, printed_mm (the printed board's long side as measured), ruler_mm (the length between the
-        arrows of the board on a monitor, as a ruler reads it), forget (the ruler check of that monitor)}."""
+        """{kind, place (auto, beside, full), monitor (full screen on that one), dock (the board shown in a window
+        docked beside the app again), printed_mm (the printed board's long side as measured), ruler_mm (the length
+        between the arrows of the board on a monitor, as a ruler reads it), forget (the ruler check of that
+        monitor)}."""
         def go():
             c = json.loads(payload)
             b = dict(self.prefs["board"])
+            again = False
             if c.get("kind") in BOARD_KINDS:
                 b["kind"] = c["kind"]
-            if c.get("monitor"):
-                b["monitor"] = str(c["monitor"])
+            if c.get("place") in BOARD_PLACES and c["place"] != b.get("place"):
+                b["place"], again = c["place"], True
+            if c.get("monitor") and c["monitor"] != b.get("monitor"):
+                b["monitor"], b["place"], again = str(c["monitor"]), "full", True
             self.prefs.set("board", b)
             if c.get("printed_mm") is not None:
                 sq = float(c["printed_mm"]) / calibrate_charuco.BOARD["squares"][0]
@@ -1239,8 +1446,6 @@ class Backend(Bridge):
                 mon, lay = st["mon"], st["lay"]
                 if mon is None or lay is None:
                     return {"error": "no_monitor"}
-                if self._board_win is not None and self._board_win.key == mon["key"]:
-                    lay = self._board_win.lay      # the reading is of the board on show
                 checks = dict(self.prefs["monitors"])
                 if c.get("forget"):
                     checks.pop(mon["key"], None)
@@ -1256,41 +1461,76 @@ class Backend(Bridge):
                                           "expected_mm": round(lay["width_mm"], 2),
                                           "date": datetime.now().isoformat(timespec="seconds")}
                 self.prefs.set("monitors", checks)
+                if self._board_win is not None:
+                    self._board_win.relayout()       # the same window, the board in the new millimetres
             if self._board_win is not None:
-                self._show_board(self._board())     # the board on show follows: another monitor, another size
+                if b["kind"] != "screen":
+                    self._hide_board()
+                elif again or (c.get("dock") and not self._board_win.full):
+                    self._hide_board()                  # another place or monitor, or docked again
+                    self._show_board(self._board())
+            self._sync_live()
             return self._board_state()
         return self._answer(go)
 
-    def _board_words(self, lay):
+    def _board_words(self):
         words = {}
         for code in ("en", self.lang):
             with contextlib.suppress(OSError, ValueError):
                 words.update(json.loads((APP / "ui" / "strings" / f"{code}.json").read_text(encoding="utf-8")))
-        nx, ny = lay["squares"]
         return {"title": words.get("board.window.title", "ImpactGuide"),
-                "measure": words.get("board.window.measure", "{0} mm").replace("{0}", self._num(lay["width_mm"])),
-                "info": words.get("board.window.info", "").replace("{0}", str(nx)).replace("{1}", str(ny))
-                .replace("{2}", self._num(lay["square_mm"], 2))}
+                "measure": words.get("board.window.measure", "{0} mm"), "info": words.get("board.window.info", ""),
+                "small": words.get("board.window.small", ""), "comma": self.lang in COMMA_LANGS}
+
+    def _min_board(self, mon, screen):
+        """The least size of the board's window, logical pixels: the smallest board at that monitor's pitch."""
+        w, h = screen_board.min_px((mon or {}).get("pitch_mm") or GUESS_PITCH)
+        dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
+        return int(w / dpr) + 2, int(h / dpr) + 2
 
     def _show_board(self, st):
-        """The board on the monitor of st (a _board()), in place of the one on show if any."""
-        mon, lay = st["mon"], st["lay"]
+        """The board where st (a _board()) puts it, in place of the one on show if any: full screen on its monitor, or
+        in a window docked beside the app (the app makes room for it)."""
+        mon = st["mon"]
         screen = st["screens"].get(mon["key"]) if mon else None
-        if screen is None or lay is None:
+        if screen is None:
             return False
         self._hide_board()
-        win = board_window.BoardWindow(screen, lay, self._board_words(lay))
-        win.key = mon["key"]
+        hold = self._series_hold()
+        if st["place"] == "full":
+            win = board_window.BoardWindow(screen, self._monitor_of, self._board_words(), full=True,
+                                           owner=self.window, hold=hold)
+        else:
+            win = board_window.BoardWindow(screen, self._monitor_of, self._board_words(), full=False,
+                                           rect=self._beside_rect(screen), owner=self.window, hold=hold)
+            if self.window is not None:
+                dock = board_window.Dock(self.window, win, self._split(), min_board=self._min_board(mon, screen))
+                if dock.fits():
+                    self._dock = dock
+                    dock.split_set.connect(self._split_set)
+                    dock.undocked.connect(lambda d=dock: self._emit({"type": "board", "action": "undocked"})
+                                          if self._dock is d else None)
         win.closed.connect(lambda why, w=win: self._board_closed(w, why))
+        win.relaid.connect(lambda w=win: self._board_relaid(w))
         self._board_win = win
         win.show_board()
+        if self._dock is not None:
+            self._dock.dock()
         return True
+
+    def _split_set(self, split):
+        self.prefs.set("board", {**self.prefs["board"], "split": round(float(split), 3)})
 
     def _hide_board(self):
         win, self._board_win = self._board_win, None
+        dock, self._dock = self._dock, None
+        if dock is not None:
+            dock.give_back()
         if win is not None:
             with contextlib.suppress(TypeError, RuntimeError):
                 win.closed.disconnect()
+            with contextlib.suppress(TypeError, RuntimeError):
+                win.relaid.disconnect()
             win.close()
 
     def _screen_removed(self, screen):
@@ -1300,13 +1540,29 @@ class Backend(Bridge):
     def _board_closed(self, win, why):
         if self._board_win is win:
             self._board_win = None
+            dock, self._dock = self._dock, None
+            if dock is not None:
+                dock.give_back()
             self._emit({"type": "board", "action": "closed", "reason": why})
+
+    def _board_relaid(self, win):
+        """The board on show changed (the window moved, resized, went to another monitor): the live view takes it at
+        once, and the page is told."""
+        if win is not self._board_win:
+            return
+        self._sync_live()
+        self._emit({"type": "board", "action": "relaid", "error": win.error})
 
     @pyqtSlot(result=str)
     def board_show(self):
         def go():
-            if not self._show_board(self._board()):
+            st = self._board()
+            if st["kind"] != "screen":
+                self.prefs.set("board", {**self.prefs["board"], "kind": "screen"})
+                st = self._board()
+            if not self._show_board(st):
                 return {"error": "no_monitor"}
+            self._sync_live()
             return self._board_state()
         return self._answer(go)
 
@@ -1323,6 +1579,15 @@ class Backend(Bridge):
         screen = a["kind"] == "screen"
         return {"square_mm": float(a["square_mm"]), "squares": list(a["squares"]) if screen else None,
                 "marker_mm": float(a["marker_mm"]) if screen else None}
+
+    def _sync_live(self):
+        """The live view, if made, on the board as it is now."""
+        if self._live is None:
+            return
+        lb = self._live_board()
+        now = self._live.settings()
+        if any(now.get(k) != v for k, v in lb.items()):
+            self._live.configure(**lb)
 
     # ── live AR ──────────────────────────────────────────────────────────
     def live(self):
@@ -1353,16 +1618,14 @@ class Backend(Bridge):
         return None
 
     def _live_state(self):
-        ar = self.live()
-        lb = self._live_board()
-        now = ar.settings()
-        if any(now[k] != v for k, v in lb.items()):    # the board changed here or on the Calibration page
-            ar.configure(**lb)
+        self.live()
+        self._sync_live()       # the board changed here, on the Calibration module, or its window moved
+        ar = self._live
         ln = self.link.status()
         return {**ar.status(), "url": self._live_server.url, "prefs": self.prefs["live"], "phone": self.phone_status,
                 "busy": sorted(self._busy), "simulate": bool(self.roots.simulate),
                 "intrinsics_file": str(self.roots.calib_out / "intrinsics_stream.json"),
-                "phone_link": {k: ln[k] for k in ("mode", "state", "cause", "rtt_ms", "model")},
+                "phone_link": {**{k: ln[k] for k in ("state", "cause", "rtt_ms", "model")}, "mode": ln["via"]},
                 "phone_view": self._view.stats() if self._view is not None else None,
                 "board_ui": self._board_state()}
 
@@ -1608,8 +1871,9 @@ def build(args):
     title = APP_NAME + (" (simulation)" if roots.simulate else "")
     # the band the window draws before the page has one shows the mark as a button, as the page
     # always does (ui/01-shell.js, showHome)
-    win = Window(page, bridge=backend, title=title, palette=PALETTE, size=(1440, 900), min_size=(1180, 700),
+    win = Window(page, bridge=backend, title=title, palette=PALETTE, size=(1440, 900), min_size=MIN_WINDOW,
                  logo=mark_file(), brand_action=True)
+    backend.window = win
     win.setIcon(app_icon())
     app.aboutToQuit.connect(backend.shutdown)
     starting, ready = splash_words(backend.lang)

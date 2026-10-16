@@ -1,7 +1,8 @@
 /* ============================================================================
    What ImpactGuide adds to SlantUI: the layout of its own pages on the stage.
    Every colour is a role and every length a metric or a number of this page's
-   own; the widgets themselves are the library's.
+   own; the widgets themselves are the library's (the folds, the choices and
+   the status cells of home included).
    ========================================================================== */
 
 /* The mark on the band. The library gives .tbar-logo its size (the 22 px square of --tbar-mark,
@@ -10,10 +11,12 @@
    icon's drawing without its disc, cut tight, so it fills the square as SlantUI's own mark does. */
 #tbLogo{background:url(impactguide-mark.svg) center/contain no-repeat}
 
-/* A toolbar group per page; only the open page's is shown. */
+/* A toolbar group per step; only the open step's is shown. */
 .tool-group{display:flex;align-items:center;gap:3px}
 .tool-group .btn-sm{min-width:96px}
 #simChip{flex:none;margin-right:8px}
+#lkBtn{flex:none}
+#lkBtn.on{background:var(--accent-surface);color:var(--accent-text)}
 
 /* A page on the stage is a column that scrolls, centred on the backdrop. */
 .view{position:absolute;inset:0;overflow-y:auto;display:none;padding:18px 24px 28px}
@@ -21,10 +24,12 @@
 
 /* ── home ─────────────────────────────────────────────────────────────────
    The start, as UniGuide's entry: a title, four large choices and the state of
-   the bench, in the middle of the stage, with no panel and no toolbar. The
-   middle is found with automatic margins, so a home taller than the window
-   scrolls from its top instead of losing it over the edge. */
-.app.at-home .toolbar,.app.at-home .rp{display:none}
+   the bench, in the middle of the stage, with no rail, no toolbar and no
+   panel; the Phone panel alone takes its place down the right when it is
+   opened from the phone cell. The middle is found with automatic margins, so
+   a home taller than the window scrolls from its top instead of losing it. */
+.app.at-home .topbar,.app.at-home .toolbar{display:none}
+.app.at-home:not(.phone-open) .rp{display:none}
 .view.home-view{padding:32px 40px}
 .view.home-view.show{display:flex}
 .home{margin:auto;width:760px;max-width:100%;display:flex;flex-direction:column}
@@ -34,41 +39,13 @@
          overflow:hidden;text-overflow:ellipsis}
 .home-sub{font-size:var(--fs-lg);color:var(--text-3);margin-top:6px;white-space:nowrap;
           overflow:hidden;text-overflow:ellipsis}
-/* Two columns of equal width by construction: a long word does not widen its
-   tile, it is caught by the test instead. Name and line stay on one line each. */
-.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:28px}
-.home-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
-           min-width:0;padding:24px 16px;background:var(--control);color:var(--text-2);
-           border-radius:var(--r);transition:background var(--t-out),transform var(--t-out)}
-.home-tile:hover:not(:disabled){background:var(--control-hover);transform:translateY(-1px);
-                                transition-duration:var(--t-in)}
-.home-tile:active:not(:disabled){transform:none}
-.home-tile svg{width:30px;height:30px;margin-bottom:4px;flex:none}
-.home-tile b{font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1);line-height:1.3;
-             max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.home-line{font-size:var(--fs-sm);color:var(--text-3);line-height:1.35;max-width:100%;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* Not built yet: there, and not ready, which reads without trying it. */
-.home-tile:disabled{background:var(--surface-2);color:var(--text-4)}
-.home-tile:disabled b,.home-tile:disabled .home-line{color:var(--text-4)}
-/* The state of the bench: three cells, a light, a label and a value each. */
-.home-status{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}
-.home-st{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:10px;row-gap:3px;align-items:center;
-         min-width:0;padding:10px 14px;background:var(--surface-2);border-radius:var(--r)}
-.home-st .live-dot{grid-row:1/3}
-.home-st-l{font-size:var(--fs-xs);font-weight:var(--w-strong);letter-spacing:.6px;text-transform:uppercase;
-           color:var(--text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.home-st-v{font-size:var(--fs);color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#hsPhone{cursor:pointer;transition:background var(--t-out)}
-#hsPhone:hover{background:var(--control);transition-duration:var(--t-in)}
+.home-choices{margin-top:28px}
+.home-cells{margin-top:var(--sp-2)}
 
-/* ── Advanced ─────────────────────────────────────────────────────────────
-   What is rarely needed, after a button that opens it; the button is lit while
-   it is open and its chevron turns. */
-.stack>.adv-btn{margin-top:16px}
-.adv-btn svg.r{transition:transform var(--t-out)}
-.adv-btn.on svg.r{transform:rotate(180deg)}
-.adv-box>.sec-lbl:first-child,.adv-box>.stack:first-child>.sec-lbl:first-child{margin-top:4px}
+/* ── folds: Advanced, closed until asked for ───────────────────────────── */
+.stack>.fold{margin-top:16px}
+.fold-body>.stack>.sec-lbl:first-child,.fold-body>.stack>.stack:first-child>.sec-lbl:first-child{margin-top:4px}
+
 .sheet-col{max-width:980px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
 .cards2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .cards2>.card{min-width:0}
@@ -76,15 +53,40 @@
 .row.wrap{flex-wrap:wrap;gap:6px}
 .row.wrap>*+*{margin-left:0}
 
+/* ── a card that says one thing: a light, a title, one plain line and a hint.
+   The board of the first step, the result of a calibration, the live view at
+   rest, a step still to come. */
+.say{display:flex;flex-direction:column;gap:8px;padding:22px 24px;align-self:stretch}
+.say-top{display:flex;align-items:center;gap:10px;min-width:0}
+.say-title{font-size:22px;font-weight:var(--w-strong);color:var(--text-1);line-height:1.3;min-width:0}
+.say-line{font-size:15px;color:var(--text-2);line-height:1.5}
+.say-hint{font-size:var(--fs);color:var(--text-3);line-height:1.5}
+.say-hint:empty,.say-line:empty{display:none}
+.say .live-dot{width:13px;height:13px}
+.say .live-dot:not(.ok):not(.warn):not(.busy){display:none}
+
+/* ── the photos of a calibration: the count, large, against what is enough;
+   it turns to the ok colour the moment there are enough. */
+.count{display:flex;flex-direction:column;gap:12px;padding:24px 26px}
+.count-n{display:flex;align-items:baseline;gap:8px;color:var(--text-1);line-height:1}
+#cpN{font-size:64px;font-weight:300;letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
+.count-of{font-size:20px;color:var(--text-3);white-space:nowrap}
+.count-say{font-size:17px;font-weight:var(--w-strong);color:var(--text-1)}
+.count .progress-fill{transition:transform var(--t-out)}
+.count.enough #cpN,.count.enough .count-say{color:var(--ok-text)}
+.count.enough .progress-fill{background:var(--ok)}
+.cp-last img{display:block;max-width:100%;max-height:300px;object-fit:contain;border-radius:var(--r-md);
+             background:var(--surface-0)}
+
 /* ── the trial in progress ────────────────────────────────────────────────── */
-.trial-head{display:flex;align-items:center;gap:18px}
+.trial-head{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .trial-id{font-size:30px;font-weight:var(--w-strong);color:var(--text-1);letter-spacing:.3px;
           font-variant-numeric:tabular-nums;white-space:nowrap}
 .trial-sub{font-size:var(--fs-lg);color:var(--text-2)}
 
 /* The settings of the pendulum and of the bench, one tile each; what changes
-   from the trial before is lit. */
-.tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+   from the trial before is lit. They wrap on a narrow stage. */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px}
 .tile-set{background:var(--surface-2);border-radius:var(--r-md);padding:10px 14px;min-width:0}
 .tile-l{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile-v{font-size:24px;font-weight:var(--w-strong);color:var(--text-1);margin-top:2px;white-space:nowrap;
@@ -107,17 +109,24 @@
 
 /* The guide fills the stage: the trial and its settings on top, then the step
    to do now beside the list of all the steps, each column scrolling by itself,
-   so the step to do never leaves the screen. */
+   so the step to do never leaves the screen. On a narrow stage (the app beside
+   the board on one monitor) the two columns become one and the page scrolls. */
 .sheet-col.fill{height:100%}
 .split{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px);gap:12px}
 .split>*{min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
 .split-side{padding-right:4px}
+.view.narrowable{container-type:inline-size}
+@container (max-width: 760px){
+  .sheet-col.fill{height:auto}
+  .split{grid-template-columns:minmax(0,1fr)}
+  .split>*{overflow:visible}
+  .cards2{grid-template-columns:minmax(0,1fr)}
+}
 
 /* The steps of the trial: done, now, still to do. */
 #gSteps .mitem-name{display:flex;align-items:center;gap:9px}
 #gSteps .mitem.done .mitem-name{color:var(--text-3)}
 #gSteps .mitem.todo .mitem-name{color:var(--text-2)}
-.done-card{align-items:flex-start;padding:22px 24px;gap:8px}
 
 /* The sequence, as a grid of slots. */
 .seq-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
@@ -142,11 +151,12 @@
 .cfg-pair>.col>*+*{margin-top:4px}
 
 /* ── the live view ────────────────────────────────────────────────────────
-   The stream fills the stage at its own 4:3; what is not real yet, the light
+   The stream fills the stage at its own shape (4:3 across, 3:4 upright); what is not real yet, the light
    and the pace sit on it on the overlay role, as SlantUI's on-stage chrome. */
 .view.live-view{padding:12px 16px 16px;overflow:hidden}
 .live-stage{height:100%;display:flex;align-items:center;justify-content:center;container-type:size}
-.live-frame{position:relative;width:min(100cqw,calc(100cqh * 4 / 3));height:min(100cqh,calc(100cqw * 3 / 4));
+.live-frame{position:relative;width:min(100cqw,calc(100cqh * var(--ar,1.3333)));
+            height:min(100cqh,calc(100cqw / var(--ar,1.3333)));
             background:var(--surface-0);border-radius:var(--r-md);overflow:hidden}
 .live-img{display:block;width:100%;height:100%;object-fit:contain}
 .live-tags{color:var(--text-2)}
@@ -158,34 +168,46 @@
 .live-dot.ok{background:var(--ok)}
 .live-dot.off{background:var(--control-hover)}
 .live-dot.warn{background:var(--warn)}
+.live-dot.busy{background:var(--accent);animation:pulse 1s infinite}
 .live-idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
-.live-idle .done-card{max-width:560px}
-.live-idle .trial-id{font-size:24px;white-space:normal}
+.live-idle .say{max-width:560px}
 
-/* The state of the link in the Phone pane, larger. */
+/* ── the Phone panel: in the panel down the right, in place of the step's ──
+   Its head is the panel's (one block tall) with a close button in its corner.
+   The state of the link larger; a QR code on its own row, as wide as fits. */
+.rp-hd-x{position:relative;padding-right:40px}
+.rp-x{position:absolute;top:8px;right:8px}
 .live-state{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--surface-3);
             border-radius:var(--r-xs);font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1)}
 .live-state .live-dot{width:14px;height:14px}
-
-/* ── the phone: link and phone screen ────────────────────────────────────
-   SlantUI's docked pane (.sheet-side); the rail button that opens it wears
-   the accent while it is open, as a .more does for its sheet. */
-#lkBtn{flex:none}
-#lkBtn.on{background:var(--accent-surface);color:var(--accent-text)}
-#lkModes .mitem{cursor:pointer}
+.lk-word{min-width:0}
 .lk-step{display:flex;align-items:flex-start;gap:9px;font-size:var(--fs);line-height:var(--lh);color:var(--text-2)}
 .lk-step .tn{margin:1px 0 0}
 /* A QR code is read dark on light: the tile is the lightest text role, the modules the deepest surface. */
-.lk-qr-row{display:flex;align-items:flex-start;gap:14px}
-.lk-qr{flex:none;width:172px;height:172px;padding:6px;background:var(--text-1);color:var(--surface-0);
+.lk-qr{width:100%;max-width:200px;aspect-ratio:1;padding:6px;background:var(--text-1);color:var(--surface-0);
        border-radius:var(--r-md)}
 .lk-qr:empty{display:none}
 .lk-qr svg{display:block;width:100%;height:100%}
-.lk-qr-side{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start}
-.lk-qr-side>*+*{margin-top:8px}
-.lk-qr-side .row>*+*{margin-left:8px}
 
 /* The edits of a logged value: one card each. */
 .edit-card{background:var(--surface-3);border-radius:var(--r-md);padding:7px 10px;font-size:var(--fs-sm);
            color:var(--text-2);line-height:var(--lh)}
 .edit-card .aside{display:block}
+
+/* ── a narrow window: the app beside the board on one monitor ─────────────
+   The rail keeps every step: the open one with its name, the others as their
+   number (their name on hover, as UniGuide's numbered rail); the state pill
+   keeps its light and says its words on hover. */
+@media (max-width: 880px){
+  #rail .tab:not(.active){width:var(--slot);min-width:0;padding:0;justify-content:center;flex:none}
+  #rail .tab:not(.active) span{display:none}
+  #rail .tab:not(.active) .tn{margin-right:0}
+  #rail .tab.active{width:auto;max-width:none;flex:none}
+}
+@media (max-width: 800px){
+  .stpill span{display:none}
+  .stpill .sd{margin-right:0}
+  .view{padding:14px 14px 22px}
+  .view.home-view{padding:20px 16px}
+  #where{display:none}
+}

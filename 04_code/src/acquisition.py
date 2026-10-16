@@ -108,7 +108,7 @@ class Phone:
             detail = (r.stderr or r.stdout).strip()[-300:]
             if device and not self.fixed and not self.link.ready():
                 # the phone went away in the middle: said as the link's state, not as adb's text
-                raise AcquisitionError("wifi_lost" if self.link.mode == phone_link.WIFI else "no_device", detail)
+                raise AcquisitionError("wifi_lost" if self.link.via == phone_link.WIFI else "no_device", detail)
             raise AcquisitionError("adb_failed", detail)
         return r.stdout
 
@@ -139,10 +139,10 @@ class Phone:
             self.connect()
             model = next((d["model"] for d in self.devices() if d["serial"] == self.serial), "")
             return {"ok": True, "cause": "", "serial": self.serial, "model": model, "foreground": self.foreground(),
-                    "link": self.link.mode}
+                    "link": self.link.via}
         except AcquisitionError as e:
             return {"ok": False, "cause": e.cause, "detail": e.detail, "serial": self.serial or "", "model": "",
-                    "foreground": "", "link": self.link.mode}
+                    "foreground": "", "link": self.link.via}
 
     def foreground(self):
         """Package of the app on screen ('' if unknown)."""
@@ -254,7 +254,7 @@ class FakePhone:
         return f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}_{self._n:03d}{suffix}"
 
     def status(self):
-        mode = self.link.mode if self.link is not None else phone_link.USB
+        mode = self.link.via if self.link is not None else phone_link.USB
         try:
             self._check()
         except AcquisitionError as e:

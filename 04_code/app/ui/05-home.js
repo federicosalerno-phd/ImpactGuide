@@ -1,8 +1,8 @@
-// ImpactGuide · home: the start, as UniGuide's entry. Four large choices, each
-// with one short line, and the state of the bench under them in three cells:
-// the phone, the calibration, the next trial. The language is chosen here
-// (ui/90-boot.js fills the picker). No panel and no toolbar: the rail stays,
-// for moving between pages.
+// ImpactGuide · home: the start, as UniGuide's entry. Four large choices, one
+// per module, each with one short line, and the state of the bench under them
+// in three cells (SlantUI's .choices and .stcells): the phone, the calibration,
+// the next trial. The language is chosen here (ui/90-boot.js fills the picker).
+// No rail, no toolbar, no panel: only the Phone panel, from the phone cell.
 
 const HOME = {
   enter: function () {
@@ -12,41 +12,36 @@ const HOME = {
     be('phone_refresh');
   },
 
-  dot: function (id, kind) { $(id).className = 'live-dot' + (kind ? ' ' + kind : ''); },
-
-  // the link chosen and whether the phone is there on it
+  // how the phone is linked, found by itself: cable, Wi-Fi, or no phone
   phone: function () {
-    const how = T(PHONE.link === 'wifi' ? 'link.btn.wifi' : 'link.btn.usb');
-    const st = PHONE.ok ? 'ready' : (PHONE.state && hasT('link.state.' + PHONE.state) ? PHONE.state : 'unknown');
-    $('hsPhoneV').textContent = how + ' · ' + T('link.state.' + st);
-    HOME.dot('hsPhoneDot', PHONE.ok ? 'ok' : 'warn');
+    setStcell($('hsPhone'), PHONE.ok ? 'ok' : PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
+              PHONE.ok ? T(PHONE.link === 'wifi' ? 'link.on.wifi' : 'link.on.usb')
+              : T('link.state.' + (PHONE.state && hasT('link.state.' + PHONE.state) ? PHONE.state : 'none')));
   },
 
   // the intrinsics stored for the two camera modes
   cal: function (s) {
     const p = !!s.modes.photo.stored, v = !!s.modes.video.stored;
-    $('hsCalV').textContent = T(p && v ? 'home.cal.both' : p ? 'home.cal.photo' : v ? 'home.cal.video' : 'home.cal.none');
-    HOME.dot('hsCalDot', p && v ? 'ok' : 'warn');
+    setStcell($('hsCal'), p && v ? 'ok' : 'warn',
+              T(p && v ? 'home.cal.both' : p ? 'home.cal.photo' : v ? 'home.cal.video' : 'home.cal.none'));
   },
 
   // the trial open now, or the next one of the sequence
   trial: function (s) {
     const t = s.trial;
-    if (s.complete || !t) { $('hsTrialV').textContent = T('home.trial.done'); HOME.dot('hsTrialDot', 'ok'); return; }
-    $('hsTrialV').textContent = t.open ? T('home.trial.open', t.trial)
-      : T('home.trial.next', t.trial, s.totals.filled, s.totals.slots);
-    HOME.dot('hsTrialDot', t.open ? 'warn' : '');
+    if (s.complete || !t) { setStcell($('hsTrial'), 'ok', T('home.trial.done')); return; }
+    setStcell($('hsTrial'), t.open ? 'warn' : '', t.open ? T('home.trial.open', t.trial)
+      : T('home.trial.next', t.trial, s.totals.filled, s.totals.slots));
   },
 
   wire: function () {
-    document.querySelectorAll('.home-tile[data-go]').forEach(function (b) {
+    document.querySelectorAll('.choice[data-go]').forEach(function (b) {
       b.onclick = function () {
         if (b.disabled) return;
-        if (b.dataset.go === 'trials') trialsView = 'guide';     // the next trial, step by step
-        go(b.dataset.go);
+        const m = b.dataset.go;
+        go(m, MODULES[m].start);      // a module opens at its first step, as in UniGuide
       };
     });
     $('hsPhone').onclick = function () { if (!LINK.open) LINK.show(); };
-    $('hsPhone').onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('hsPhone').click(); } };
   },
 };

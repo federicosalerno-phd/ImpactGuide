@@ -348,14 +348,50 @@ def fit_markers(nx, ny):
     return best
 
 
-def layout(px, pitch_mm):
-    """The board for a screen of px = (w, h) physical pixels at pitch_mm: squares, pixels per square and per marker,
-    where it goes, its true size, and the dimension line above it. Raises ValueError if no board fits."""
-    w, h = (int(v) for v in px)
-    p = float(pitch_mm)
+def _margins(w, h, p):
     margin = max(MIN_MARGIN_PX, math.ceil(MARGIN_MM / p))
     top = max(MIN_TOP_PX, math.ceil(TOP_MM / p))
-    aw, ah = w - 2 * margin, h - top - margin
+    return margin, top, w - 2 * margin, h - top - margin
+
+
+def _placed(w, h, p, margin, top, ah, s, m, nx, ny):
+    x0 = (w - nx * s) // 2
+    y0 = top + (ah - ny * s) // 2
+    line_y = y0 - max(12, round(LINE_GAP_MM / p))
+    return {"size_px": [w, h], "pitch_mm": p, "squares": [nx, ny], "square_px": s, "marker_px": m,
+            "origin_px": [x0, y0], "margin_px": margin, "top_px": top,
+            "square_mm": s * p, "marker_mm": m * p, "width_mm": nx * s * p, "height_mm": ny * s * p,
+            "line_y": line_y, "ext_top": line_y - max(6, round(EXT_MM / p)),
+            "arrow_px": [max(8, round(ARROW_MM[0] / p)), max(3, round(ARROW_MM[1] / p))]}
+
+
+def place(px, pitch_mm, held):
+    """A board already chosen (held: squares, square_px, marker_px, pitch_mm, as a layout or spec gives them) laid out
+    again on an area of px = (w, h) physical pixels at pitch_mm, centred: the same squares of the same pixels, so the
+    same board in mm. None when the pitch is another (another monitor) or the board no longer fits the area."""
+    if not held or abs(float(held.get("pitch_mm") or 0) - float(pitch_mm)) > 1e-12:
+        return None
+    w, h = (int(v) for v in px)
+    p = float(pitch_mm)
+    margin, top, aw, ah = _margins(w, h, p)
+    nx, ny = (int(v) for v in held["squares"])
+    s, m = int(held["square_px"]), int(held["marker_px"])
+    if nx * s > aw or ny * s > ah:
+        return None
+    return _placed(w, h, p, margin, top, ah, s, m, nx, ny)
+
+
+def layout(px, pitch_mm, hold=None):
+    """The board for a screen, or a window on it, of px = (w, h) physical pixels at pitch_mm: squares, pixels per
+    square and per marker, where it goes, its true size, and the dimension line above it. With hold (a board already
+    in use, see place) that board is kept, centred, as long as it fits and the pitch is the same: a window moved or
+    resized a little does not change a board that photos have been taken of. Raises ValueError if no board fits."""
+    kept = place(px, pitch_mm, hold) if hold else None
+    if kept:
+        return kept
+    w, h = (int(v) for v in px)
+    p = float(pitch_mm)
+    margin, top, aw, ah = _margins(w, h, p)
     found = []
     for s in range(max(16, math.ceil(SQUARE_MM[0] / p)), math.floor(SQUARE_MM[1] / p) + 1):
         m = marker_px(s)
@@ -370,14 +406,17 @@ def layout(px, pitch_mm):
     biggest = max(f[0] for f in found)
     _, s, m, nx, ny = min((f for f in found if f[0] >= (1 - AREA_TOL) * biggest),
                           key=lambda f: abs(f[1] * p - TARGET_MM))
-    x0 = (w - nx * s) // 2
-    y0 = top + (ah - ny * s) // 2
-    line_y = y0 - max(12, round(LINE_GAP_MM / p))
-    return {"size_px": [w, h], "pitch_mm": p, "squares": [nx, ny], "square_px": s, "marker_px": m,
-            "origin_px": [x0, y0], "margin_px": margin, "top_px": top,
-            "square_mm": s * p, "marker_mm": m * p, "width_mm": nx * s * p, "height_mm": ny * s * p,
-            "line_y": line_y, "ext_top": line_y - max(6, round(EXT_MM / p)),
-            "arrow_px": [max(8, round(ARROW_MM[0] / p)), max(3, round(ARROW_MM[1] / p))]}
+    return _placed(w, h, p, margin, top, ah, s, m, nx, ny)
+
+
+def min_px(pitch_mm):
+    """The smallest area (w, h) in physical pixels that holds a board at this pitch: MIN_SQUARES of the smallest
+    square, with the margins. A window smaller than this shows no board."""
+    p = float(pitch_mm)
+    s = max(16, math.ceil(SQUARE_MM[0] / p))
+    margin = max(MIN_MARGIN_PX, math.ceil(MARGIN_MM / p))
+    top = max(MIN_TOP_PX, math.ceil(TOP_MM / p))
+    return MIN_SQUARES[0] * s + 2 * margin, MIN_SQUARES[1] * s + top + margin
 
 
 def board_px(lay):
@@ -619,6 +658,33 @@ def test_layouts():
               f"({100 * nx * ny * s * s / (w * h):.0f} % of the screen)")
     expect(not bad, f"layouts: whole pixels, markers of 7k px centred, within margins and the dictionary, "
                     f"{len(cases)} screens ({bad or 'all good'})")
+    # a board in a window beside the app, at any split: the area is the window's, the pitch the monitor's
+    p = 0.17921
+    sizes = [(round(1920 * f), 1032) for f in (0.35, 0.45, 0.5, 0.62)] + [(700, 1300), (1920, 1032)]
+    lays = [layout(px, p) for px in sizes]
+    ok = all(L["origin_px"][0] + L["squares"][0] * L["square_px"] <= px[0] - L["margin_px"]
+             and abs(L["width_mm"] - L["squares"][0] * L["square_px"] * p) < 1e-9 for L, px in zip(lays, sizes))
+    expect(ok and len({L["squares"][0] for L in lays}) > 2,
+           "windows of any split and portrait: " + ", ".join(f"{px[0]} x {px[1]} px {L['squares'][0]} x "
+                                                             f"{L['squares'][1]}" for L, px in zip(lays, sizes)))
+    small = min_px(p)
+    try:
+        layout((small[0] - 40, small[1]), p)
+        refused = False
+    except ValueError:
+        refused = True
+    expect(refused and layout(small, p)["squares"] == list(MIN_SQUARES),
+           f"smallest window that holds a board at {p} mm: {small[0]} x {small[1]} px, 5 x 4 squares; narrower refused")
+    # the board held while it fits: same squares and pixels, centred again; another pitch or too small: laid out anew
+    held = layout((960, 1032), p)
+    moved = layout((1010, 1040), p, hold=held)
+    shrunk = layout((700, 1032), p, hold=held)
+    other = layout((960, 1032), p * 1.1, hold=held)
+    expect(moved["squares"] == held["squares"] and moved["square_px"] == held["square_px"]
+           and moved["origin_px"] != held["origin_px"] and shrunk["squares"] != held["squares"]
+           and other["pitch_mm"] != held["pitch_mm"],
+           f"held board: kept when the window grows ({moved['squares']}, centred again), laid out anew when it no "
+           f"longer fits ({shrunk['squares']}) or the monitor changes")
 
 
 def test_image(work):

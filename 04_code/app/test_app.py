@@ -7,25 +7,36 @@ backend   the slots the page calls, without a window: a trial from the first
           drape, a correction of a logged value, a void trial, a new
           configuration, the completeness check of trials.py, the live AR view
           on a synthetic stream (both boards, a photo that stops it), the link
-          to a simulated phone (cable, Wi-Fi paired with the code and the QR
-          code, a drop and the reconnection, plain words for each failure, the
-          live view on the phone's screen and its added latency), the
-          calibration board on a monitor (the window drawn pixel for pixel,
-          the ruler check, the printed board, the live view on either), the
-          calibration and the session check on synthetic photos of the printed
-          board and of the board on a monitor.
---ui DIR  the same through the real window: the app opens at home, the page's
-          own buttons are pressed, one trial is run to its log row, the mark on
-          the band leads home and a tile of home to its page, the other views
-          are opened, the live view is started from its page, its opacity set
-          with the slider, and left, the board is shown on a monitor from the
-          Calibration page (the screen grabbed back and compared with the image
-          pixel for pixel, the board found in the grab) and closed with Esc;
-          then every page and panel, with its Advanced part open, is checked
-          for words that are cut or wrap, at the smallest window and at
-          1440 x 900, in the six languages. The window is grabbed into DIR at
-          each stage, and on every page in English and Italian (1440 x 900)
-          and in German (smallest window).
+          to a simulated phone found by itself (no phone, the cable, Wi-Fi
+          paired with the QR code and Wireless debugging switched on from the
+          PC, Wi-Fi taken by itself when the cable is out and the cable when it
+          is back, a drop and the reconnection, pairing with a code, plain
+          words for each failure, the live view on the phone's screen and its
+          added latency), the calibration board in a window beside the app (the
+          layout from its pixels, drawn pixel for pixel, laid out again when
+          resized and taken at once by the live view and the calibration, held
+          while photos are of it, full screen when asked, the ruler check, the
+          printed board), the series of calibration photos (made at the first
+          photo, a new one when the board changed, Start again, the session
+          check), the calibration and the session check on synthetic photos of
+          the printed board and of the board on a monitor.
+--ui DIR  the same through the real window: the app opens at home (no rail),
+          the page's own buttons are pressed, one trial is run to its log
+          row, the mark on the band leads home and a choice of home to its
+          module and its steps; on this one monitor the board is shown beside
+          the app (the app makes room), the edge between them dragged (the app
+          follows, the board is laid out again for its pixels, the screen
+          grabbed back and compared with the image pixel for pixel, the board
+          found in the grab), a photo is taken from the Photos step, Esc closes
+          the board and the app gets its size back; the live view is started
+          from its step, its opacity set with the slider, and left; the Phone
+          panel is opened in the panel down the right (home and a module) and
+          Wi-Fi paired with the QR code; then every step of every module and
+          the Phone panel, with their Advanced parts open, are checked for
+          words that are cut or wrap and for anything laid over the page, at
+          the smallest window and at 1920 x 1032, in the six languages. The
+          window is grabbed into DIR at each stage, and on every view in
+          English and Italian (large) and in English and German (smallest).
 
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
@@ -271,6 +282,7 @@ def test_backend(app, work, calibration=True):
 
     # 11. the calibration board on a monitor (the default), its window, the ruler check, the printed board
     test_board(d)
+    test_series(d)
 
     # 12. the calibration and the session check, on synthetic photos of the printed board
     if calibration:
@@ -326,38 +338,82 @@ def test_backend(app, work, calibration=True):
 
 
 def test_board(d):
-    """The calibration board on a monitor of this computer (offscreen here: Qt's stand-in screen): the layout from its
-    pitch, the window that shows it pixel for pixel, the ruler check, the printed board, the live view on both."""
-    s = d.call("board_state")
-    lay, mon, a = s["layout"], s["mon"], s["active"]
-    expect(s["kind"] == "screen" and mon is not None and lay is not None and a["kind"] == "screen"
-           and a["squares"] == lay["squares"] and isinstance(lay["square_px"], int)
-           and abs(lay["square_mm"] - lay["square_px"] * lay["pitch_mm"]) < 1e-9 and lay["marker_px"] % 7 == 0,
-           f"board on screen by default: {lay and lay['squares']} squares of {lay and lay['square_px']} px = "
-           f"{lay and round(lay['square_mm'], 3)} mm on {mon and mon['px']} px at {mon and mon['pitch_mm']:.5f} mm "
-           f"({mon and mon['source']})")
-    s = d.call("board_show")
-    win = d.backend._board_win
-    d.wait(lambda: win is not None and win.isVisible(), 5)
-    ok = False
-    if win is not None:
-        import numpy as np
-        img = win.grab().toImage()
+    """The calibration board on a monitor of this computer (offscreen here: Qt's stand-in screen, the only one, so the
+    board goes in a window beside the app): the layout from the pixels of its window and the pitch of the monitor,
+    drawn pixel for pixel, laid out again when the window is resized and handed at once to the live view and the
+    calibration, held while photos are of it, full screen when asked, the ruler check, the printed board."""
+    import numpy as np
+    from slantui.shell.qt import QApplication, QEvent, QImage, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    def drawn(win):
+        """The window as Qt draws it, compared with screen_board's image, pixel for pixel."""
+        img = win.grab().toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+        ptr = img.constBits()
+        ptr.setsize(img.bytesPerLine() * img.height())
+        got = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine())[:, :img.width()]
         ref = screen_board.render(win.lay)
-        from slantui.shell.qt import QImage
-        g = img.convertToFormat(QImage.Format.Format_Grayscale8)
-        ptr = g.constBits()
-        ptr.setsize(g.bytesPerLine() * g.height())
-        got = np.frombuffer(ptr, np.uint8).reshape(g.height(), g.bytesPerLine())[:, :g.width()]
         x0, y0 = win.lay["origin_px"]
         nx, ny = win.lay["squares"]
         q = win.lay["square_px"]
         box = (slice(y0 - 2, y0 + ny * q + 2), slice(x0 - 2, x0 + nx * q + 2))
-        ok = got.shape == ref.shape and bool(np.array_equal(got[box], ref[box]))
-    expect(s.get("shown") and ok, "board window: shown, the board in it pixel for pixel as screen_board draws it")
+        return got.shape == ref.shape and bool(np.array_equal(got[box], ref[box]))
+
+    # Qt's stand-in screen is 800 x 800 px at 100 dpi: the board takes the larger share of it beside the app
+    d.backend.prefs.set("board", {**d.backend.prefs["board"], "split": 0.8})
+    s = d.call("board_state")
+    lay, mon, a = s["layout"], s["mon"], s["active"]
+    expect(s["kind"] == "screen" and s["placed"] == "beside" and mon is not None and lay is not None
+           and a["kind"] == "screen" and a["squares"] == lay["squares"] and isinstance(lay["square_px"], int)
+           and abs(lay["square_mm"] - lay["square_px"] * lay["pitch_mm"]) < 1e-9 and lay["marker_px"] % 7 == 0,
+           f"board on screen by default, beside the app on the only monitor: {lay and lay['squares']} squares of "
+           f"{lay and lay['square_px']} px = {lay and round(lay['square_mm'], 3)} mm at {mon and mon['pitch_mm']:.5f} mm "
+           f"({mon and mon['source']})")
+    s = d.call("board_show")
+    win = d.backend._board_win
+    d.wait(lambda: win is not None and win.isVisible() and win.lay is not None, 5)
+    ok = win is not None and win.lay is not None and drawn(win)
+    expect(s.get("shown") and win is not None and not win.full and ok,
+           f"board window: shown in a window of its own, the board in it pixel for pixel "
+           f"({win and win.width()} x {win and win.height()} px, {win and win.lay and win.lay['squares']})")
+
+    # resized: laid out again for its new pixels, and the live view and the calibration take it at once
+    before = (list(win.lay["squares"]), win.lay["square_px"])
     n = len(d.events)
-    from slantui.shell.qt import QApplication, QEvent, Qt
-    from PyQt6.QtGui import QKeyEvent, QWheelEvent  # noqa: F401
+    win.resize(int(win.width() * 0.85), win.height())
+    relaid = d.wait(lambda: any(e["type"] == "board" and e.get("action") == "relaid" for e in d.events[n:]), 5)
+    st, live, cal = d.call("board_state"), d.call("live_state"), d.call("calib_state")
+    now = (list(win.lay["squares"]), win.lay["square_px"])
+    expect(relaid and now != before and st["layout"]["squares"] == now[0] and live["board"]["squares"] == now[0]
+           and abs(live["board"]["square_mm"] - win.lay["square_mm"]) < 1e-9 and cal["active"]["squares"] == now[0]
+           and drawn(win),
+           f"window resized: board laid out again {before[0]} -> {now[0]}, {win.lay['square_mm']:.2f} mm squares, taken "
+           f"at once by the live view and the calibration, still pixel for pixel")
+    # held while photos are of it: a little larger, the same board, centred again
+    win.hold = win.spec()
+    origin = list(win.lay["origin_px"])
+    win.resize(win.width() + 60, win.height())
+    d.wait(lambda: win.lay["origin_px"] != origin, 3)
+    expect(list(win.lay["squares"]) == now[0] and win.lay["square_px"] == now[1] and win.lay["origin_px"] != origin
+           and d.call("board_state")["held"],
+           "held board: the window a little larger, the same board of the photos, centred again")
+    win.hold = None
+    # too small for any board: said, and no board
+    n = len(d.events)
+    win.resize(200, 200)
+    d.wait(lambda: any(e["type"] == "board" and e.get("error") == "too_small" for e in d.events[n:]), 5)
+    expect(win.lay is None and d.call("board_state")["error"] == "too_small",
+           "window too small for a board: no board, the page told")
+    # full screen when asked: the whole monitor
+    s = d.call("board_set", json.dumps({"place": "full"}))
+    full = d.backend._board_win
+    d.wait(lambda: full is not None and full.lay is not None, 5)
+    expect(s["placed"] == "full" and full is not None and full.full and full.lay is not None
+           and full.lay["size_px"] == mon["px"],
+           f"full screen when asked: the board on the whole monitor ({full and full.lay and full.lay['squares']})")
+    d.call("board_set", json.dumps({"place": "auto"}))
+    win = d.backend._board_win
+    n = len(d.events)
     if win is not None:
         QApplication.sendEvent(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier))
         still = win.isVisible()
@@ -365,6 +421,7 @@ def test_board(d):
     closed = d.wait(lambda: any(e["type"] == "board" and e.get("action") == "closed" for e in d.events[n:]), 5)
     expect(win is not None and still and closed and not d.call("board_state")["shown"],
            "board window: Ctrl and + does nothing, Esc closes it and the page is told")
+    lay = d.call("board_state")["layout"]
     # the ruler check: the pitch of this monitor from the length read, kept; a misreading refused; forgotten
     width = lay["width_mm"]
     r = d.call("board_set", json.dumps({"ruler_mm": round(width * 1.004, 1)}))
@@ -388,10 +445,53 @@ def test_board(d):
     d.call("board_set", json.dumps({"kind": "screen", "printed_mm": 264.0}))
 
 
+def test_series(d):
+    """The photos of a calibration as the Photos step takes them: a series per day and mode, made at the first photo;
+    the board must be on show; a board changed after photos starts a new series; Start again makes one too."""
+    raw = d.backend.roots.calib_raw
+    had = {x.name for x in raw.iterdir()} if raw.is_dir() else set()
+    s = d.call("calib_set", json.dumps({"mode": "photo", "kind": "calibration"}))
+    refused = d.call("calib_take")
+    d.call("board_show")
+    win = d.backend._board_win
+    d.wait(lambda: win is not None and win.lay is not None, 5)
+    d.call("calib_take")
+    e = d.wait_event("calib_photo", timeout=20)
+    s = d.call("calib_state")
+    first = s["series"]
+    expect(refused.get("error") == "board_hidden" and e is not None and first and first["n"] == 1 and first["same"]
+           and first["name"].endswith("_photo") and s["enough"] == ig.ENOUGH["calibration"]
+           and win.hold and win.hold.get("square_px") == win.lay["square_px"],
+           f"series: a photo refused while the board is hidden, then one in {first and first['name']}, the board of "
+           f"it held on the monitor; enough at {s['enough']}")
+    win.hold = None
+    win.resize(int(win.width() * 0.85), win.height())
+    d.wait(lambda: d.call("calib_state")["series"]["same"] is False, 5)
+    s = d.call("calib_state")
+    expect(s["series"]["n"] == 1 and not s["series"]["same"], "board changed after a photo: the series is not of it")
+    d.call("calib_take")
+    d.wait_event("calib_photo", timeout=20)
+    s = d.call("calib_state")
+    expect(s["series"]["name"] != first["name"] and s["series"]["n"] == 1 and s["series"]["same"],
+           f"the next photo starts a new series of the board on show ({s['series']['name']})")
+    n = d.call("calib_series_new")
+    check = d.call("calib_set", json.dumps({"kind": "check"}))
+    expect(n["folder"] not in (first["name"], s["series"]["name"]) and check["enough"] == ig.ENOUGH["check"]
+           and check["kind"] == "check" and (check["series"] is None or check["series"]["kind"].startswith("check_")),
+           f"Start again: a new folder ({n['folder']}); the session check counts its own photos, {check['enough']}")
+    d.call("calib_set", json.dumps({"kind": "calibration"}))
+    d.call("board_hide")
+    for x in raw.iterdir():          # the series of this check go: the calibration below makes its own
+        if x.name not in had:
+            shutil.rmtree(x)
+
+
 def test_link(d):
-    """The Phone pane against the simulated phone (phone_link.SimulatedAdb): one place for the serial, pairing with
-    the code and the QR code, a Wi-Fi drop and the reconnection, plain words for every failure, the live view sent
-    to the phone's browser and its added latency."""
+    """The Phone panel against the simulated phone (phone_link.SimulatedAdb): the link found by itself and followed
+    (no phone, the cable, Wi-Fi when the cable is out, the cable again), one place for the serial, Wi-Fi paired only
+    when asked for (with the cable in, Wireless debugging switched on from the PC and a QR code), pairing with a code,
+    a Wi-Fi drop and the reconnection, plain words for every failure, the live view sent to the phone's browser and
+    its added latency."""
     import re
     import threading
     import live
@@ -412,28 +512,41 @@ def test_link(d):
 
     ok = d.wait(lambda: d.call("link_state")["state"] == "ready", 10)
     s = d.call("link_state")
-    expect(ok and s["mode"] == "usb" and b.link.serial() == sim.phone_id == live.pick_serial(),
-           "link: cable at first, the simulated phone ready on USB; the stream asks the same link for its serial")
+    expect(ok and s["mode"] == "auto" and s["via"] == "usb" and not s["paired"]
+           and b.link.serial() == sim.phone_id == live.pick_serial(),
+           "link found by itself: the simulated phone on the cable, nothing asked; the stream asks the same link")
 
-    # Wi-Fi chosen, not paired yet: plain words in the pill and on a photo
-    n = len(d.events)
-    d.call("link_mode", "wifi")
-    ok = d.wait(lambda: any(x["type"] == "phone" and x.get("cause") == "wifi_none" and x.get("link") == "wifi"
-                            for x in d.events[n:]), 15)
-    expect(ok and b.prefs["phone"]["link"] == "wifi", "link: Wi-Fi chosen and kept; not paired yet, the pill says so")
+    # no phone at all, never paired: said plainly, a photo refused; the cable again, found again
     folder = d.call("calib_folder_new", "check_photo")["folder"]
-    e = act(lambda: d.call("calib_shoot", folder), "acquire_failed")
-    expect(e is not None and e["error"] == "wifi_none", f"a photo with no phone on Wi-Fi: refused in plain words "
-                                                        f"({e and e['error']})")
+    e = act(lambda: setattr(sim, "usb", False), "phone", timeout=10)
+    f = act(lambda: d.call("calib_shoot", folder), "acquire_failed")
+    expect(e is not None and e.get("cause") == "no_device" and f is not None and f["error"] == "no_device",
+           f"cable out and never paired: no phone, a photo refused in plain words ({f and f['error']})")
+    e = act(lambda: setattr(sim, "usb", True), "phone", timeout=10)
+    expect(e is not None and e.get("ok") and e.get("link") == "usb", "cable in again: the phone, at once")
 
-    # pairing with a wrong code, then with the right one
-    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", "000000"), "link", "failed")
-    expect(e is not None and e["cause"] == "pair_code", f"pairing with a wrong code: said as such ({e and e['cause']})")
-    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", sim.code), "link", "paired")
+    # Use Wi-Fi with the cable in: Wireless debugging switched on from here, the QR code, scanned after 2 s
+    sim.debugging = False
+    n = len(d.events)
+    d.call("link_wifi")
+    shown = d.wait(lambda: d.call("link_state")["qr"].startswith("<svg"), 10)
+    on = d.call("link_state")["wifi_on"]
+    ok = d.wait(lambda: any(x["type"] == "link" and x.get("action") == "paired" for x in d.events[n:]), 25)
     s = d.call("link_state")
-    expect(e is not None and s["state"] == "ready" and phone_link.transport_of(s["serial"]) == "wifi"
-           and live.pick_serial() == s["serial"] and b.prefs["phone"]["phone_id"] == sim.phone_id,
-           f"pairing with the code: connected over Wi-Fi ({s['serial']}), the same serial for stream and photos")
+    expect(shown and on and sim.debugging and ok and s["via"] == "usb" and s["paired"]
+           and b.prefs["phone"]["wifi_paired"],
+           "Use Wi-Fi on the cable: Wireless debugging on from the PC, QR code shown and scanned, paired and kept; "
+           "the cable still in use")
+
+    # the cable out: the app goes on over Wi-Fi by itself, and says so; photos over Wi-Fi
+    n = len(d.events)
+    sim.usb = False
+    ok = d.wait(lambda: any(x["type"] == "link" and x.get("action") == "via" and x.get("via") == "wifi"
+                            for x in d.events[n:]), 15)
+    s = d.call("link_state")
+    expect(ok and s["state"] == "ready" and s["via"] == "wifi" and phone_link.transport_of(s["serial"]) == "wifi"
+           and live.pick_serial() == s["serial"] and b.phone_status.get("link") == "wifi",
+           f"cable out: on Wi-Fi by itself ({s['serial']}), the same serial for stream and photos, the page told")
     e = act(lambda: d.call("calib_shoot", folder), "calib_photo")
     expect(e is not None, "a photo over Wi-Fi")
 
@@ -448,13 +561,19 @@ def test_link(d):
     expect(ok and s["reconnects"] >= 1 and s["drops"] >= 1, f"Wi-Fi back: reconnected by itself "
                                                            f"({s['drops']} drop, {s['reconnects']} reconnection)")
 
-    # pairing with the QR code: the simulated phone scans it after 2 s
+    # pairing with a code (Advanced): a wrong code said as such, the right one pairs
+    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", "000000"), "link", "failed")
+    expect(e is not None and e["cause"] == "pair_code", f"pairing with a wrong code: said as such ({e and e['cause']})")
+    e = act(lambda: d.call("link_pair", f"{sim.ip}:{sim.pair_port}", sim.code), "link", "paired")
+    expect(e is not None and d.call("link_state")["state"] == "ready", "pairing with the code: paired and connected")
+
+    # the cable in again: back on the cable by itself
     n = len(d.events)
-    s = d.call("link_qr")
-    shown = s["qr"].startswith("<svg") and s["qr_waiting"]
-    ok = d.wait(lambda: any(x["type"] == "link" and x.get("action") == "paired" for x in d.events[n:]), 20)
-    expect(shown and ok and d.call("link_state")["state"] == "ready",
-           "pairing with the QR code: the code shown, scanned, paired and connected")
+    sim.usb = True
+    ok = d.wait(lambda: any(x["type"] == "link" and x.get("action") == "via" and x.get("via") == "usb"
+                            for x in d.events[n:]), 15)
+    expect(ok and d.call("link_state")["via"] == "usb" and live.pick_serial() == sim.phone_id,
+           "cable in again: back on the cable by itself, the USB serial")
 
     # the live view on the phone's own screen
     d.call("live_start")
@@ -473,9 +592,6 @@ def test_link(d):
            f"the phone's page on the live AR (a client in its place): {v['fps']} fps, added latency median "
            f"{v['added_ms']} ms (95th {v['added_p95_ms']} ms), {v['kb']} kB per frame, {v['mbit_s']} Mbit/s")
     d.call("live_stop")
-    d.call("link_mode", "usb")
-    expect(d.wait(lambda: d.call("link_state")["state"] == "ready", 10) and live.pick_serial() == sim.phone_id,
-           "back to the cable: the USB serial again")
 
     # the words: every cause in the six languages, every language with every key and the same placeholders
     strings = {c: json.loads((ig.APP / "ui" / "strings" / f"{c}.json").read_text(encoding="utf-8")) for c in ig.LANGS}
@@ -523,17 +639,12 @@ DRIVE = r"""
 })()
 """
 
-# What the sweep of every page needs in the page: open or close an Advanced part, show a step of an open
-# trial, and find the words that do not fit. A word does not fit when it is cut by a box (its own or one
+# What the sweep of every page needs in the page: open or close an Advanced part (SlantUI's fold), show a step of
+# an open trial, and find the words that do not fit. A word does not fit when it is cut by a box (its own or one
 # around it that clips) or when a label that must stay on one line wraps.
 FIT = r"""
-window.__adv = function (id, open) {
-  const b = document.querySelector('[data-adv="' + id + '"]'), box = $(id);
-  if (b && box && box.classList.contains('hidden') === !!open) b.click();
-};
-window.__closeAdv = function () {
-  document.querySelectorAll('.adv-btn').forEach(function (b) { if (!$(b.dataset.adv).classList.contains('hidden')) b.click(); });
-};
+window.__adv = function (id, open) { if ($(id)) setFold($(id), !!open); };
+window.__closeAdv = function () { closeFolds(); };
 window.__step = function (base, adv) {
   const o = window.__open;
   if (!o) return;
@@ -548,9 +659,9 @@ window.__step = function (base, adv) {
 window.__fit = function () {
   const out = [];
   const ONE = '.btn-label, .tab span, .sec-lbl, .pi-l, .pi-row > span, .mitem-name, .mbadge, .chip, .stpill span, .combo-v,'
-    + ' .toggle, .sl-l, .sl-v, .rp-title, .rp-sub, .home-hd, .home-sub, .home-tile b, .home-line, .home-st-l, .home-st-v,'
-    + ' .tile-l, .tile-v, .tile-c, .live-light span, .trial-sub, .now-n, .ct-fname, .sheet-title, .lk-step span, .covl div,'
-    + ' .czoom, .seq-n, .seq-v, .seq-t, .tool-group .btn, .trial-id';
+    + ' .toggle, .sl-l, .sl-v, .rp-title, .rp-sub, .home-hd, .home-sub, .choice-name, .choice-line, .stcell-l, .stcell-v,'
+    + ' .fold-name, .tile-l, .tile-v, .tile-c, .live-light span, .trial-sub, .now-n, .ct-fname, .covl div, .lk-word,'
+    + ' .czoom, .seq-n, .seq-v, .seq-t, .tool-group .btn, .trial-id, .count-of, .count-say';
   const SKIP = '.log, .note-path, textarea, .combopop, .pickerpop, .toast';
   const shown = function (el) { return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'; };
   const name = function (el) {
@@ -558,53 +669,66 @@ window.__fit = function () {
       + ' "' + el.textContent.trim().replace(/\s+/g, ' ').slice(0, 48) + '"';
   };
   const clips = function (el) { return getComputedStyle(el).overflowX !== 'visible'; };
-  const roots = ['.app'].concat(LINK.open ? ['#lkSheet'] : []);
-  roots.forEach(function (root) {
-    document.querySelectorAll(root + ' *').forEach(function (el) {
-      if (el.closest(SKIP) || !shown(el)) return;
-      let own = false;
-      el.childNodes.forEach(function (n) { if (n.nodeType === 3 && n.textContent.trim()) own = true; });
-      if (!own) return;
-      const cs = getComputedStyle(el);
-      if (cs.display !== 'inline' && clips(el) && el.scrollWidth > el.clientWidth + 1) { out.push('cut ' + name(el)); return; }
-      const r = el.getBoundingClientRect();
-      for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
-        if (!clips(a)) continue;
-        const ar = a.getBoundingClientRect();
-        if (r.right > ar.right + 1 || r.left < ar.left - 1) { out.push('out ' + name(el) + ' of ' + name(a)); break; }
-      }
-    });
-    document.querySelectorAll(root + ' :is(' + ONE + ')').forEach(function (el) {
-      if (el.closest(SKIP) || !shown(el) || !el.textContent.trim()) return;
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      let lines = 0, last = -1e9;
-      Array.from(range.getClientRects()).filter(function (x) { return x.width > 0.5 && x.height > 0.5; })
-        .map(function (x) { return x.bottom; }).sort(function (a, b) { return a - b; })
-        .forEach(function (b) { if (b - last > 6) { lines++; last = b; } });
-      if (lines > 1) out.push('wraps ' + name(el));
-    });
+  document.querySelectorAll('.app *').forEach(function (el) {
+    if (el.closest(SKIP) || !shown(el)) return;
+    let own = false;
+    el.childNodes.forEach(function (n) { if (n.nodeType === 3 && n.textContent.trim()) own = true; });
+    if (!own) return;
+    const cs = getComputedStyle(el);
+    if (cs.display !== 'inline' && clips(el) && el.scrollWidth > el.clientWidth + 1) { out.push('cut ' + name(el)); return; }
+    const r = el.getBoundingClientRect();
+    for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+      if (!clips(a)) continue;
+      const ar = a.getBoundingClientRect();
+      if (r.right > ar.right + 1 || r.left < ar.left - 1) { out.push('out ' + name(el) + ' of ' + name(a)); break; }
+    }
   });
+  document.querySelectorAll('.app :is(' + ONE + ')').forEach(function (el) {
+    if (el.closest(SKIP) || !shown(el) || !el.textContent.trim()) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    let lines = 0, last = -1e9;
+    Array.from(range.getClientRects()).filter(function (x) { return x.width > 0.5 && x.height > 0.5; })
+      .map(function (x) { return x.bottom; }).sort(function (a, b) { return a - b; })
+      .forEach(function (b) { if (b - last > 6) { lines++; last = b; } });
+    if (lines > 1) out.push('wraps ' + name(el));
+  });
+  // nothing laid over the page: the Phone panel is the panel down the right, never over the stage
+  if (LINK.open) {
+    const rp = document.querySelector('.rp').getBoundingClientRect(), st = document.querySelector('.stage').getBoundingClientRect();
+    if (rp.left < st.right - 1) out.push('over the stage: the Phone panel');
+  }
   return JSON.stringify(Array.from(new Set(out)));
 };
 """
 
-# The sweep: every page and panel, its Advanced part open, every kind of step, the Phone pane on the cable
-# and pairing on Wi-Fi, at the smallest window and at 1440 x 900, in the six languages. (name, script, wait ms,
-# picture). Pictures in English and Italian at 1440 x 900 and in German, the longest, at the smallest window.
+# The sweep: home, every step of every module, its Advanced part open, every kind of step of a trial, the Phone
+# panel (on the cable, Advanced, pairing on Wi-Fi), at the smallest window and at the largest of this screen, in
+# the six languages. (name, script, wait ms, picture).
 SWEEP = [
-    ("live_on", "LINK.hide(); __closeAdv(); go('live'); LIVE.settings({board: 'sheet'});"
+    ("home", "LINK.hide(); __closeAdv(); go('home')", 1300, True),
+    ("phone_home", "LINK.pairing = false; LINK.show()", 1600, True),
+    ("phone_adv", "__adv('lkAdv', true)", 900, True),
+    ("phone_pair", "clearInterval(LINK.timer); __adv('lkAdv', false); LINK.pairing = true;"
+                   "LINK.render(Object.assign({}, LINK.state, {state: 'none', cause: 'no_device', paired: false,"
+                   " wifi_on: false, qr: ''}))", 600, True),
+    ("cal_board", "LINK.hide(); __closeAdv(); go('calibration', 'board')", 1300, True),
+    ("cal_board_adv", "__adv('calAdv', true); $('calAdv').scrollIntoView()", 900, True),
+    ("cal_printed", "BOARD.set({kind: 'printed'}); setTimeout(function () { $('calAdv').scrollIntoView(); }, 500)", 1300, True),
+    ("cal_screen", "BOARD.set({kind: 'screen'}); __closeAdv()", 1000, False),
+    ("cal_photos", "go('calibration', 'photos')", 1300, True),
+    ("cal_photos_adv", "__adv('calPhAdv', true)", 900, True),
+    ("cal_result", "__closeAdv(); go('calibration', 'result')", 1300, True),
+    ("cal_result_adv", "__adv('calResAdv', true)", 700, False),
+    ("live_board", "__closeAdv(); go('live', 'board')", 1300, True),
+    ("live_board_adv", "__adv('lvBdAdv', true)", 900, True),
+    ("live_patient", "__closeAdv(); LIVE.settings({board: 'patient'})", 900, True),
+    ("live_on", "LIVE.settings({board: 'sheet'}); go('live', 'view');"
                 "setTimeout(function () { if (!(LIVE.state && (LIVE.state.running || LIVE.state.starting))) $('lvStart').click(); }, 400)",
      6500, True),
     ("live_on_adv", "__adv('lvAdv', true); $('lvAdv').scrollIntoView()", 900, True),
-    ("live_patient", "__adv('lvAdv', false); LIVE.settings({board: 'patient'})", 900, True),
-    ("live_off", "LIVE.settings({board: 'sheet'}); LIVE.stop()", 1500, True),
-    ("home", "go('home')", 1300, True),
-    ("calibration", "go('calibration')", 1300, True),
-    ("calibration_adv", "__adv('calAdv', true); $('calAdv').scrollIntoView()", 900, True),
-    ("calibration_printed", "BOARD.set({kind: 'printed'}); setTimeout(function () { $('calAdv').scrollIntoView(); }, 500)", 1300, True),
-    ("calibration_screen", "BOARD.set({kind: 'screen'}); __adv('calAdv', false)", 1000, False),
-    ("trials_plan", "go('trials'); TRIALS.setView('guide')", 1300, True),
+    ("live_off", "__adv('lvAdv', false); LIVE.stop()", 1500, True),
+    ("trials_plan", "go('trials', 'guide')", 1300, True),
     ("trials_plan_adv", "__adv('planAdv', true); TRIALS.extraOpen = true; TRIALS.renderPlan(TRIALS.state)", 900, True),
     ("step_holder", "__step('holder')", 700, True),
     ("step_pendulum", "__step('pendulum')", 700, False),
@@ -614,19 +738,14 @@ SWEEP = [
     ("step_photo", "__step('drape_photo', true)", 700, True),
     ("step_video", "__step('drape_video')", 700, False),
     ("step_close", "__step('close')", 700, True),
-    ("trials_back", "TRIALS.extraOpen = false; __adv('planAdv', false); __adv('stAdv', false); TRIALS.refresh()", 900, False),
-    ("log", "TRIALS.setView('log'); __adv('lgAdv', true)", 1300, True),
-    ("sequence", "TRIALS.setView('sequence')", 1300, True),
-    ("config", "TRIALS.setView('config'); __adv('cfgAdv', true)", 1300, True),
-    ("soon", "go('scans')", 900, True),
-    ("phone", "go('home'); LINK.show()", 1600, True),
-    ("phone_adv", "__adv('lkAdv', true); $('lkAdv').scrollIntoView()", 900, True),
-    ("phone_pair", "clearInterval(LINK.timer); __adv('lkAdv', false);"
-                   "LINK.render(Object.assign({}, LINK.state, {mode: 'wifi', state: 'none', cause: 'wifi_none', qr: ''}))", 500, True),
-    ("phone_closed", "LINK.hide(); __closeAdv(); LINK.refresh()", 700, False),
+    ("trials_back", "TRIALS.extraOpen = false; __closeAdv(); TRIALS.refresh()", 900, False),
+    ("log", "go('trials', 'log'); __adv('lgAdv', true)", 1300, True),
+    ("sequence", "__closeAdv(); go('trials', 'sequence')", 1300, True),
+    ("config", "go('trials', 'config'); __adv('cfgAdv', true)", 1300, True),
+    ("results", "__closeAdv(); go('results', 'scans')", 900, True),
 ]
-SIZES = (("min", 1180, 700), ("wide", 1440, 900))
-SHOTS = {("wide", "en"), ("wide", "it"), ("min", "de")}
+SIZES = (("min",) + ig.MIN_WINDOW, ("large", 1920, 1032))
+SHOTS = {("large", "en"), ("large", "it"), ("min", "en"), ("min", "de")}
 
 
 def Qt_key(name):
@@ -635,39 +754,48 @@ def Qt_key(name):
 
 
 def test_ui(work, shots):
-    from slantui.shell.qt import QTimer
+    from slantui.shell.qt import QRect, QTimer
     shots.mkdir(parents=True, exist_ok=True)
     app, win, backend = ig.build(ig.parse(["--simulate", str(work), "--lang", "en"]))
     log = []
     taken = set()
     misfits = []       # (size, language, state, what) for every word that does not fit
-
     board = {}
+    geo = {}
 
     def grab_board(name):
-        """The monitor the board is on, as it is: the board window from the screen itself, compared with the image
-        screen_board drew, pixel for pixel, and the board found in it by the calibration's detection."""
+        """The board as the screen shows it, cut to the board window's own area (nothing of the desktop around it),
+        compared with the image screen_board drew, pixel for pixel, and the board found in it by the calibration."""
+        import ctypes
+        from ctypes import wintypes
         import cv2
-        import numpy as np
         import board_window
         bw = backend._board_win
-        if bw is None:
-            board["error"] = "no board window"
+        if bw is None or bw.lay is None:
+            board.setdefault("grabs", []).append((name, "no board window"))
             return
-        img = board_window.grab_screen(bw.screen_)
-        ref, lay = bw.image, bw.lay
-        x0, y0 = lay["origin_px"]
+        # the computer may be in use while the test runs: the board is put above every window for the grab, without
+        # taking the focus, and back after it (HWND_TOPMOST, HWND_NOTOPMOST; SWP_NOMOVE, NOSIZE, NOACTIVATE)
+        u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_uint]
+        u.SetWindowPos(wintypes.HWND(int(bw.winId())), wintypes.HWND(-1), 0, 0, 0, 0, 0x13)
+        for _ in range(6):
+            app.processEvents()
+            time.sleep(0.05)
+        img = board_window.grab_screen(bw.screen())
+        u.SetWindowPos(wintypes.HWND(int(bw.winId())), wintypes.HWND(-2), 0, 0, 0, 0, 0x13)
+        same, own = board_window.board_in_grab(img, bw)
+        lay = bw.lay
         nx, ny = lay["squares"]
-        q = lay["square_px"]
-        box = (slice(y0 - 2, y0 + ny * q + 2), slice(x0 - 2, x0 + nx * q + 2))
-        board["identical"] = img.shape == ref.shape and bool(np.array_equal(img[box], ref[box]))
-        if not board["identical"]:      # the board is not what the screen shows: that grab is someone's desktop
-            return
-        cv2.imwrite(str(shots / f"{name}.png"), img)
-        taken.add(name)
-        views, _, _ = calibrate_charuco.detect([shots / f"{name}.png"], screen_board.make_board(lay))
-        board["corners"] = (len(views[f"{name}.png"][0]) if views else 0, (nx - 1) * (ny - 1))
-        board["layout"] = (nx, ny, q, round(lay["square_mm"], 3), round(lay["width_mm"], 2), round(lay["pitch_mm"], 5))
+        got = (name, same, None, (nx, ny, lay["square_px"], round(lay["square_mm"], 3), round(lay["width_mm"], 2),
+                                  round(lay["pitch_mm"], 5)))
+        if same:        # only the board's own area is kept, and only when it is the board
+            cv2.imwrite(str(shots / f"{name}.png"), own)
+            taken.add(name)
+            views, _, _ = calibrate_charuco.detect([shots / f"{name}.png"], screen_board.make_board(lay))
+            got = got[:2] + ((len(views[f"{name}.png"][0]) if views else 0, (nx - 1) * (ny - 1)),) + got[3:]
+        board.setdefault("grabs", []).append(got)
 
     def board_key(key):
         from slantui.shell.qt import QApplication, QEvent, Qt
@@ -675,6 +803,24 @@ def test_ui(work, shots):
         bw = backend._board_win
         if bw is not None:
             QApplication.sendEvent(bw, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+
+    def docked():
+        """The app and the board side by side on the monitor, the board's left edge on the app's right one."""
+        bw, dock = backend._board_win, backend._dock
+        if bw is None:
+            return None
+        a, b = win.geometry(), bw.geometry()
+        return {"docked": bool(dock and dock.docked), "edge": [a.right() + 1, b.left()], "app_w": a.width(),
+                "board_w": b.width(), "squares": bw.lay and list(bw.lay["squares"]),
+                "square_mm": bw.lay and round(bw.lay["square_mm"], 3)}
+
+    def drag_edge():
+        """The edge between the app and the board dragged 200 px to the left, from the board's side."""
+        bw = backend._board_win
+        geo["before"] = docked()
+        if bw is not None:
+            g = bw.geometry()
+            bw.setGeometry(QRect(g.left() - 200, g.top(), g.width() + 200, g.height()))
 
     def grab(name):
         if name.startswith("board_"):
@@ -716,49 +862,67 @@ def test_ui(work, shots):
         # (name, script, wait ms, what to read after the wait or None); a name starting with "-" takes no picture
         steps = [
             ("ui_05_closed", "", 900, None),
-            ("ui_06_log", "TRIALS.setView('log')", 1200, None),
-            ("ui_07_sequence", "TRIALS.setView('sequence')", 1200, None),
-            ("ui_08_config", "TRIALS.setView('config')", 1200, None),
+            ("ui_06_log", "go('trials', 'log')", 1200, None),
+            ("ui_07_sequence", "go('trials', 'sequence')", 1200, None),
+            ("ui_08_config", "go('trials', 'config')", 1200, None),
             ("ui_08b_home", "document.querySelector('.tbar-logo-btn').click()", 1200,
              ("home", "JSON.stringify([page, !!document.querySelector('.tbar-logo-btn'),"
                       " document.querySelector('.app').classList.contains('at-home'),"
                       " document.querySelector('.tbar-logo-btn').title === T('win.home.hint'),"
-                      " getComputedStyle(document.querySelector('.rp')).display])")),
-            ("ui_08c_tile", "document.querySelector('.home-tile[data-go=trials]').click()", 1200,
-             ("tile", "JSON.stringify([page, trialsView])")),
-            ("ui_09_calibration", "go('calibration')", 1500, None),
-            ("ui_10_it_home", lang("it") + " go('home')", 1800, None),
-            ("ui_11_it_calibration", "go('calibration')", 1500, None),
-            ("ui_12_it_live", "go('live')", 1500, None),
-            ("ui_13_it_live_on", "$('lvStart').click()", 7000, None),
-            # the opacity of the virtual elements, from its slider: the live setting `opacity` through live_settings
-            ("ui_13b_opacity", "$('lvOpacity').value = '0.65'; $('lvOpacity').dispatchEvent(new Event('input'));"
-                               "$('lvOpacity').dispatchEvent(new Event('change'))", 1200,
-             ("opacity", "JSON.stringify([LIVE.sentAt > 0, LIVE.state && LIVE.state.opacity, $('lvOpacityV').textContent])")),
-            ("ui_14_live_patient", lang("en") + "LIVE.settings({board: 'patient', mandible: true})", 4000, None),
-            ("ui_15_live_left", "window.__live = LIVE.state && LIVE.state.tracked; go('trials')", 1500, None),
-            # the Phone pane: the cable, then Wi-Fi paired with the QR code the simulated phone scans
-            ("ui_16_phone_cable", "$('lkBtn').click()", 2000, None),
-            ("ui_17_phone_wifi_qr", "LINK.setMode('wifi'); setTimeout(function () { $('lkQrBtn').click(); }, 800)", 2200, None),
-            ("ui_18_phone_wifi_paired", "", 4500, None),
-            ("ui_19_phone_live", "go('live'); $('lvStart').click(); window.__wifi = LINK.state && LINK.state.mode"
-                                 " === 'wifi' && LINK.state.state === 'ready'", 6000, None),
-            ("ui_20_phone_it", lang("it"), 2000, None),
-            ("ui_21_phone_closed", "LINK.setMode('usb'); $('lkClose').click(); go('trials')", 2000, None),
-            # the calibration board on a monitor, from the Calibration page: shown, grabbed off the screen, closed
-            ("ui_22_board_controls", lang("en") + "setTimeout(function () { go('calibration'); }, 900)", 2400, None),
-            ("board_23_window", "$('calBdShow').click()", 2500, None),
-            ("ui_24_board_shown", "", 600, None),
-            ("ui_25_board_closed", lambda: board_key(Qt_key("Escape")), 1500,
+                      " getComputedStyle(document.querySelector('.rp')).display,"
+                      " getComputedStyle(document.querySelector('.topbar')).display, $('rail').children.length])")),
+            ("ui_08c_tile", "document.querySelector('.choice[data-go=calibration]').click()", 1200,
+             ("tile", "JSON.stringify([page, STEP.calibration, Array.from($('rail').children).map(function (t) {"
+                      " return t.dataset.step; }), getComputedStyle(document.querySelector('.topbar')).display])")),
+            ("ui_09_cal_board", "", 600, None),
+            # the board beside the app on this monitor: the app makes room, the board pixel for pixel in its window
+            ("board_10_beside", "$('calBdShow').click()", 3000, None),
+            ("ui_11_docked", "", 300, ("dock", "JSON.stringify([BOARD.state && BOARD.state.shown, BOARD.state &&"
+                                               " BOARD.state.placed, BOARD.state && BOARD.state.docked])")),
+            ("-geo_docked", lambda: geo.update(docked=docked()), 200, None),
+            # the edge between them dragged: the app follows, the board is laid out again and the page knows
+            ("-drag", drag_edge, 2000, None),
+            ("board_12_wider", lambda: geo.update(dragged=docked()), 600, None),
+            ("ui_13_after_drag", "", 300, ("relaid", "JSON.stringify(BOARD.state && BOARD.state.layout &&"
+                                                     " BOARD.state.layout.squares)")),
+            ("ui_14_cal_photos", "go('calibration', 'photos')", 1500, None),
+            ("ui_15_photo", "$('calTake').click()", 4000,
+             ("photo", "JSON.stringify([CAL.count(CAL.state), CAL.state.enough, !!(CAL.state.series &&"
+                       " CAL.state.series.last)])")),
+            ("ui_16_cal_result", "go('calibration', 'result')", 1300, None),
+            ("ui_17_board_closed", lambda: board_key(Qt_key("Escape")), 1800,
              ("board", "JSON.stringify([!!(BOARD.state && BOARD.state.shown), BOARD.state && BOARD.state.kind])")),
-            ("ui_26_board_advanced", "__adv('calAdv', true)", 1200, None),
-            ("ui_27_board_ruler", "$('calBdRuler').value = (BOARD.state.layout.width_mm * 1.003).toFixed(1);"
+            ("-geo_back", lambda: geo.update(back=[win.width(), win.height()]), 200, None),
+            ("ui_18_it_home", lang("it") + " go('home')", 1800, None),
+            ("ui_19_it_live", "go('live', 'view')", 1500, None),
+            ("ui_20_it_live_on", "$('lvStart').click()", 7000, None),
+            # the opacity of the virtual elements, from its slider: the live setting `opacity` through live_settings
+            ("ui_21_opacity", "$('lvOpacity').value = '0.65'; $('lvOpacity').dispatchEvent(new Event('input'));"
+                              "$('lvOpacity').dispatchEvent(new Event('change'))", 1200,
+             ("opacity", "JSON.stringify([LIVE.sentAt > 0, LIVE.state && LIVE.state.opacity, $('lvOpacityV').textContent])")),
+            ("ui_22_live_board", lang("en") + "window.__live = LIVE.state && LIVE.state.tracked;"
+                                              " setTimeout(function () { go('live', 'board'); }, 900)", 2500, None),
+            ("ui_23_live_patient", "LIVE.settings({board: 'patient'})", 1500, None),
+            ("-live_sheet", "LIVE.settings({board: 'sheet'})", 800, None),
+            # the Phone panel: in the panel down the right, at home too; Wi-Fi paired with the QR code
+            ("ui_24_phone_home", "go('home'); LINK.show()", 2000,
+             ("phone", "JSON.stringify([LINK.open, getComputedStyle(document.querySelector('.rp')).display,"
+                       " document.querySelector('.rp-page.show').dataset.panel])")),
+            ("ui_25_phone_wifi", "$('lkWifi').click()", 1200, None),
+            ("ui_26_phone_paired", "", 4500, ("paired", "JSON.stringify([LINK.state && LINK.state.paired,"
+                                                        " LINK.state && LINK.state.via])")),
+            ("ui_27_phone_in_module", "go('trials', 'guide'); LINK.show()", 1500, None),
+            ("ui_28_phone_closed", "LINK.hide()", 900,
+             ("back", "JSON.stringify([LINK.open, document.querySelector('.rp-page.show').dataset.panel])")),
+            ("ui_29_results", "go('results', 'analysis')", 1200, None),
+            ("ui_30_board_advanced", "go('calibration', 'board'); __adv('calAdv', true)", 1500, None),
+            ("ui_31_board_ruler", "$('calBdRuler').value = (BOARD.state.layout.width_mm * 1.003).toFixed(1);"
                                   "$('calBdRuler').dispatchEvent(new Event('change'))", 1500, None),
-            ("ui_28_board_printed", "window.__ruler = BOARD.state.mon.source; BOARD.set({forget: true});"
+            ("ui_32_board_printed", "window.__ruler = BOARD.state.mon.source; BOARD.set({forget: true});"
                                     "setTimeout(function () { BOARD.set({kind: 'printed'}); }, 300)", 1500, None),
             ("-board_back", "BOARD.set({kind: 'screen'}); __closeAdv()", 1200, None),
         ]
-        # the sweep of every page and panel, at two sizes and in six languages
+        # the sweep of every module and panel, at two sizes and in six languages
         for size, w, h in SIZES:
             steps.append((f"-size_{size}", (lambda w=w, h=h: win.resize(w, h)), 1200, None))
             for code in ig.LANGS:
@@ -784,8 +948,6 @@ def test_ui(work, shots):
                 js("JSON.stringify(window.__ruler || '')", lambda v: log.append("ruler " + str(v)))
                 js("JSON.stringify([!!window.__live, !!(LIVE.state && LIVE.state.running)])",
                    lambda v: log.append("live " + str(v)))
-                js("JSON.stringify([!!window.__wifi, LINK.open, LINK.state && LINK.state.mode])",
-                   lambda v: log.append("phone " + str(v)))
                 js("JSON.stringify(window.__errs||[])", lambda v: (log.append("errors " + str(v)), app.quit()))
                 return
             name, script, wait, what = steps.pop(0)
@@ -807,10 +969,11 @@ def test_ui(work, shots):
     def first():
         js("window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(e.message+' line '+e.lineno)});")
         js(FIT)
-        js("JSON.stringify([page, document.querySelector('.app').classList.contains('at-home')])",
+        js("JSON.stringify([page, document.querySelector('.app').classList.contains('at-home'),"
+           " getComputedStyle(document.querySelector('.topbar')).display])",
            lambda v: log.append("start " + str(v)))
         grab("ui_00_home")
-        js("go('trials')")
+        js("go('trials', 'guide')")
         # the drape slot comes first, so the run shows both kinds of views
         QTimer.singleShot(1500, drive_drape)
 
@@ -824,7 +987,7 @@ def test_ui(work, shots):
         QTimer.singleShot(1200, lambda: (grab("ui_00_plan_drape"), drive()))
 
     QTimer.singleShot(4000, first)
-    QTimer.singleShot(1500000, app.quit)
+    QTimer.singleShot(2400000, app.quit)
     app.run()
     errors = next((x for x in log if x.startswith("errors")), "errors none")
     run = trials.Run("campaign", work / "raw", work / "protocol")
@@ -832,41 +995,60 @@ def test_ui(work, shots):
     expect(rows and rows[-1]["status"] == "ok" and rows[-1]["drape"] == "1" and not run.missing(rows[-1]["trial"]),
            f"window: drape trial {rows[-1]['trial'] if rows else '?'} run with the page's buttons, nothing missing")
     expect(errors in ("errors []", "errors none"), f"window: no script errors ({errors})")
-    start = next((x for x in log if x.startswith("start")), "start ?")
-    expect(start == 'start ["home",true]', f"window: the app opens at home, no panel and no toolbar ({start})")
-    home = next((x for x in log if x.startswith("home")), "home ?")
-    expect(home == 'home ["home",true,true,true,"none"]',
-           f"window: the mark on the band leads home, stays a raised button with its hint, the panel hidden ({home})")
-    tile = next((x for x in log if x.startswith("tile")), "tile ?")
-    expect(tile == 'tile ["trials","guide"]', f"window: the Trials tile of home opens the trial guide ({tile})")
-    opacity = next((x for x in log if x.startswith("opacity")), "opacity ?")
-    try:
-        sent, got, label = json.loads(opacity.split(" ", 1)[1])
-    except (ValueError, IndexError):
-        sent, got, label = False, None, ""
-    expect(sent and "65" in label and got == 0.65,
-           f"window: the opacity slider sends `opacity` 0.65 through live_settings ({label}), the live view reports {got}")
-    live = next((x for x in log if x.startswith("live")), "live ?")
-    expect(live == "live [true,false]",
-           f"window: live view started from the page, board tracked, stopped when the page is left ({live})")
-    phone = next((x for x in log if x.startswith("phone")), "phone ?")
-    expect(phone == 'phone [true,false,"usb"]',
-           f"window: Phone pane opened from the rail, Wi-Fi paired with the QR code, back to the cable, closed ({phone})")
-    expect(board.get("identical") and board.get("corners", (0, 1))[0] == board.get("corners", (0, 1))[1],
-           f"window: board shown from the Calibration page, the screen holds it pixel for pixel "
-           f"({board.get('identical')}), {board.get('corners')} corners found in the grab, layout "
-           f"{board.get('layout')} {board.get('error', '')}")
-    closed = next((x for x in log if x.startswith("board ")), "board ?")
+
+    def read(tag):
+        x = next((x for x in log if x.startswith(tag + " ")), tag + " ?")
+        try:
+            return json.loads(x.split(" ", 1)[1])
+        except (ValueError, IndexError):
+            return None
+    start = read("start")
+    expect(start == ["home", True, "none"], f"window: the app opens at home, with no rail, toolbar or panel ({start})")
+    home = read("home")
+    expect(home == ["home", True, True, True, "none", "none", 0],
+           f"window: the mark on the band leads home from a module, a raised button with its hint; no rail and no "
+           f"panel at home ({home})")
+    tile = read("tile")
+    expect(tile == ["calibration", "board", ["board", "photos", "result"], "flex"],
+           f"window: a choice of home opens its module at its first step, with its own steps on the rail ({tile})")
+    dock = read("dock")
+    d0, d1 = geo.get("docked") or {}, geo.get("dragged") or {}
+    expect(dock == [True, "beside", True] and d0.get("docked") and d0["edge"][0] == d0["edge"][1],
+           f"window: one monitor, the board beside the app, docked, the app making room ({dock}, {d0})")
+    relaid = read("relaid")
+    expect(d1.get("docked") and d1["edge"][0] == d1["edge"][1] and d1["app_w"] == d0.get("app_w", 0) - 200
+           and d1["board_w"] == d0.get("board_w", 0) + 200 and d1["squares"] != d0.get("squares")
+           and relaid == d1["squares"],
+           f"window: the edge between them dragged, the app follows, the board laid out again for its pixels "
+           f"{d0.get('squares')} -> {d1.get('squares')}, {d1.get('square_mm')} mm, the page told ({relaid})")
+    photo = read("photo")
+    expect(photo is not None and photo[0] == 1 and photo[1] == ig.ENOUGH["calibration"] and photo[2],
+           f"window: a photo taken from the Photos step, counted against {ig.ENOUGH['calibration']} ({photo})")
+    grabs = board.get("grabs", [])
+    expect(len(grabs) == 2 and all(g[1] is True and g[2] and g[2][0] == g[2][1] for g in grabs),
+           f"window: the board beside the app, before and after the edge is dragged, held by the screen pixel for "
+           f"pixel, every corner found in the grab ({grabs})")
+    closed = read("board")
+    expect(closed == [False, "screen"] and geo.get("back") == [1440, 900],
+           f"window: Esc closed the board, the page knew ({closed}), the app back to its size ({geo.get('back')})")
     ruler = next((x for x in log if x.startswith("ruler ")), "ruler ?")
-    expect(closed == 'board [false,"screen"]' and ruler == 'ruler "ruler"',
-           f"window: Esc closed the board and the page knew ({closed}); the ruler check typed in the page "
-           f"corrected the size ({ruler})")
+    expect(ruler == 'ruler "ruler"', f"window: the ruler check typed in the page corrected the size ({ruler})")
+    opacity = read("opacity")
+    expect(opacity is not None and opacity[0] and "65" in opacity[2] and opacity[1] == 0.65,
+           f"window: the opacity slider sends `opacity` 0.65 through live_settings ({opacity})")
+    live = read("live")
+    expect(live == [True, False], f"window: live view started from its step, board tracked, stopped when the step "
+                                  f"is left ({live})")
+    phone, paired, back = read("phone"), read("paired"), read("back")
+    expect(phone == [True, "flex", "phone"] and paired == [True, "usb"] and back == [False, "trials-plan"],
+           f"window: the Phone panel in the panel down the right, at home too ({phone}); Wi-Fi paired with the QR "
+           f"code, the cable still in use ({paired}); closed, the step's panel back ({back})")
     checked = len(SIZES) * len(ig.LANGS) * len(SWEEP)
     for m in misfits[:60]:
         print("      " + " · ".join(m), flush=True)
-    expect(not misfits, f"window: every word fits on {len(SWEEP)} pages and panels, at {SIZES[0][1]} x {SIZES[0][2]} "
-                        f"and {SIZES[1][1]} x {SIZES[1][2]}, in the six languages ({checked} views, "
-                        f"{len(misfits)} words that do not fit)")
+    expect(not misfits, f"window: every word fits, nothing over the page, on {len(SWEEP)} views, at "
+                        f"{SIZES[0][1]} x {SIZES[0][2]} and {SIZES[1][1]} x {SIZES[1][2]}, in the six languages "
+                        f"({checked} views, {len(misfits)} words that do not fit)")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
     print("page actions: " + ", ".join(x for x in log if not x.startswith(("confirm", "shoot", "record", "stop",
                                                                             "recording", "waiting", "disabled"))),

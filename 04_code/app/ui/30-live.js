@@ -1,7 +1,9 @@
-// ImpactGuide · the Live AR page: the phone's stream with the board pose and
-// the face overlay, the status light, fps and latency, and the opacity of what
-// is drawn over the picture. The work is live_ar.py's:
-// the backend composes the frames and serves them on 127.0.0.1; the page shows
+// ImpactGuide · Live AR, two steps on the rail: the board the phone follows
+// (the patient board, or the calibration board on a monitor or printed, with
+// the controls of 15-board.js) and the view: the phone's stream with the board
+// pose and the face overlay, the status light, fps and latency, and the
+// opacity of what is drawn over the picture. The work is live_ar.py's: the
+// backend composes the frames and serves them on 127.0.0.1; the page shows
 // them and asks for the rest.
 
 const LIVE = {
@@ -11,14 +13,22 @@ const LIVE = {
   sliding: false,   // the opacity slider is being moved
   sentAt: 0,        // when the opacity was last sent
 
-  enter: function () {
-    LIVE.refresh();
+  enter: function (step) {
     clearInterval(LIVE.timer);
-    LIVE.timer = setInterval(LIVE.refresh, 400);
+    LIVE.timer = null;
+    if (step === 'board') {
+      showView('board');
+      showPanel('live-board');
+    } else {
+      showView('live');
+      showPanel('live');
+      LIVE.timer = setInterval(LIVE.refresh, 400);
+    }
+    LIVE.refresh();
     be('phone_refresh');
   },
 
-  // Leaving the page stops the view: the camera is free for whoever needs it next.
+  // Leaving the view stops it: the camera is free for whoever needs it next.
   leave: function () {
     clearInterval(LIVE.timer);
     LIVE.timer = null;
@@ -52,12 +62,37 @@ const LIVE = {
     return T(PHONE.link === 'wifi' ? 'live.err.wifi' : 'live.err.generic');
   },
 
+  // the first step: which board, and the card on the stage
+  renderBoard: function (s) {
+    const sheet = s.prefs.board === 'sheet';
+    document.querySelectorAll('#lvBoards .mitem').forEach(function (it) {
+      it.classList.toggle('sel', it.dataset.board === s.prefs.board);
+    });
+    $('lvBd').classList.toggle('hidden', !sheet);
+    BOARD.render(s.board_ui);
+    if (!sheet) $('lvBdMore').classList.add('hidden');
+    if (STEP.live !== 'board') return;
+    if (sheet) { BOARD.card(s.board_ui); return; }
+    const b = s.board;
+    $('bdTitle').textContent = T('live.card.patient');
+    $('bdLine').textContent = T('board.card.line', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
+                                cifre(b.square_mm * b.squares[0], 0));
+    $('bdHint').textContent = T('live.card.patient.hint');
+    $('bdDot').className = 'live-dot ok';
+  },
+
   render: function (s) {
     LIVE.state = s;
+    LIVE.renderBoard(s);
+    const view = STEP.live === 'view';
     const on = s.running && !s.error;
     const starting = !s.running && (s.starting || s.busy.indexOf('live') >= 0);
-    LIVE.show(on ? s.url : '');
-    ['lvImg', 'lvTags', 'lvLights', 'lvRate'].forEach(function (id) { $(id).classList.toggle('hidden', !on); });
+    LIVE.show(on && view ? s.url : '');
+    // the frame takes the picture's own shape: 4:3 with the phone held across, 3:4 held upright (live_ar turns the
+    // picture with the phone, `display`), as large as the stage allows and never stretched
+    const d = s.display || s.image || [4, 3];
+    if (d[0] > 0 && d[1] > 0) $('lvImg').parentElement.style.setProperty('--ar', String(d[0] / d[1]));
+    ['lvImg', 'lvTags', 'lvLights'].forEach(function (id) { $(id).classList.toggle('hidden', !on); });
     $('lvIdle').classList.toggle('hidden', on);
     $('lvIdleWait').classList.toggle('hidden', !starting);
     $('lvIdleTitle').textContent = T(starting ? 'live.idle.title.starting' : 'live.idle.title');
@@ -85,20 +120,9 @@ const LIVE = {
     $('lvWhy').textContent = why;
     $('lvWhy').classList.toggle('hidden', !why);
     const lat = s.latency || {};
-    const measured = lat.stream_ms !== null && lat.stream_ms !== undefined;
-    $('lvRate').textContent = on && s.fps_ar ? T(measured ? 'live.rate' : 'live.rate.pc', cifre(s.fps_ar, 0), cifre(lat.total_ms || 0, 0)) : '';
-    $('lvRate').title = !on ? '' : s.synthetic ? T('live.f.latency.note.sim', cifre(lat.processing_ms || 0, 0))
-      : !measured ? T('live.f.latency.note.wifi', cifre(lat.processing_ms || 0, 0))
-      : T('live.f.latency.note', cifre(lat.stream_ms || 0, 0), cifre(lat.processing_ms || 0, 0));
 
-    // the panel: the board in use, and the calibration board's controls when it is that one
-    const b = s.board;
-    $('lvBoard').value = s.prefs.board;
-    $('lvBoard').title = T('live.board.note', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
-                           cifre(b.marker_mm, b.marker_mm % 1 ? 2 : 0), b.dictionary);
-    $('lvBd').classList.toggle('hidden', s.prefs.board !== 'sheet');
-    BOARD.render(s.board_ui);
-    if (s.prefs.board !== 'sheet') $('lvBdMore').classList.add('hidden');
+    // the pace and the delay are not written on the picture (no technical words in the window): they are the first
+    // rows of the panel's Advanced part, with the rest of the measures
 
     // the panel: how strongly the virtual elements are drawn
     const op = $('lvOpacity');
@@ -106,7 +130,7 @@ const LIVE = {
     $('lvOpacityV').textContent = cifre(100 * Number(op.value), 0) + ' %';
 
     // Advanced: the board, the pace and the link while the view runs; the registration; the camera
-    const rows = [];
+    const b = s.board, rows = [];
     if (on) {
       const tm = s.timings || {}, ln = s.phone_link || {};
       rows.push(piRow(T('live.f.corners'), T('live.f.corners.v', s.corners || 0, b.corners, s.markers || 0)),
@@ -186,8 +210,8 @@ const LIVE = {
     if (e.type !== 'live') return;
     if (e.action === 'started') {
       work(false);
-      if (page === 'live') toast(T('live.said.started'));
-      else ask('live_stop');      // the page was left while the stream was opening
+      if (page === 'live' && STEP.live === 'view') toast(T('live.said.started'));
+      else ask('live_stop');      // the view was left while the stream was opening
     } else if (e.action === 'failed') {
       work(false);
       toast(LIVE.plainError(e.message || e.error, e.cause), 6000);
@@ -198,8 +222,10 @@ const LIVE = {
   },
 
   wire: function () {
-    setOptions($('lvBoard'), [T('live.board.patient'), T('live.board.sheet')], ['patient', 'sheet']);
-    $('lvBoard').onchange = function () { LIVE.settings({ board: $('lvBoard').value }); };
+    document.querySelectorAll('#lvBoards .mitem').forEach(function (it) {
+      it.onclick = function () { LIVE.settings({ board: it.dataset.board }); };
+      it.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); it.onclick(); } };
+    });
     document.querySelectorAll('.layer-btn').forEach(function (btn) {
       btn.onclick = function () {
         const k = btn.dataset.layer, change = {};

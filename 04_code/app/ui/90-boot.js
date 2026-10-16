@@ -18,14 +18,14 @@ function boot() {
   initSelects();
   placeIcons(document);
   initTitlebar();
-  wireAdvanced(document);
+  initFolds(document);
   Bridge.on('happened', onEvent);
   // Everything that holds words: run at start and again when the language changes
   // (the handlers are assigned, not added, so wiring twice changes nothing).
   const speak = function (lang) {
     setLang(lang);
     setWindowHints({ maximise: T('win.maximise.hint'), restore: T('win.restore.hint') });
-    wireRail();
+    wireSteps();
     HOME.wire();
     CAL.wire();
     TRIALS.wire();
@@ -44,12 +44,14 @@ function boot() {
     $('lang').onchange = function () {
       be('set_lang', $('lang').value);
       speak($('lang').value);
+      const open = LINK.open;
       go(page);
+      if (open) LINK.show();
     };
     $('simChip').classList.toggle('hidden', !info.simulate);
     PHONE.link = info.link;
     LINK.btn();
-    // the app opens at home; a page asked for on the command line opens instead
+    // the app opens at home; a module asked for on the command line opens instead
     go(info.page || 'home');
   });
 }
