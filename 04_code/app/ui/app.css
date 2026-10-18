@@ -65,18 +65,163 @@
 .say .live-dot{width:13px;height:13px}
 .say .live-dot:not(.ok):not(.warn):not(.busy){display:none}
 
-/* ── the photos of a calibration: the count, large, against what is enough;
-   it turns to the ok colour the moment there are enough. */
-.count{display:flex;flex-direction:column;gap:12px;padding:24px 26px}
+/* ── the photos of a calibration: the count against the plan's most, the
+   mark of its least on the bar; it turns to the ok colour once there are
+   enough. */
+.count{display:flex;flex-direction:column;gap:10px;padding:14px 14px 12px}
 .count-n{display:flex;align-items:baseline;gap:8px;color:var(--text-1);line-height:1}
-#cpN{font-size:64px;font-weight:300;letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
-.count-of{font-size:20px;color:var(--text-3);white-space:nowrap}
-.count-say{font-size:17px;font-weight:var(--w-strong);color:var(--text-1)}
+#cpN{font-size:40px;font-weight:300;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.count-of{font-size:16px;color:var(--text-3);white-space:nowrap}
+.count-say{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
+           text-overflow:ellipsis}
 .count .progress-fill{transition:transform var(--t-out)}
 .count.enough #cpN,.count.enough .count-say{color:var(--ok-text)}
 .count.enough .progress-fill{background:var(--ok)}
-.cp-last img{display:block;max-width:100%;max-height:300px;object-fit:contain;border-radius:var(--r-md);
-             background:var(--surface-0)}
+.cp-track{position:relative}
+.cp-min{position:absolute;top:-3px;width:2px;height:9px;margin-left:-1px;border-radius:1px;background:var(--text-3)}
+
+/* ── the board on this monitor: one canvas in the work area of the step that
+   shows it, one image pixel on one screen pixel (ui/15-board.js); white all
+   over, the quiet margin around the board included. The length between its
+   two thin lines is written on it while the ruler check is open. */
+.view.board-view,.view.photos-view{padding:12px 16px 16px;overflow:hidden}
+.view.board-view.show{display:flex;flex-direction:column}
+.board-view>.bd-split{position:absolute;inset:12px 16px 16px;display:flex;gap:12px}
+.bd-split>.bd-host{flex:1}
+.bd-host{position:relative;min-width:0;min-height:0;background:var(--surface-0);border-radius:var(--r-md);overflow:hidden}
+.bd-canvas{position:absolute;inset:0}
+.bd-canvas canvas{display:block;width:100%;height:100%}
+.bd-len{position:absolute;transform:translate(-50%,-50%);padding:0 8px;background:#fff;color:#000;
+        font-size:12px;line-height:18px;white-space:nowrap;pointer-events:none}
+.bd-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+        text-align:center;font-size:var(--fs-lg);color:var(--text-3);background:var(--surface-0)}
+
+/* the first question, in the middle of the stage */
+.bd-ask{margin:auto;width:640px;max-width:100%;display:flex;flex-direction:column;gap:20px}
+.bd-ask-hd{font-size:20px;font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
+           text-overflow:ellipsis}
+
+/* physical: the plate in 3D (or the sheet) beside what to do with it; one under the other when narrow */
+.bd-phys{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,340px);gap:12px}
+.bd-fig{position:relative;min-height:0;display:flex}
+.bd-3d{position:relative;flex:1;min-height:220px;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2)}
+.bd-3d canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+.bd-3d canvas:active{cursor:grabbing}
+.bd-3d-hint{white-space:nowrap}
+.bd-sheet{flex:1;display:flex;align-items:center;justify-content:center;border-radius:var(--r-md);
+          background:var(--surface-2);padding:16px}
+.bd-sheet .fig-svg{width:100%;max-width:640px;max-height:100%}
+.bd-steps{display:flex;flex-direction:column;gap:14px;padding:16px 16px 14px;align-self:start}
+.bd-steps-hd{font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1)}
+.bd-step{display:flex;align-items:flex-start;gap:10px}
+.bd-step .tn{margin:1px 0 0;flex:none}
+.bd-step-t{min-width:0}
+.bd-step-n{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1)}
+.bd-step-l{font-size:var(--fs);color:var(--text-3);line-height:var(--lh);margin-top:2px}
+.bd-tool{font-size:var(--fs-sm);color:var(--text-4);border-top:1px solid var(--control);padding-top:10px}
+@media (max-width: 1000px){
+  .bd-phys{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto;overflow-y:auto}
+  .bd-fig{min-height:260px}
+  .bd-3d{min-height:0}
+}
+
+/* three readings side by side in the panel */
+.rd-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.rd-row .input{min-width:0;text-align:center;padding-left:4px;padding-right:4px}
+
+/* ── the photos: the board or the live picture, beside the guide ─────────── */
+.ph-split{display:flex;gap:12px;height:100%}
+.ph-split>.bd-host{flex:1}
+.ph-live{position:relative;flex:1;min-width:0;border-radius:var(--r-md);overflow:hidden;background:var(--surface-0)}
+.ph-live .live-img{display:block;width:100%;height:100%;object-fit:contain}
+.ph-guide>.ph-live{flex:none;aspect-ratio:4/3}
+.ph-guide{flex:0 0 min(330px,44%);min-width:0;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+/* wide (no board beside it): the guide as large as the stage's height allows, the phone above its two side views;
+   on a short stage the phone beside them */
+.ph-guide.wide{flex:1;align-items:center;justify-content:safe center;container-type:size;
+               --gw:min(760px,100%,calc((100cqh - 235px) * 1.26))}
+.ph-guide.wide .guide{width:var(--gw)}
+@container (max-height: 600px){
+  .ph-guide.wide>*{--gw:min(640px,100%,calc((100cqh - 262px) * 2.05))}
+  .guide.big .guide-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);align-items:center;gap:16px}
+  .guide.big .guide-sides{grid-template-columns:minmax(0,1fr)}
+}
+.ph-last{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-md);background:var(--surface-2)}
+.ph-guide.wide .ph-last{width:var(--gw)}
+.ph-cov{flex:none;width:80px}
+.ph-last-w{display:flex;align-items:center;gap:8px;min-width:0}
+.ph-last-t{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
+           text-overflow:ellipsis}
+
+/* the guide of the next photo: the phone's screen as it should look, the phone from above and from the side */
+.guide{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--r-md);background:var(--surface-2)}
+.guide:empty{display:none}
+.guide-hd{display:flex;flex-direction:column;gap:2px;min-width:0}
+.guide-n{font-size:var(--fs-sm);font-weight:var(--w-strong);letter-spacing:.6px;text-transform:uppercase;
+         color:var(--accent-text);white-space:nowrap}
+.guide-w{font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
+         text-overflow:ellipsis}
+.guide-d{font-size:var(--fs);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.guide-row{display:flex;flex-direction:column;gap:10px}
+.guide-sides{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.guide-side-c{display:flex;flex-direction:column;gap:2px;padding:6px 6px 4px;border-radius:var(--r-md);background:var(--surface-1)}
+.guide-side-l{font-size:var(--fs-sm);color:var(--text-3);text-align:center;white-space:nowrap;overflow:hidden;
+              text-overflow:ellipsis}
+.guide-leg{display:flex;gap:14px;font-size:var(--fs-sm);color:var(--text-3)}
+.guide-key{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.guide-key i{display:block;width:4px;height:12px;border-radius:2px}
+.guide-key i.k-top{background:var(--accent)}
+.guide-key i.k-bottom{background:var(--text-3)}
+.guide.big{padding:18px 20px;gap:12px}
+.guide.big .guide-w{font-size:20px}
+.guide-done{font-size:var(--fs-lg);color:var(--text-2);padding:8px 2px}
+.fig-svg{display:block;width:100%;height:auto;overflow:visible}
+.g-body{fill:var(--surface-3);stroke:var(--text-4);stroke-width:1.5px;vector-effect:non-scaling-stroke}
+.g-screen{fill:var(--surface-0)}
+.g-frame{fill:var(--control)}
+.g-shutter{fill:none;stroke:var(--text-4);stroke-width:1.5px;vector-effect:non-scaling-stroke}
+.g-shutter-in{fill:var(--text-4)}
+.g-board{fill:var(--text-1);fill-opacity:.92}
+.g-cell{fill:var(--surface-0)}
+.g-top{fill:var(--accent)}
+.g-bottom{fill:var(--text-3)}
+.g-lens{fill:var(--text-3)}
+.g-mid{stroke:var(--accent);stroke-width:1.5px;vector-effect:non-scaling-stroke;fill:none;opacity:.8}
+.g-wall{stroke:var(--text-2);stroke-width:3;stroke-linecap:round}
+.g-sight{stroke:var(--text-4);stroke-width:1px;stroke-dasharray:2 2.5;vector-effect:non-scaling-stroke}
+.g-slab{fill:var(--text-2)}
+.g-bar-k{fill:var(--surface-0);stroke:var(--text-2);stroke-width:1px;vector-effect:non-scaling-stroke}
+.g-bar-w{fill:var(--text-1)}
+.fig-t{font-size:10px;fill:var(--text-3)}
+.fig-t-s{font-size:9px}
+.fig-t-l{font-size:12px;fill:var(--text-1)}
+.cov-frame{fill:var(--surface-0);stroke:var(--text-4);stroke-width:1}
+.cov-old{fill:var(--text-4)}
+.cov-new{fill:var(--ok)}
+.cov-bad{fill:var(--warn)}
+
+/* the result: the error of each photo and over the board */
+.res-figs .card{gap:6px}
+.fig-note{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ax-grid{stroke:var(--control);stroke-width:1}
+.ax-base{stroke:var(--text-4);stroke-width:1}
+.ax-limit{stroke:var(--warn);stroke-width:1;stroke-dasharray:4 3}
+.bar{cursor:pointer}
+.bar-hit{fill:transparent}
+.bar-in .bar-v{fill:var(--accent)}
+.bar-out .bar-v{fill:var(--text-4)}
+.bar:hover .bar-v{opacity:.8}
+.bar:hover .bar-hit{fill:var(--control);fill-opacity:.35}
+.rmap-board{fill:var(--surface-2);stroke:var(--text-4);stroke-width:1}
+.rmap-sq{fill:var(--surface-1)}
+.rmap-dot{fill:var(--accent)}
+.rmap-hit{fill:transparent}
+.sh-page{fill:var(--text-1)}
+.sh-sq{fill:var(--surface-0)}
+.sh-bit{fill:var(--text-1)}
+.sh-ext{stroke:var(--accent-text);stroke-width:.7;fill:none}
+.sh-dim{stroke:var(--accent-text);stroke-width:1.2;fill:none;stroke-linejoin:round;stroke-linecap:round}
+.sh-len{font-size:10px;fill:var(--text-1)}
 
 /* ── the trial in progress ────────────────────────────────────────────────── */
 .trial-head{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
@@ -153,8 +298,14 @@
 /* ── the live view ────────────────────────────────────────────────────────
    The stream fills the stage at its own shape (4:3 across, 3:4 upright); what is not real yet, the light
    and the pace sit on it on the overlay role, as SlantUI's on-stage chrome. */
-.view.live-view{padding:12px 16px 16px;overflow:hidden}
-.live-stage{height:100%;display:flex;align-items:center;justify-content:center;container-type:size}
+.view.live-view{padding:12px 16px 16px;overflow:hidden;container-type:inline-size}
+.live-split{display:flex;gap:12px;height:100%}
+.live-split>.bd-host{flex:0 0 58%}
+/* a narrow stage holds no board beside a picture large enough to read: the picture alone */
+@container (max-width: 760px){
+  .live-split>.bd-host{display:none}
+}
+.live-stage{flex:1;min-width:0;height:100%;display:flex;align-items:center;justify-content:center;container-type:size}
 .live-frame{position:relative;width:min(100cqw,calc(100cqh * var(--ar,1.3333)));
             height:min(100cqh,calc(100cqw / var(--ar,1.3333)));
             background:var(--surface-0);border-radius:var(--r-md);overflow:hidden}

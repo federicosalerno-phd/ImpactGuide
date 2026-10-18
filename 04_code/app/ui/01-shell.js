@@ -252,6 +252,9 @@ function go(p, step) {
   }
   const s = MODULES[p] ? stepOf(p) : '';
   if (was === 'live' && wasStep === 'view' && !(p === 'live' && s === 'view')) LIVE.leave();
+  if (was === 'calibration' && wasStep === 'photos' && !(p === 'calibration' && s === 'photos')) CAL.leave();
+  // the board on this monitor is drawn only by the steps that show it: they place it again
+  if (typeof BOARDVIEW !== 'undefined') BOARDVIEW.place(null);
   page = p;
   if (typeof LINK !== 'undefined' && LINK.open) LINK.hide();
   document.querySelector('.app').classList.toggle('at-home', p === 'home');

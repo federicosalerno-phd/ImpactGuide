@@ -7,10 +7,12 @@ each choice is a module with its own steps on the rail: Calibrate the phone
 sequence, setup) and Scans and results (the next pages). The app guides the
 protocol step by step and keeps what the bench produces.
 
-The calibration board is shown on a monitor (board_window.py, screen_board.py):
-full screen on a monitor of its own when there are two, else in a window beside
-the app on the same monitor, at any split, sized from the pixels of that window
-and the pitch of its monitor; or it is printed.
+The calibration board is drawn by the page itself, in the work area of the step
+that shows it, at its true size: laid out for the pixels of that area at the
+pitch of the monitor the window is on (screen_board.py), never in a window of
+its own; or it is physical: the 3D-printed plate (charuco_plate.py) or a printed
+A4 sheet, measured with a caliper. The photos of a calibration follow a plan of
+poses (calib_guide.py), each one checked as it comes.
 
 This file is the host: the window, the bridge, the background jobs. The logic
 is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py,
@@ -44,6 +46,7 @@ if not sys.pycache_prefix:
 sys.path.insert(0, str(SRC))
 
 import argparse  # noqa: E402
+import base64  # noqa: E402
 import contextlib  # noqa: E402
 import csv  # noqa: E402
 import io  # noqa: E402
@@ -58,19 +61,19 @@ from datetime import date, datetime  # noqa: E402
 import slantui.css as slantui_css  # noqa: E402
 import slantui.js as slantui_js  # noqa: E402
 from slantui.shell import Application, Bridge, Splash, Window, pyqtSignal, pyqtSlot  # noqa: E402
-from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialog, QRect, QTimer, QUrl,  # noqa: E402
+from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialog, QTimer, QUrl,  # noqa: E402
                               USE_QT6)
 from slantui.tokens import PALETTES  # noqa: E402
 
 import acquisition  # noqa: E402
+import calib_guide  # noqa: E402
 import calibrate_charuco  # noqa: E402
+import charuco_plate  # noqa: E402
 import live_ar  # noqa: E402
 import phone_link  # noqa: E402
 import phone_view  # noqa: E402
 import screen_board  # noqa: E402
 import trials  # noqa: E402
-
-import board_window  # noqa: E402  (beside this file)
 
 APP_NAME = "ImpactGuide"
 APP_VERSION = "0.1.0"
@@ -85,15 +88,17 @@ LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "results")     # the modules of home, each with its steps (ui/01-shell.js)
 ICON = APP / "ui" / "impactguide-icon.svg"  # the round app icon: desktop, taskbar, window
 MARK = APP / "ui" / "impactguide-mark.svg"  # the same drawing without its disc, cut to fill the band's square
-CALIB_MODES = ("photo", "video")
+CALIB_MODES = ("photo", "stream")     # the phone's photos (camera app), the frames of the live stream
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
                 "cx_change", "cy_change")
-BOARD_KINDS = ("screen", "printed")
-BOARD_PLACES = ("auto", "beside", "full")   # auto: full screen on another monitor if there is one, else beside the app
-MIN_WINDOW = (720, 560)     # the app's least size: room for the board beside it on one monitor
-# Photos of a calibration series: enough for a calibration (protocol T5.1: 40, at least 30), and for a session check
-ENOUGH = {"calibration": 30, "check": 10}
+BOARD_KINDS = ("screen", "plate", "sheet")  # on this monitor, the 3D-printed plate, a printed A4 sheet
+MIN_WINDOW = (720, 560)     # the app's least size
+PHOTO_CHECKS = "photo_checks.json"    # the check of each photo of a series, beside the photos
+REJECTED = "rejected"                 # the photos of a series put aside by their check (or by hand)
+SHEET_SPREAD_MAX = 0.30     # mm between the readings of the A4 sheet's long side (a caliper, or a steel ruler)
+SHEET_NOMINAL_TOL = 0.02    # a printer that scales the page by more than 2 %, or a misreading
+PLATE_MODEL = APP / "ui" / "models" / "charuco_plate.glb"   # the plate in 3D for the page (tools/build_plate_model.py)
 GUESS_PITCH = 25.4 / 96     # mm: a monitor that says nothing of its size is laid out as a 96 dpi one, to be measured
 COMMA_LANGS = ("it", "fr", "es", "de")
 
@@ -123,15 +128,15 @@ class Roots:
 class Prefs:
     """What outlives a session on this computer: language, page, phase, scanner folder, phone."""
 
-    DEFAULTS = {"lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "", "square_mm": 24.0,
-                "calib_mode": "photo", "calib_kind": "calibration",
+    DEFAULTS = {"lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "",
+                "calib_mode": "photo", "calib_kind": "calibration", "calib_plan": "quick",
                 "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down", "switch_modes": True,
                           "link": phone_link.AUTO, "wifi_address": "", "phone_id": "", "wifi_paired": False},
                 "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": "",
                          "opacity": live_ar.OPACITY},
-                # the calibration board: on a monitor or printed. On a monitor it goes full screen on another monitor
-                # (the one chosen, else the smallest without the app) or beside the app at a split (the board's share)
-                "board": {"kind": "screen", "monitor": "", "place": "auto", "split": 0.5},
+                # the calibration board: on this monitor (in the page), the 3D-printed plate or a printed A4 sheet,
+                # with the caliper readings of each (mm); chosen: the first question of Calibrate was answered
+                "board": {"kind": "screen", "chosen": False, "plate": {}, "sheet": {}},
                 # the ruler check of each monitor (screen_board.with_ruler): pitch_mm, measured_mm, data_mm, date
                 "monitors": {}}
 
@@ -147,6 +152,15 @@ class Prefs:
                     self.data[k] = v
         except (OSError, ValueError):
             pass
+        # what older versions kept: the printed board is the sheet; the video mode is now the stream's
+        b = self.data["board"]
+        if b.get("kind") == "printed":
+            b["kind"] = "sheet"
+        for k in ("monitor", "place", "split"):
+            b.pop(k, None)
+        if self.data.get("calib_mode") not in ("photo", "stream"):
+            self.data["calib_mode"] = "photo"
+        self.data.pop("square_mm", None)
 
     def __getitem__(self, key):
         return self.data[key]
@@ -202,15 +216,22 @@ class Backend(Bridge):
         self._wifi_on = False       # Wireless debugging switched on from the PC, over the cable
         self._svgs = {}
         self._link_was = {}
-        self._board_win = None      # the board on a monitor (board_window.BoardWindow), while it is shown
-        self._dock = None           # the board docked beside the app (board_window.Dock), while it is
+        self._area = None           # the page's area for the board (board_area), device pixels
+        self._board_on = False      # a step shows the board on this monitor now
+        self._lay = None            # the board laid out for that area (screen_board.layout)
+        self._lay_err, self._lay_mon, self._lay_exact = "", None, True
+        self._board_img = None      # its image, as the page draws it
+        self._screen_watch = False
+        self._watched_screen = None
+        self._live_for = "live"     # what the live AR runs for: the live view, or a calibration of the stream
         self._win_mons = (None, {})  # what Windows says of the monitors, read again when Qt's screens change
-        self.window = None          # the app's window (build), for the board beside it
+        self.window = None          # the app's window (build): the monitor it is on sizes the board
         self._via = None            # the link the phone was last found on (cable or Wi-Fi)
         self.link = self._make_link()
         app = QApplication.instance()
-        if app is not None:
-            app.screenRemoved.connect(self._screen_removed)
+        if app is not None:         # a monitor plugged in or out: the board is laid out again
+            app.screenAdded.connect(lambda *_: self._emit({"type": "board", "action": "screen"}))
+            app.screenRemoved.connect(lambda *_: self._emit({"type": "board", "action": "screen"}))
         self._pump = QTimer(self)
         self._pump.setInterval(150)
         self._pump.timeout.connect(self._drain)
@@ -297,9 +318,6 @@ class Backend(Bridge):
             self.prefs.set("lang", code)
             if self._view is not None:
                 self._view.words, self._view.lang = view_words(code), code
-            if self._board_win is not None:
-                self._board_win.words = self._board_words()
-                self._board_win.update()
 
     @pyqtSlot(str)
     def set_page(self, page):
@@ -978,6 +996,11 @@ class Backend(Bridge):
         return self._answer(go)
 
     # ── calibration ──────────────────────────────────────────────────────
+    # Three steps (ui/10-calibration.js): the board (on this monitor, in the page; or a physical one: the 3D-printed
+    # plate or a printed sheet, with its measure), the photos (a plan of poses, quick or accurate, each photo checked
+    # as it comes and kept or put aside), the calibration (its errors per photo and over the board, the intrinsics in
+    # plain units, a verdict, photos left out by hand, saved). Two camera modes: the phone's photos (the camera app,
+    # 12.5 MP, what the measurements of the bench use) and the live stream (its frames, for the live AR).
     def _intrinsics_path(self, mode):
         return self.roots.calib_out / f"intrinsics_{mode}.json"
 
@@ -994,6 +1017,17 @@ class Backend(Bridge):
                 "fx": K[0][0], "fy": K[1][1], "cx": K[0][2], "cy": K[1][2], "dropped": cal.get("dropped", []),
                 "skipped": cal.get("skipped", {}), "square_mm": (cal.get("board") or {}).get("square_mm")}
 
+    def _mode(self):
+        m = self.prefs["calib_mode"]
+        return m if m in CALIB_MODES else "photo"
+
+    def _calib_plan(self):
+        """The plan of poses of the photos now: the session check has its own, else quick or accurate."""
+        if self._series_kind() == "check":
+            return "check"
+        p = self.prefs["calib_plan"]
+        return p if p in ("quick", "accurate") else "quick"
+
     def _folders(self):
         """The folders of calibration photos, newest first: name, path, number of photos, kind, board.json."""
         folders = []
@@ -1007,6 +1041,39 @@ class Backend(Bridge):
                 folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1],
                                 "board": board})
         return folders
+
+    @staticmethod
+    def _photo_checks(d):
+        """{name: check} of the photos of a series (calibrate_charuco.check_photo), kept beside them."""
+        try:
+            return json.loads((Path(d) / PHOTO_CHECKS).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _series_detail(self, f, active):
+        """The series of photos in progress: its photos in the order they came, each with its check; the corners of
+        the photos kept (where the board has been on the screen); whether it is of the board in use."""
+        d = Path(f["path"])
+        checks = self._photo_checks(d)
+        photos = sorted((p for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES), key=lambda p: p.stat().st_mtime)
+        same = f["n"] == 0 or self._same_board(f["board"], active)
+        rows = [{"name": p.name, **{k: (checks.get(p.name) or {}).get(k) for k in ("ok", "why", "corners", "of",
+                                                                                  "blur_px")}} for p in photos]
+        points = []
+        for p in photos:
+            pts = (checks.get(p.name) or {}).get("points") or []
+            points.append(pts[::max(1, len(pts) // 30)])
+        last = None
+        if checks:
+            name = max(checks, key=lambda k: (checks[k].get("seq", 0), checks[k].get("time", "")))
+            last = {"name": name, **{k: checks[name].get(k) for k in ("ok", "why", "corners", "of", "blur_px",
+                                                                       "points", "time")}}
+        return {**f, "same": same, "photos": rows, "points": points, "last": last}
+
+    def _guide_board(self, series, active):
+        """The board the guide draws: the series' own (board.json) when it has photos, else the one in use."""
+        b = (series or {}).get("board") if series and series.get("n") else None
+        return b or active
 
     def _calib_state(self):
         r = self.roots
@@ -1023,39 +1090,73 @@ class Backend(Bridge):
         last = {}
         for c in checks:
             last[c["mode"]] = c
-        folders = self._folders()
-        b = calibrate_charuco.BOARD
-        nx, ny = b["squares"]
-        board_file = r.board / f"charuco_{nx}x{ny}_{float(self.prefs['square_mm']):g}mm_{b['dictionary'].lower()}_a4.pdf"
         bs = self._board_state()
-        kind = self._series_kind()
-        f = self._series(folders)
-        series = None
-        if f is not None:
-            photos = sorted((p for p in Path(f["path"]).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES),
-                            key=lambda p: p.stat().st_mtime)
-            same = f["n"] == 0 or self._same_board(f["board"], bs["active"])
-            series = {**f, "same": same, "last": file_url(photos[-1]) if photos and same else ""}
-        return {"board": {**b, "squares": list(b["squares"])}, "square_mm": self.prefs["square_mm"],
-                "active": bs["active"], "board_ui": bs, "mode": self.prefs["calib_mode"], "kind": kind,
-                "enough": ENOUGH[kind], "series": series, "modes": modes, "last_check": last, "folders": folders,
-                "raw": str(r.calib_raw), "out": str(r.calib_out), "board_file": str(board_file) if board_file.exists() else "",
-                "board_dir": str(r.board), "phone": self.phone_status, "busy": sorted(self._busy),
-                "min_views": calibrate_charuco.MIN_VIEWS, "max_rms": calibrate_charuco.MAX_RMS}
+        active = bs["active"]
+        kind, mode, plan = self._series_kind(), self._mode(), self._calib_plan()
+        lim = calib_guide.limits(plan)
+        f = self._series()
+        series = self._series_detail(f, active) if f is not None else None
+        n = series["n"] if series and series["same"] else 0
+        nxt = None
+        if active and n < lim["max"]:
+            g = self._guide_board(series if series and series["same"] else None, active)
+            with contextlib.suppress(KeyError, TypeError, ValueError):
+                nxt = calib_guide.guide(calib_guide.PLANS[plan][n], g, mode, n, plan)
+        result = self._result(mode)
+        live = None
+        if self._live is not None:
+            st = self._live.status()
+            live = {"running": st["running"], "starting": st.get("starting"), "tracked": st.get("tracked"),
+                    "url": self._live_server.url if self._live_server else "", "purpose": self._live_for,
+                    "display": st.get("display") or st.get("image"), "error": bool(st.get("error"))}
+        return {"mode": mode, "plan": plan, "kind": kind, "limits": lim, "count": n, "series": series, "next": nxt,
+                "plans": {k: calib_guide.limits(k) for k in ("quick", "accurate")},
+                "modes": modes, "last_check": last, "result": result, "board_ui": bs, "phone": self.phone_status,
+                "busy": sorted(self._busy), "min_views": calibrate_charuco.MIN_VIEWS,
+                "max_rms": calibrate_charuco.MAX_RMS, "live": live, "simulate": bool(r.simulate),
+                "raw": str(r.calib_raw), "out": str(r.calib_out)}
 
     @pyqtSlot(result=str)
     def calib_state(self):
         return self._answer(self._calib_state)
 
+    def _result(self, mode):
+        """The calibration waiting to be saved (or the one stored) of a mode, as the result step draws it: the
+        verdict, the error of each photo (used, dropped by the 3-times-the-median rule, left out by hand), where on
+        the board the error is, the intrinsics in plain units."""
+        pending = self._pending_cal.get(mode)
+        cal = pending
+        if cal is None:
+            p = self._intrinsics_path(mode)
+            with contextlib.suppress(OSError, ValueError):
+                cal = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+        if not cal:
+            return None
+        used = set(cal.get("per_view_rms_px", {}))
+        dropped, excluded = set(cal.get("dropped", [])), set(cal.get("excluded", []))
+        every = cal.get("per_view_all_px") or cal.get("per_view_rms_px", {})
+        photos = [{"name": k, "err": v, "state": "used" if k in used else "excluded" if k in excluded
+                   else "dropped" if k in dropped else "used"} for k, v in sorted(every.items())]
+        rms = cal["rms_px"]
+        few = cal["n_views"] < calib_guide.limits(self._calib_plan() if self._calib_plan() != "check" else "quick")["min"]
+        verdict = "good" if rms < calibrate_charuco.MAX_RMS and not few else \
+            "fair" if rms < 2 * calibrate_charuco.MAX_RMS else "poor"
+        b = cal.get("board") or {}
+        res = cal.get("residuals")
+        grid = [int(b["squares"][0]) - 1, int(b["squares"][1]) - 1] if b.get("squares") else None
+        return {"saved": pending is None, "date": cal.get("date", ""), "rms_px": rms, "n_views": cal["n_views"],
+                "of": len(every), "few": few, "verdict": verdict, "photos": photos,
+                "limit_px": cal.get("limit_px"), "max_rms": calibrate_charuco.MAX_RMS,
+                "residuals": res, "grid": grid, "plain": calibrate_charuco.plain(cal), "images": cal.get("images", "")}
+
     # ── calibration: the series of photos ───────────────────────────────
     def _series_kind(self):
         """What the photos are for: a calibration, or the session check of the one stored (Advanced)."""
         k = self.prefs["calib_kind"]
-        return k if k in ENOUGH else "calibration"
+        return k if k in ("calibration", "check") else "calibration"
 
     def _series_tag(self):
-        mode = self.prefs["calib_mode"] if self.prefs["calib_mode"] in CALIB_MODES else "photo"
-        return mode if self._series_kind() == "calibration" else "check_" + mode
+        return self._mode() if self._series_kind() == "calibration" else "check_" + self._mode()
 
     def _series(self, folders=None):
         """The folder the photos go to now: the newest of today's for this mode and kind, or None (one is made at the
@@ -1093,22 +1194,22 @@ class Backend(Bridge):
         return self._new_series()
 
     def _series_hold(self):
-        """The board of the series in progress, kept on the monitor while it fits (board_window, hold)."""
+        """The board of the series in progress, kept on the monitor while it fits (screen_board.layout, hold)."""
         f = self._series()
         b = f["board"] if f is not None and f["n"] > 0 else None
         return b if b and b.get("kind") == "screen" and b.get("square_px") else None
 
     @pyqtSlot(str, result=str)
     def calib_set(self, payload):
-        """{mode: photo or video, kind: calibration or check}: what the next photos are for."""
+        """{mode: photo or stream, plan: quick or accurate, kind: calibration or check}."""
         def go():
             c = json.loads(payload)
             if c.get("mode") in CALIB_MODES:
                 self.prefs.set("calib_mode", c["mode"])
-            if c.get("kind") in ENOUGH:
+            if c.get("plan") in ("quick", "accurate"):
+                self.prefs.set("calib_plan", c["plan"])
+            if c.get("kind") in ("calibration", "check"):
                 self.prefs.set("calib_kind", c["kind"])
-            if self._board_win is not None:
-                self._board_win.hold = self._series_hold()
             return self._calib_state()
         return self._answer(go)
 
@@ -1118,56 +1219,209 @@ class Backend(Bridge):
         def go():
             d = self._new_series()
             self._folder_board(d)
-            if self._board_win is not None:
-                self._board_win.hold = None
             return {**self._calib_state(), "folder": d.name}
         return self._answer(go)
 
     @pyqtSlot(result=str)
     def calib_take(self):
-        """A photo from the phone into the series. The board must be on show when it is the one on a monitor."""
+        """The next photo of the plan into the series: a photo from the phone's camera app, or the newest frame of the
+        live stream. The board must be on show when it is the one on this monitor, and the plan not full. The photo
+        is checked as it comes (calib_photo events)."""
         def go():
             st = self._board()
-            if st["kind"] == "screen" and (self._board_win is None or self._board_win.lay is None):
-                return {"error": "board_hidden" if self._board_win is None else "board_small"}
+            if st["kind"] == "screen" and (not self._board_on or self._lay is None):
+                return {"error": "board_small" if self._board_on else "board_hidden"}
+            s = self._calib_state()
+            if s["count"] >= s["limits"]["max"]:
+                return {"error": "calib_full"}
+            if "photo_check" in self._busy:
+                return {"error": "busy"}
+            if self._mode() == "stream" and not (self._live is not None and self._live.running
+                                                 and self._live_for == "calibration"):
+                return {"error": "stream_off"}
             d = self._series_folder()
+            if self._mode() == "stream":
+                return self._grab_into(d)
             return self._shoot_into(d)
         return self._answer(go)
 
-    @pyqtSlot(str, float, result=str)
-    def calib_settings(self, mode, square):
+    def _sim_scene(self):
+        """In simulation the phone photographs the board in use at the next pose of the plan (calib_guide.photo)."""
+        s = self._calib_state()
+        st = self._board()
+        kind = st["kind"]
+        spec = self._guide_board(s["series"] if s["series"] and s["series"]["same"] else None, st["active"])
+        lay = self._lay if kind == "screen" else None
+        tex_kind = {"screen": "screen", "plate": "plate", "sheet": "sheet"}[kind]
+        n = s["count"]
+        size = self.phone().photo_px
+
+        def scene():
+            import cv2
+            img = calib_guide.photo(s["plan"], n, spec, tex_kind, "photo", lay, size=tuple(size))
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        return scene
+
+    def _shoot_into(self, d, check=True):
+        blocked = self._free_camera()
+        if blocked:
+            return blocked
+        self._folder_board(d)
+        phone = self.phone()
+        if self.roots.simulate and check:
+            phone.scene = self._sim_scene()
+
+        def done(path, error):
+            if self.roots.simulate:
+                phone.scene = None
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                return
+            dest = d / Path(path).name
+            if dest.exists():
+                self._emit({"type": "acquire_failed", "key": "calibration", "error": "exists", "message": dest.name})
+                return
+            shutil.move(str(path), str(dest))
+            self._arrived(d, dest, check)
+        ok = self._spawn("phone", lambda: phone.shoot(self.roots.staging / "calibration"), done)
+        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
+
+    def _grab_into(self, d):
+        """The newest frame of the live stream, at its full size, into the series as a PNG (lossless)."""
+        ar = self._live
+        if ar is None or not ar.running or self._live_for != "calibration":
+            return {"error": "stream_off"}
+        img, n = ar.still()
+        if img is None:
+            return {"error": "stream_off"}
+        self._folder_board(d)
+        name = f"frame_{datetime.now():%Y%m%d_%H%M%S}_{n:06d}.png"
+
+        def work():
+            import cv2
+            cv2.imwrite(str(d / name), img)
+            return d / name
+
+        def done(path, error):
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                return
+            self._arrived(d, path, True)
+        ok = self._spawn("phone", work, done)
+        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
+
+    def _arrived(self, d, dest, check=True):
+        """A photo is in the series: checked at once (board found, corners, blur, the same size as the others). One
+        that fails goes aside, to the folder's rejected/, and the page says why; its pose comes again."""
+        if not check:
+            self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name})
+            return
+        args = self._board_args(d)
+        checks = self._photo_checks(d)
+        kept = [p for p in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime)
+                if p.suffix.lower() in IMAGE_SUFFIXES and p != dest and (checks.get(p.name) or {}).get("ok")]
+        size = (checks.get(kept[0].name) or {}).get("size") if kept else None
+
+        def work():
+            board = calibrate_charuco.make_board(args[0], args[1], args[2])
+            return calibrate_charuco.check_photo(dest, board, size)
+
+        def done(res, error):
+            if error is not None:
+                res = {"ok": False, "why": "unreadable", "corners": 0, "of": 0, "blur_px": None, "points": []}
+            res["time"] = datetime.now().isoformat(timespec="seconds")
+            res["mode"] = self._mode()
+            if not res["ok"]:
+                aside = d / REJECTED
+                aside.mkdir(exist_ok=True)
+                with contextlib.suppress(OSError):
+                    shutil.move(str(dest), str(aside / dest.name))
+            allc = self._photo_checks(d)
+            res["seq"] = 1 + max((c.get("seq", 0) for c in allc.values()), default=0)    # the order they came in
+            allc[dest.name] = res
+            (d / PHOTO_CHECKS).write_text(json.dumps(allc, indent=1), encoding="utf-8")
+            self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name,
+                        "check": {k: res.get(k) for k in ("ok", "why", "corners", "of", "blur_px")}})
+        if not self._spawn("photo_check", work, done):
+            self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name})
+
+    @pyqtSlot(result=str)
+    def calib_retake(self):
+        """The last photo kept goes aside after all (the operator knows better): its pose comes again."""
         def go():
-            if mode in CALIB_MODES:
-                self.prefs.set("calib_mode", mode)
-            if 5 <= square <= 100:
-                self.prefs.set("square_mm", round(float(square), 3))
+            f = self._series()
+            if f is None:
+                return {"error": "nothing"}
+            d = Path(f["path"])
+            checks = self._photo_checks(d)
+            kept = [k for k, c in checks.items() if c.get("ok") and (d / k).exists()]
+            if not kept:
+                return {"error": "nothing"}
+            name = max(kept, key=lambda k: (checks[k].get("seq", 0), checks[k].get("time", "")))
+            (d / REJECTED).mkdir(exist_ok=True)
+            shutil.move(str(d / name), str(d / REJECTED / name))
+            checks[name] = {**checks[name], "ok": False, "why": "operator"}
+            (d / PHOTO_CHECKS).write_text(json.dumps(checks, indent=1), encoding="utf-8")
+            return self._calib_state()
+        return self._answer(go)
+
+    @pyqtSlot(bool, result=str)
+    def calib_stream(self, on):
+        """The live stream for a calibration of the streaming mode: on while the Photos step of that mode is open,
+        drawn plain (corners only) and, with the board on this monitor, with the board hidden in the picture."""
+        def go():
+            if not on:
+                if self._live is not None and self._live_for == "calibration":
+                    self._live.stop()
+                self._live_purpose("live")
+                return self._calib_state()
+            ar = self.live()
+            self._live_purpose("calibration")
+            if ar.running:
+                return self._calib_state()
+            if "phone" in self._busy or self.cur.get("recording"):
+                return {"error": "busy"}
+
+            def done(_, error):
+                if error is not None:
+                    self._emit({"type": "live", "action": "failed", **self._err(error, "live_failed")})
+                else:
+                    self._emit({"type": "live", "action": "started", "purpose": "calibration"})
+            if not self._spawn("live", ar.start, done):
+                return {"error": "live_starting"}
             return self._calib_state()
         return self._answer(go)
 
     @pyqtSlot(result=str)
-    def calib_board(self):
+    def calib_board_pdf(self):
+        """The A4 sheet to print (a board one may have instead of the plate), opened."""
         def go():
             with contextlib.redirect_stdout(io.StringIO()):
-                pdf = calibrate_charuco.write_board(self.roots.board, float(self.prefs["square_mm"]))
-            # the PDF itself, not its folder: a folder window opens behind this frameless window
-            if hasattr(os, "startfile"):
-                os.startfile(str(pdf))
-            else:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf)))
-            return self._calib_state()
+                pdf = calibrate_charuco.write_board(self.roots.board, calibrate_charuco.BOARD["square"])
+            self._open(pdf)
+            return {"ok": True}
         return self._answer(go)
 
     @pyqtSlot(str, result=str)
-    def calib_folder_new(self, kind):
-        """Today's folder for calibration photos (photo, video) or for the session check (check_photo...)."""
+    def plate_open(self, what):
+        """The 3D-printed plate: its two-colour print file (3MF, in the slicer) or the folder with its STL."""
         def go():
-            if kind not in CALIB_MODES + tuple("check_" + m for m in CALIB_MODES):
-                return {"error": "bad_value"}
-            d = self.roots.calib_raw / f"{date.today():%Y%m%d}_{kind}"
-            d.mkdir(parents=True, exist_ok=True)
-            self._folder_board(d)
-            return {**self._calib_state(), "folder": d.name}
+            plate = charuco_plate.load()
+            folder = charuco_plate.PLATE_FILE.parent
+            path = folder / plate["files"]["3mf"] if what == "3mf" else folder
+            if not path.exists():
+                return {"error": "not_found", "message": path.name}
+            self._open(path)
+            return {"ok": True}
         return self._answer(go)
+
+    @staticmethod
+    def _open(path):
+        """A file or a folder opened by Windows (the file itself: a folder window opens behind this frameless one)."""
+        if hasattr(os, "startfile"):
+            os.startfile(str(path))
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _folder_board(self, d):
         """board.json in a photo folder: the active board, written while the folder has no photos (so it is the
@@ -1176,6 +1430,8 @@ class Backend(Bridge):
         if p.exists() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in d.iterdir()):
             return
         a = self._board()["active"]
+        if not a:
+            return
         p.write_text(json.dumps({**a, "written": datetime.now().isoformat(timespec="seconds")}, indent=1),
                      encoding="utf-8")
 
@@ -1195,33 +1451,24 @@ class Backend(Bridge):
 
     @pyqtSlot(str, result=str)
     def calib_shoot(self, name):
-        """A photo from the phone into a folder chosen by name, under the name the phone gave it."""
-        return self._answer(lambda: self._shoot_into(self._calib_dir(name)))
+        """A photo from the phone into a folder chosen by name, under the name the phone gave it (not checked)."""
+        return self._answer(lambda: self._shoot_into(self._calib_dir(name), check=False))
 
-    def _shoot_into(self, d):
-        blocked = self._free_camera()
-        if blocked:
-            return blocked
-        self._folder_board(d)
-
-        def done(path, error):
-            if error is not None:
-                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
-                return
-            dest = d / Path(path).name
-            if dest.exists():
-                self._emit({"type": "acquire_failed", "key": "calibration", "error": "exists", "message": dest.name})
-                return
-            shutil.move(str(path), str(dest))
-            if self._board_win is not None:
-                self._board_win.hold = self._series_hold()     # the board of these photos stays while it fits
-            self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name})
-        ok = self._spawn("phone", lambda: self.phone().shoot(self.roots.staging / "calibration"), done)
-        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
+    @pyqtSlot(str, result=str)
+    def calib_folder_new(self, kind):
+        """Today's folder for calibration photos (photo, stream) or for the session check (check_photo...)."""
+        def go():
+            if kind not in CALIB_MODES + tuple("check_" + m for m in CALIB_MODES):
+                return {"error": "bad_value"}
+            d = self.roots.calib_raw / f"{date.today():%Y%m%d}_{kind}"
+            d.mkdir(parents=True, exist_ok=True)
+            self._folder_board(d)
+            return {**self._calib_state(), "folder": d.name}
+        return self._answer(go)
 
     @pyqtSlot(str, result=str)
     def calib_import(self, name):
-        """Photo files added to a folder by name, or to the series (name empty)."""
+        """Photo files added to a folder by name, or to the series (name empty), each checked as a photo taken."""
         def go():
             d = self._calib_dir(name) if name else self._series_folder()
             pattern = " ".join("*" + s for s in IMAGE_SUFFIXES)
@@ -1236,7 +1483,51 @@ class Backend(Bridge):
                     continue
                 shutil.copy2(p, dest)
                 added += 1
+            if added and not name:
+                self._check_all(d)
             return {**self._calib_state(), "added": added, "skipped": skipped}
+        return self._answer(go)
+
+    def _check_all(self, d):
+        """The photos of a folder that have no check yet, checked one after the other (files added by hand)."""
+        args = self._board_args(d)
+        todo = [p for p in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime)
+                if p.suffix.lower() in IMAGE_SUFFIXES and p.name not in self._photo_checks(d)]
+
+        def work():
+            board = calibrate_charuco.make_board(args[0], args[1], args[2])
+            out, size = {}, None
+            for p in todo:
+                r = calibrate_charuco.check_photo(p, board, size)
+                if r["ok"] and size is None:
+                    size = r["size"]
+                out[p.name] = r
+            return out
+
+        def done(res, error):
+            if error is not None or not res:
+                return
+            allc = self._photo_checks(d)
+            for name, r in res.items():
+                r["time"] = datetime.now().isoformat(timespec="seconds")
+                r["seq"] = 1 + max((c.get("seq", 0) for c in allc.values()), default=0)
+                allc[name] = r
+                if not r["ok"]:
+                    (d / REJECTED).mkdir(exist_ok=True)
+                    with contextlib.suppress(OSError):
+                        shutil.move(str(d / name), str(d / REJECTED / name))
+            (d / PHOTO_CHECKS).write_text(json.dumps(allc, indent=1), encoding="utf-8")
+            self._emit({"type": "calib_photo", "folder": d.name, "name": ""})
+        self._spawn("photo_check", work, done)
+
+    @pyqtSlot(result=str)
+    def calib_open(self):
+        def go():
+            f = self._series()
+            if f is None:
+                return {"error": "nothing"}
+            QDesktopServices.openUrl(QUrl.fromLocalFile(f["path"]))
+            return {"ok": True}
         return self._answer(go)
 
     @staticmethod
@@ -1246,21 +1537,25 @@ class Backend(Bridge):
             result = fn()
         return result, buf.getvalue()
 
-    @pyqtSlot(str, str, result=str)
-    def calib_run(self, name, mode):
-        """Calibrates the camera mode on the photos of the folder; the result waits for calib_save."""
+    @pyqtSlot(str, result=str)
+    def calib_run(self, exclude):
+        """Calibrates the camera mode on the photos of the series, leaving out those named in exclude (a JSON list);
+        the result waits for calib_save."""
         def go():
-            d = self._calib_dir(name)
-            active = self._board()["active"]
+            f = self._series()
+            if f is None or not f["n"]:
+                return {"error": "nothing"}
+            d, mode = Path(f["path"]), self._mode()
+            leave = [str(x) for x in json.loads(exclude or "[]")]
 
             def work():
-                board = calibrate_charuco.folder_board(d) or (active["square_mm"], active["squares"],
-                                                             active["marker_mm"])
-                return self._captured(lambda: calibrate_charuco.run_calibrate(d, None, None, *board))
+                board = self._board_args(d)
+                return self._captured(lambda: calibrate_charuco.run_calibrate(d, None, None, *board, exclude=leave))
 
             def done(result, error):
                 if error is not None:
-                    self._emit({"type": "calib", "action": "calibrate", "mode": mode, "ok": False, **self._err(error, "calibration")})
+                    self._emit({"type": "calib", "action": "calibrate", "mode": mode, "ok": False,
+                                **self._err(error, "calibration")})
                     return
                 cal, log = result
                 self._pending_cal[mode] = cal
@@ -1270,9 +1565,10 @@ class Backend(Bridge):
             return {"ok": ok} if ok else {"error": "busy"}
         return self._answer(go)
 
-    @pyqtSlot(str, result=str)
-    def calib_save(self, mode):
+    @pyqtSlot(result=str)
+    def calib_save(self):
         def go():
+            mode = self._mode()
             cal = self._pending_cal.pop(mode, None)
             if cal is None:
                 return {"error": "nothing"}
@@ -1282,28 +1578,30 @@ class Backend(Bridge):
             return self._calib_state()
         return self._answer(go)
 
-    @pyqtSlot(str, str, result=str)
-    def calib_check(self, name, mode):
-        """Start-of-session check of the stored intrinsics on the photos of the folder."""
+    @pyqtSlot(result=str)
+    def calib_check(self):
+        """Start-of-session check of the stored intrinsics on the photos of the series."""
         def go():
-            d = self._calib_dir(name)
+            f = self._series()
+            mode = self._mode()
+            if f is None or not f["n"]:
+                return {"error": "nothing"}
+            d = Path(f["path"])
             intr = self._intrinsics_path(mode)
             if not intr.exists():
                 return {"error": "no_intrinsics", "message": mode}
-            active = self._board()["active"]
 
             def work():
-                board = calibrate_charuco.folder_board(d) or (active["square_mm"], active["squares"],
-                                                             active["marker_mm"])
-                return self._captured(lambda: calibrate_charuco.run_check(d, intr, *board))
+                return self._captured(lambda: calibrate_charuco.run_check(d, intr, *self._board_args(d)))
 
             def done(result, error):
                 if error is not None:
-                    self._emit({"type": "calib", "action": "check", "mode": mode, "ok": False, **self._err(error, "check")})
+                    self._emit({"type": "calib", "action": "check", "mode": mode, "ok": False,
+                                **self._err(error, "check")})
                     return
                 (ok, report), log = result
                 p = report["params"]
-                line = {"time": datetime.now().isoformat(timespec="seconds"), "mode": mode, "folder": name,
+                line = {"time": datetime.now().isoformat(timespec="seconds"), "mode": mode, "folder": d.name,
                         "ok": int(ok), "n_views": report["n_views"], "rms_stored_px": report["rms_stored_px"],
                         **{f"{k}_change": p[k]["change"] for k in ("fx", "fy", "cx", "cy")}}
                 trials.write_csv(self._checks_path(), trials.read_csv(self._checks_path()) + [line], CHECK_FIELDS)
@@ -1312,7 +1610,14 @@ class Backend(Bridge):
             return {"ok": started} if started else {"error": "busy"}
         return self._answer(go)
 
-    # ── the calibration board: on a monitor (the default) or printed ─────
+    # ── the calibration board: on this monitor, in the page; or physical ─
+    # On the monitor the board is drawn by the page itself, in the work area of the step that shows it (a canvas of
+    # the page, ui/15-board.js): the page tells the area's size in its device pixels (board_area), which on a window
+    # whose page is not scaled are the monitor's own pixels; the board is laid out for them at the pitch of the
+    # monitor the window is on (screen_board), and drawn one image pixel on one screen pixel. It is laid out again
+    # when the area changes (the window resized, the step changed) or the window goes to another monitor; nothing
+    # moves or resizes the window. The physical boards: the 3D-printed plate (charuco_plate.py, its 3D model shown
+    # by the page) and a printed A4 sheet, each with its length measured three times.
     def _screens(self):
         """([monitor of screen_board.monitors], {key: QScreen}): what Qt and Windows say of each monitor now, with
         this computer's ruler checks. Windows is asked again only when Qt's screens change."""
@@ -1325,70 +1630,110 @@ class Backend(Bridge):
         mons = screen_board.monitors(qt, self._win_mons[1], self.prefs["monitors"])
         return mons, {m["key"]: sc for m, sc in zip(mons, screens)}
 
-    def _monitor_of(self, device):
-        """The monitor (screen_board.monitors, with its ruler check) of a device name: the board window asks it each
-        time it is laid out, so a ruler check or a monitor changed is taken at once."""
-        mons, _ = self._screens()
-        return next((m for m in mons if m["device"] == device), None)
-
     def _app_screen(self):
         """The screen the app's window is on (the main one without a window: the tests)."""
         app = QApplication.instance()
         sc = self.window.screen() if self.window is not None else None
         return sc or (app.primaryScreen() if app is not None else None)
 
-    def _split(self):
-        """The board's share of the monitor's width beside the app, as the operator last left it."""
-        try:
-            return min(0.8, max(0.2, float(self.prefs["board"].get("split", 0.5))))
-        except (TypeError, ValueError):
-            return 0.5
+    def _app_monitor(self):
+        """The monitor (screen_board.monitors) the app's window is on."""
+        mons, _ = self._screens()
+        sc = self._app_screen()
+        dev = sc.name() if sc is not None else ""
+        return next((m for m in mons if m["device"] == dev), None) or (mons[0] if mons else None)
 
-    def _beside_rect(self, screen):
-        """Where the board goes beside the app before the dock places it: the right share of the work area."""
-        g = screen.availableGeometry()
-        bw = round(g.width() * self._split())
-        return QRect(g.x() + g.width() - bw, g.y(), bw, g.height())
+    def _watch_screen(self):
+        """The page is told when the window goes to another monitor or its monitor changes (resolution, scaling):
+        the board is laid out again for it."""
+        if self.window is None or self._screen_watch:
+            return
+        self._screen_watch = True
+
+        def moved(*_):
+            sc = self._app_screen()
+            if sc is not None and sc is not self._watched_screen:
+                for sig in (getattr(self._watched_screen, "geometryChanged", None),
+                            getattr(self._watched_screen, "physicalDotsPerInchChanged", None)):
+                    with contextlib.suppress(TypeError, RuntimeError, AttributeError):
+                        sig.disconnect(moved)
+                self._watched_screen = sc
+                sc.geometryChanged.connect(moved)
+                sc.physicalDotsPerInchChanged.connect(moved)
+            self._emit({"type": "board", "action": "screen"})
+        self.window.screenChanged.connect(moved)
+        sc = self._app_screen()
+        if sc is not None:
+            self._watched_screen = sc
+            sc.geometryChanged.connect(moved)
+            sc.physicalDotsPerInchChanged.connect(moved)
+
+    def _kind(self):
+        k = self.prefs["board"].get("kind")
+        return k if k in BOARD_KINDS else "screen"
+
+    @staticmethod
+    def _sheet_reading(values):
+        """The A4 sheet's long side as measured: mean, spread and problems (as charuco_plate.reading)."""
+        v = [float(x) for x in values]
+        nominal = calibrate_charuco.BOARD["squares"][0] * calibrate_charuco.BOARD["square"]
+        mean, spread = sum(v) / len(v), max(v) - min(v)
+        problems = []
+        if len(v) < charuco_plate.MIN_READINGS:
+            problems.append("few_readings")
+        if spread > SHEET_SPREAD_MAX:
+            problems.append("spread")
+        if abs(mean / nominal - 1) > SHEET_NOMINAL_TOL:
+            problems.append("off_nominal")
+        return {"which": "long", "mean_mm": round(mean, 3), "spread_mm": round(spread, 3), "n": len(v),
+                "nominal_mm": nominal, "scale": mean / nominal, "problems": problems}
+
+    def _physical(self):
+        """The plate and the sheet: their nominal sizes, what to measure, the readings typed, and the board each
+        gives (as measured when the readings can be used, else nominal)."""
+        b = self.prefs["board"]
+        out = {}
+        try:
+            plate = charuco_plate.load()
+        except (OSError, ValueError, KeyError):
+            plate = None
+        if plate is not None:
+            pr = b.get("plate") or {}
+            long_r = charuco_plate.reading(pr["long"], "long", plate) if pr.get("long") else None
+            short_r = charuco_plate.reading(pr["short"], "short", plate) if pr.get("short") else None
+            use_long = long_r["mean_mm"] if long_r and not long_r["problems"] else None
+            use_short = short_r["mean_mm"] if short_r and not short_r["problems"] and use_long else None
+            spec = charuco_plate.spec(use_long, use_short, plate)
+            spec["measured"] = use_long is not None
+            out["plate"] = {"board": plate["board"], "plate_mm": plate["plate"]["size_mm"],
+                            "measure": plate["measure"], "files": plate["files"], "readings": pr,
+                            "long": long_r, "short": short_r, "spec": spec, "model": PLATE_MODEL.is_file(),
+                            "min_readings": charuco_plate.MIN_READINGS, "spread_max": charuco_plate.SPREAD_MAX}
+        sr = b.get("sheet") or {}
+        long_s = self._sheet_reading(sr["long"]) if sr.get("long") else None
+        sq = long_s["mean_mm"] / calibrate_charuco.BOARD["squares"][0] if long_s and not long_s["problems"] \
+            else calibrate_charuco.BOARD["square"]
+        spec = {"kind": "sheet", **calibrate_charuco.board_spec(calibrate_charuco.make_board(sq)),
+                "measured": bool(long_s and not long_s["problems"])}
+        out["sheet"] = {"squares": list(calibrate_charuco.BOARD["squares"]), "square_mm": calibrate_charuco.BOARD["square"],
+                        "nominal_mm": calibrate_charuco.BOARD["squares"][0] * calibrate_charuco.BOARD["square"],
+                        "readings": sr, "long": long_s, "spec": spec, "min_readings": charuco_plate.MIN_READINGS,
+                        "spread_max": SHEET_SPREAD_MAX}
+        return out
 
     def _board(self):
-        """The board as it stands: kind; where it goes on a monitor (full screen on another monitor, or beside the app
-        on the app's own) with its layout there, the real one while it is shown; the printed board; and the active
-        board, what the Calibration and Live AR modules use."""
-        mons, screens = self._screens()
-        b = self.prefs["board"]
-        kind = b.get("kind") if b.get("kind") in BOARD_KINDS else "screen"
-        place = b.get("place") if b.get("place") in BOARD_PLACES else "auto"
-        app_sc = self._app_screen()
-        app_dev = app_sc.name() if app_sc is not None else ""
-        others = [m for m in mons if m["device"] != app_dev]
-        if place == "auto":
-            place = "full" if others else "beside"
-        if place == "full":
-            mon = next((m for m in mons if m["key"] == b.get("monitor")), None) or next(
-                (m for m in mons if m["key"] == screen_board.default_monitor(others or mons)), None)
+        """The board as it stands: its kind, the monitor the window is on with the layout the page shows (while it
+        does), the physical boards, and the active board, what the calibration and the live AR use."""
+        kind = self._kind()
+        mon = self._app_monitor()
+        phys = self._physical()
+        screen = screen_board.spec(self._lay, self._lay_mon or mon) if self._lay else None
+        if kind == "screen":
+            active = screen
         else:
-            mon = next((m for m in mons if m["device"] == app_dev), None) or (mons[0] if mons else None)
-        win = self._board_win
-        lay, error = None, ""
-        if win is not None:
-            lay, error, mon = win.lay, win.error, win.mon or mon
-        elif mon is not None:
-            sc = screens.get(mon["key"])
-            if place == "full" or sc is None:
-                px = mon["px"]
-            else:
-                r, dpr = self._beside_rect(sc), float(sc.devicePixelRatio())
-                px = (int(round(r.width() * dpr)), int(round(r.height() * dpr)))
-            try:
-                lay = screen_board.layout(px, mon["pitch_mm"] or GUESS_PITCH)
-            except ValueError:
-                error = "too_small"
-        screen = screen_board.spec(lay, mon) if lay else None
-        printed = {"kind": "printed",
-                   **calibrate_charuco.board_spec(calibrate_charuco.make_board(float(self.prefs["square_mm"])))}
-        active = screen if kind == "screen" and screen else printed
-        return {"kind": kind, "place": place, "mons": mons, "screens": screens, "mon": mon, "lay": lay,
-                "error": error, "printed": printed, "active": active, "others": bool(others)}
+            active = phys.get(kind, phys["sheet"])["spec"]
+        return {"kind": kind, "mon": self._lay_mon or mon, "lay": self._lay, "problem": self._lay_err,
+                "physical": phys, "active": active}
 
     def _board_state(self):
         st = self._board()
@@ -1396,20 +1741,16 @@ class Backend(Bridge):
         view = None
         if lay:
             view = {k: lay[k] for k in ("squares", "square_px", "marker_px", "square_mm", "marker_mm", "width_mm",
-                                        "height_mm", "pitch_mm")}
+                                        "height_mm", "pitch_mm", "origin_px", "size_px", "line_y")}
             view["width_u_mm"] = lay["width_mm"] * ((mon or {}).get("rel_u") or 0.0)
         keys = ("key", "label", "device", "primary", "px", "native", "is_native", "dpr", "diag_in", "pitch_mm",
                 "pitch_data_mm", "rel_u", "source", "sources", "agree", "spread", "ruler")
-        win = self._board_win
-        return {"kind": st["kind"], "place": self.prefs["board"].get("place", "auto"), "placed": st["place"],
-                "others": st["others"], "monitors": [{k: m[k] for k in keys} for m in st["mons"]],
-                "monitor": mon["key"] if mon else "", "mon": {k: mon[k] for k in keys} if mon else None,
-                "layout": view, "error": st["error"], "printed": st["printed"], "active": st["active"],
-                "shown": win is not None, "shown_on": win.key if win is not None else "",
-                "docked": bool(self._dock is not None and self._dock.docked),
-                "held": bool(win is not None and win.hold and win.lay
-                              and win.lay["square_px"] == win.hold.get("square_px")
-                              and list(win.lay["squares"]) == list(win.hold.get("squares") or []))}
+        b = self.prefs["board"]
+        return {"kind": st["kind"], "chosen": bool(b.get("chosen")), "mon": {k: mon[k] for k in keys} if mon else None,
+                "layout": view, "problem": st["problem"], "physical": st["physical"], "active": st["active"],
+                "shown": self._board_on, "exact": self._lay_exact,
+                "held": bool(self._lay and self._series_hold()
+                             and self._lay["square_px"] == self._series_hold().get("square_px"))}
 
     @pyqtSlot(result=str)
     def board_state(self):
@@ -1421,31 +1762,26 @@ class Backend(Bridge):
 
     @pyqtSlot(str, result=str)
     def board_set(self, payload):
-        """{kind, place (auto, beside, full), monitor (full screen on that one), dock (the board shown in a window
-        docked beside the app again), printed_mm (the printed board's long side as measured), ruler_mm (the length
-        between the arrows of the board on a monitor, as a ruler reads it), forget (the ruler check of that
-        monitor)}."""
+        """{kind (screen, plate, sheet; the first question answered), plate_long, plate_short, sheet_long (the
+        readings typed, mm, a list each), ruler_mm (the length between the lines above the board on the monitor, as a
+        ruler reads it), forget (the ruler check of this monitor)}."""
         def go():
             c = json.loads(payload)
             b = dict(self.prefs["board"])
-            again = False
             if c.get("kind") in BOARD_KINDS:
-                b["kind"] = c["kind"]
-            if c.get("place") in BOARD_PLACES and c["place"] != b.get("place"):
-                b["place"], again = c["place"], True
-            if c.get("monitor") and c["monitor"] != b.get("monitor"):
-                b["monitor"], b["place"], again = str(c["monitor"]), "full", True
+                b["kind"], b["chosen"] = c["kind"], True
+            for key, part, which in (("plate_long", "plate", "long"), ("plate_short", "plate", "short"),
+                                     ("sheet_long", "sheet", "long")):
+                if key in c:
+                    vals = [float(x) for x in (c[key] or []) if x not in (None, "") and float(x) > 0]
+                    if any(not 20 <= v <= 1000 for v in vals):
+                        return {"error": "bad_value", "message": ""}
+                    b[part] = {**(b.get(part) or {}), which: vals}
             self.prefs.set("board", b)
-            if c.get("printed_mm") is not None:
-                sq = float(c["printed_mm"]) / calibrate_charuco.BOARD["squares"][0]
-                if not 5 <= sq <= 100:
-                    return {"error": "bad_value", "message": str(c["printed_mm"])}
-                self.prefs.set("square_mm", round(sq, 3))
             if c.get("ruler_mm") is not None or c.get("forget"):
-                st = self._board()
-                mon, lay = st["mon"], st["lay"]
+                mon, lay = self._lay_mon or self._app_monitor(), self._lay
                 if mon is None or lay is None:
-                    return {"error": "no_monitor"}
+                    return {"error": "board_hidden"}
                 checks = dict(self.prefs["monitors"])
                 if c.get("forget"):
                     checks.pop(mon["key"], None)
@@ -1461,133 +1797,121 @@ class Backend(Bridge):
                                           "expected_mm": round(lay["width_mm"], 2),
                                           "date": datetime.now().isoformat(timespec="seconds")}
                 self.prefs.set("monitors", checks)
-                if self._board_win is not None:
-                    self._board_win.relayout()       # the same window, the board in the new millimetres
-            if self._board_win is not None:
-                if b["kind"] != "screen":
-                    self._hide_board()
-                elif again or (c.get("dock") and not self._board_win.full):
-                    self._hide_board()                  # another place or monitor, or docked again
-                    self._show_board(self._board())
+                if self._area is not None:
+                    self._relay()                      # the same area, the board in the new millimetres
             self._sync_live()
             return self._board_state()
         return self._answer(go)
 
-    def _board_words(self):
-        words = {}
-        for code in ("en", self.lang):
-            with contextlib.suppress(OSError, ValueError):
-                words.update(json.loads((APP / "ui" / "strings" / f"{code}.json").read_text(encoding="utf-8")))
-        return {"title": words.get("board.window.title", "ImpactGuide"),
-                "measure": words.get("board.window.measure", "{0} mm"), "info": words.get("board.window.info", ""),
-                "small": words.get("board.window.small", ""), "comma": self.lang in COMMA_LANGS}
-
-    def _min_board(self, mon, screen):
-        """The least size of the board's window, logical pixels: the smallest board at that monitor's pitch."""
-        w, h = screen_board.min_px((mon or {}).get("pitch_mm") or GUESS_PITCH)
-        dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
-        return int(w / dpr) + 2, int(h / dpr) + 2
-
-    def _show_board(self, st):
-        """The board where st (a _board()) puts it, in place of the one on show if any: full screen on its monitor, or
-        in a window docked beside the app (the app makes room for it)."""
-        mon = st["mon"]
-        screen = st["screens"].get(mon["key"]) if mon else None
-        if screen is None:
-            return False
-        self._hide_board()
-        hold = self._series_hold()
-        if st["place"] == "full":
-            win = board_window.BoardWindow(screen, self._monitor_of, self._board_words(), full=True,
-                                           owner=self.window, hold=hold)
+    def _relay(self, area=None):
+        """The board for the page's area (device pixels) at the pitch of the monitor the window is on: the layout,
+        whether the page's pixels are the screen's (exact) and an error (no_monitor, too_small, across)."""
+        c = area or self._area
+        mon = self._app_monitor()
+        lay, err, exact = None, "", True
+        if mon is None:
+            err = "no_monitor"
         else:
-            win = board_window.BoardWindow(screen, self._monitor_of, self._board_words(), full=False,
-                                           rect=self._beside_rect(screen), owner=self.window, hold=hold)
-            if self.window is not None:
-                dock = board_window.Dock(self.window, win, self._split(), min_board=self._min_board(mon, screen))
-                if dock.fits():
-                    self._dock = dock
-                    dock.split_set.connect(self._split_set)
-                    dock.undocked.connect(lambda d=dock: self._emit({"type": "board", "action": "undocked"})
-                                          if self._dock is d else None)
-        win.closed.connect(lambda why, w=win: self._board_closed(w, why))
-        win.relaid.connect(lambda w=win: self._board_relaid(w))
-        self._board_win = win
-        win.show_board()
-        if self._dock is not None:
-            self._dock.dock()
-        return True
+            w, h = int(c["w"]), int(c["h"])
+            scale, inside = self._page_scale(c)
+            exact = abs(scale - 1.0) < 1e-9
+            pitch = (mon["pitch_mm"] or GUESS_PITCH) * scale
+            try:
+                lay = screen_board.layout((w, h), pitch, self._series_hold())
+            except ValueError:
+                err = "too_small"
+            if lay is not None and not inside:
+                err = "across"
+        self._lay, self._lay_err, self._lay_mon, self._lay_exact = lay, err, mon, exact
+        return lay
 
-    def _split_set(self, split):
-        self.prefs.set("board", {**self.prefs["board"], "split": round(float(split), 3)})
+    def _page_scale(self, c):
+        """(how many screen pixels one device pixel of the page is, whether the area lies on one monitor): the
+        page's device pixels against the window's client area in physical pixels, from Windows. 1 and True off
+        Windows (the tests' offscreen window)."""
+        if self.window is None or os.name != "nt" or QApplication.instance().platformName() != "windows":
+            return 1.0, True
+        got = screen_board.window_area(int(self.window.winId()))
+        if not got:
+            return 1.0, True
+        (cx, cy, cw, ch), (mx, my, mw, mh), _ = got
+        iw, dpr = float(c.get("iw") or 0), float(c.get("dpr") or 1)
+        scale = cw / (iw * dpr) if iw > 0 else 1.0
+        if abs(cw - iw * dpr) <= 1.0:          # Chromium rounds the page's width to whole device pixels
+            scale = 1.0
+        x0, y0 = cx + float(c.get("x", 0)) * scale, cy + float(c.get("y", 0)) * scale
+        x1, y1 = x0 + float(c["w"]) * scale, y0 + float(c["h"]) * scale
+        inside = mx - 0.5 <= x0 and y0 >= my - 0.5 and x1 <= mx + mw + 0.5 and y1 <= my + mh + 0.5
+        return scale, inside
 
-    def _hide_board(self):
-        win, self._board_win = self._board_win, None
-        dock, self._dock = self._dock, None
-        if dock is not None:
-            dock.give_back()
-        if win is not None:
-            with contextlib.suppress(TypeError, RuntimeError):
-                win.closed.disconnect()
-            with contextlib.suppress(TypeError, RuntimeError):
-                win.relaid.disconnect()
-            win.close()
-
-    def _screen_removed(self, screen):
-        if self._board_win is not None and self._board_win.screen_ is screen:
-            self._board_win.changed()
-
-    def _board_closed(self, win, why):
-        if self._board_win is win:
-            self._board_win = None
-            dock, self._dock = self._dock, None
-            if dock is not None:
-                dock.give_back()
-            self._emit({"type": "board", "action": "closed", "reason": why})
-
-    def _board_relaid(self, win):
-        """The board on show changed (the window moved, resized, went to another monitor): the live view takes it at
-        once, and the page is told."""
-        if win is not self._board_win:
-            return
-        self._sync_live()
-        self._emit({"type": "board", "action": "relaid", "error": win.error})
-
-    @pyqtSlot(result=str)
-    def board_show(self):
+    @pyqtSlot(str, result=str)
+    def board_area(self, payload):
+        """The page's area for the board: {w, h (device pixels; 0 when no step shows it), dpr, x, y (its corner in
+        the page, device pixels), iw (the page's width, CSS pixels), have (the key of the board the page has)}.
+        Answers the layout and, when the page's board is not this one, the image to draw (PNG, one pixel per device
+        pixel), with its key."""
         def go():
-            st = self._board()
-            if st["kind"] != "screen":
-                self.prefs.set("board", {**self.prefs["board"], "kind": "screen"})
-                st = self._board()
-            if not self._show_board(st):
-                return {"error": "no_monitor"}
-            self._sync_live()
-            return self._board_state()
-        return self._answer(go)
-
-    @pyqtSlot(result=str)
-    def board_hide(self):
-        def go():
-            self._hide_board()
-            return self._board_state()
+            import cv2
+            c = json.loads(payload)
+            self._watch_screen()
+            if not c.get("w") or not c.get("h"):
+                self._board_on = False
+                return {"shown": False}
+            self._area = c
+            self._board_on = True
+            before = self._live_board()
+            lay = self._relay(c)
+            if self._live_board() != before:
+                self._sync_live()
+            out = {"shown": True, "problem": self._lay_err, "exact": self._lay_exact, "state": self._board_state()}
+            if lay is None:
+                out["key"] = ""
+                return out
+            key = (f"{lay['size_px'][0]}x{lay['size_px'][1]}:{lay['origin_px'][0]},{lay['origin_px'][1]}:"
+                   f"{lay['squares'][0]}x{lay['squares'][1]}:{lay['square_px']}:{lay['marker_px']}")
+            out["key"] = key
+            if key != c.get("have"):
+                img = screen_board.render(lay)
+                self._board_img = img
+                ok, png = cv2.imencode(".png", img)
+                out["png"] = "data:image/png;base64," + base64.b64encode(png.tobytes()).decode("ascii")
+            return out
         return self._answer(go)
 
     def _live_board(self):
-        """The calibration board as live_ar wants it: the layout of the one on a monitor, None for the A4 one."""
+        """The calibration board as live_ar wants it, and whether to hide it in the picture: the board on this
+        monitor is drawn beside the live view on the same screen."""
         a = self._board()["active"]
-        screen = a["kind"] == "screen"
-        return {"square_mm": float(a["square_mm"]), "squares": list(a["squares"]) if screen else None,
-                "marker_mm": float(a["marker_mm"]) if screen else None}
+        if not a:
+            return {"square_mm": calibrate_charuco.BOARD["square"], "squares": None, "marker_mm": None,
+                    "hide_board": False}
+        return {"square_mm": float(a["square_mm"]), "squares": list(a["squares"]), "marker_mm": float(a["marker_mm"]),
+                "hide_board": a.get("kind") == "screen"}
 
     def _sync_live(self):
         """The live view, if made, on the board as it is now."""
         if self._live is None:
             return
         lb = self._live_board()
+        if self._live_for == "live" and self.prefs["live"]["board"] != "sheet":
+            lb["hide_board"] = False
         now = self._live.settings()
         if any(now.get(k) != v for k, v in lb.items()):
             self._live.configure(**lb)
+
+    def _live_purpose(self, purpose):
+        """The live AR for the live view (the operator's layers) or for a calibration of the streaming mode (the
+        calibration board, the corners only)."""
+        if self._live is None:
+            return
+        self._live_for = purpose
+        if purpose == "calibration":
+            self._live.configure(board="sheet", face=False, mandible=False, axes=True)
+        else:
+            p = self.prefs["live"]
+            self._live.configure(board=p["board"] if p["board"] in live_ar.BOARDS else "sheet", face=p["face"],
+                                 mandible=p["mandible"], axes=p["axes"])
+        self._sync_live()
 
     # ── live AR ──────────────────────────────────────────────────────────
     def live(self):
@@ -1603,7 +1927,7 @@ class Backend(Bridge):
                                         opacity=self._opacity(p.get("opacity")),
                                         intrinsics=self.roots.calib_out / "intrinsics_stream.json",
                                         synthetic=bool(self.roots.simulate), colors=live_colors(),
-                                        replay=self.replay)
+                                        replay=self.replay, hide_board=lb["hide_board"] and p["board"] == "sheet")
             self._live_server = live_ar.MjpegServer(self._live)
         return self._live
 
@@ -1619,7 +1943,7 @@ class Backend(Bridge):
 
     def _live_state(self):
         self.live()
-        self._sync_live()       # the board changed here, on the Calibration module, or its window moved
+        self._sync_live()       # the board changed here, on the Calibration module, or its area moved
         ar = self._live
         ln = self.link.status()
         return {**ar.status(), "url": self._live_server.url, "prefs": self.prefs["live"], "phone": self.phone_status,
@@ -1638,6 +1962,7 @@ class Backend(Bridge):
         """Closes the camera app and opens the stream in the background; 'live' events say how it went."""
         def go():
             ar = self.live()
+            self._live_purpose("live")
             if ar.running:
                 return self._live_state()
             if "phone" in self._busy or self.cur.get("recording"):
@@ -1682,6 +2007,7 @@ class Backend(Bridge):
                 p[k] = bool(p[k])
             p["opacity"] = self._opacity(p.get("opacity"))
             self.prefs.set("live", p)
+            self._live_for = "live"
             self.live().configure(board=p["board"], face=p["face"], mandible=p["mandible"], axes=p["axes"],
                                   opacity=p["opacity"])
             return self._live_state()
@@ -1715,7 +2041,6 @@ class Backend(Bridge):
     # ── the window is closing ────────────────────────────────────────────
     def shutdown(self):
         self._pump.stop()
-        self._hide_board()
         self._drop_staged()
         self.link.close()
         if self._view is not None:

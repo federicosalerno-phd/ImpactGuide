@@ -1,9 +1,10 @@
 """The calibration board shown on a monitor at a known size (T5.1, T20.3).
 
-Instead of a printed sheet, ImpactGuide shows the ChArUco calibration board full screen on a monitor. Every square is a
-whole number of the monitor's own pixels, drawn without resampling, so the true size follows from the monitor's pixel
-pitch: square (mm) = pixels per square x pitch (mm per pixel). Nothing has to be printed or measured; a ruler check,
-once per monitor, can make the pitch more exact.
+Instead of a printed sheet, ImpactGuide shows the ChArUco calibration board on a monitor, inside its own window: in
+the work area of the page, laid out for the pixels of that area. Every square is a whole number of the monitor's own
+pixels, drawn without resampling, so the true size follows from the monitor's pixel pitch: square (mm) = pixels per
+square x pitch (mm per pixel). Nothing has to be printed or measured; a ruler check, once per monitor, can make the
+pitch more exact. window_area tells where a window is on its monitor, in physical pixels.
 
 Same family as the A4 board of calibrate_charuco.py: a cv2.aruco.CharucoBoard with DICT_5X5_100 markers about 3/4 of
 the square, so calibrate_charuco.py, marker_pose.py and live_ar.py find both with the same code. Only the number of
@@ -57,8 +58,8 @@ MAX_MARKERS = 100                                       # DICT_5X5_100
 AREA_TOL = 0.03                                         # boards within 3 % of the largest area count as large
 MARKER_BITS = 7                                         # 5 x 5 bits and a black border of one bit
 MARGIN_MM = 8.0                                         # quiet margin left, right and below the board
-TOP_MM = 20.0                                           # above the board: the dimension line, the words, the button
-MIN_MARGIN_PX, MIN_TOP_PX = 24, 80
+TOP_MM = 14.0                                           # above the board: the dimension line and its length
+MIN_MARGIN_PX, MIN_TOP_PX = 24, 56
 LINE_GAP_MM = 6.0                                       # from the dimension line to the board
 EXT_MM = 2.5                                            # the extension lines go this far past the dimension line
 ARROW_MM = (2.6, 0.9)                                   # arrowhead length and half width
@@ -214,6 +215,38 @@ def qt_screen(screen, primary=False):
             "dpr": float(screen.devicePixelRatio()), "mm": (float(ps.width()), float(ps.height())),
             "manufacturer": screen.manufacturer(), "model": screen.model(), "serial": screen.serialNumber(),
             "primary": bool(primary), "refresh_hz": float(screen.refreshRate())}
+
+
+def window_area(hwnd):
+    """((x, y, w, h) of a window's client area on the desktop, (x, y, w, h) of its monitor, the monitor's device name),
+    all in physical pixels, from Windows; None off Windows or when Windows does not answer. The process is per-monitor
+    aware (Qt 6), so these are the monitor's own pixels."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+    u = ctypes.windll.user32
+    u.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    u.MonitorFromWindow.restype = ctypes.c_void_p
+    u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MonitorInfo)]
+    h = wintypes.HWND(hwnd)
+    rc, pt = wintypes.RECT(), wintypes.POINT(0, 0)
+    if not u.GetClientRect(h, ctypes.byref(rc)) or not u.ClientToScreen(h, ctypes.byref(pt)):
+        return None
+    mi = MonitorInfo()
+    mi.cbSize = ctypes.sizeof(MonitorInfo)
+    if not u.GetMonitorInfoW(u.MonitorFromWindow(h, 2), ctypes.byref(mi)):    # MONITOR_DEFAULTTONEAREST
+        return None
+    m = mi.rcMonitor
+    return ((pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top), (m.left, m.top, m.right - m.left, m.bottom - m.top),
+            mi.szDevice)
 
 
 # ── the pitch ────────────────────────────────────────────────────────────────
@@ -382,10 +415,11 @@ def place(px, pitch_mm, held):
 
 
 def layout(px, pitch_mm, hold=None):
-    """The board for a screen, or a window on it, of px = (w, h) physical pixels at pitch_mm: squares, pixels per
-    square and per marker, where it goes, its true size, and the dimension line above it. With hold (a board already
-    in use, see place) that board is kept, centred, as long as it fits and the pitch is the same: a window moved or
-    resized a little does not change a board that photos have been taken of. Raises ValueError if no board fits."""
+    """The board for a screen, or an area of a page on it, of px = (w, h) physical pixels at pitch_mm: squares,
+    pixels per square and per marker, where it goes, its true size, and the dimension line above it. With hold (a
+    board already in use, see place) that board is kept, centred, as long as it fits and the pitch is the same: an
+    area moved or resized a little does not change a board that photos have been taken of. Raises ValueError if no
+    board fits."""
     kept = place(px, pitch_mm, hold) if hold else None
     if kept:
         return kept
@@ -411,7 +445,7 @@ def layout(px, pitch_mm, hold=None):
 
 def min_px(pitch_mm):
     """The smallest area (w, h) in physical pixels that holds a board at this pitch: MIN_SQUARES of the smallest
-    square, with the margins. A window smaller than this shows no board."""
+    square, with the margins. An area smaller than this shows no board."""
     p = float(pitch_mm)
     s = max(16, math.ceil(SQUARE_MM[0] / p))
     margin = max(MIN_MARGIN_PX, math.ceil(MARGIN_MM / p))
@@ -658,14 +692,14 @@ def test_layouts():
               f"({100 * nx * ny * s * s / (w * h):.0f} % of the screen)")
     expect(not bad, f"layouts: whole pixels, markers of 7k px centred, within margins and the dictionary, "
                     f"{len(cases)} screens ({bad or 'all good'})")
-    # a board in a window beside the app, at any split: the area is the window's, the pitch the monitor's
+    # a board in an area of the app's window, of any size: the area is the page's, the pitch the monitor's
     p = 0.17921
     sizes = [(round(1920 * f), 1032) for f in (0.35, 0.45, 0.5, 0.62)] + [(700, 1300), (1920, 1032)]
     lays = [layout(px, p) for px in sizes]
     ok = all(L["origin_px"][0] + L["squares"][0] * L["square_px"] <= px[0] - L["margin_px"]
              and abs(L["width_mm"] - L["squares"][0] * L["square_px"] * p) < 1e-9 for L, px in zip(lays, sizes))
     expect(ok and len({L["squares"][0] for L in lays}) > 2,
-           "windows of any split and portrait: " + ", ".join(f"{px[0]} x {px[1]} px {L['squares'][0]} x "
+           "areas of the page of any size, upright too: " + ", ".join(f"{px[0]} x {px[1]} px {L['squares'][0]} x "
                                                              f"{L['squares'][1]}" for L, px in zip(lays, sizes)))
     small = min_px(p)
     try:
@@ -674,7 +708,7 @@ def test_layouts():
     except ValueError:
         refused = True
     expect(refused and layout(small, p)["squares"] == list(MIN_SQUARES),
-           f"smallest window that holds a board at {p} mm: {small[0]} x {small[1]} px, 5 x 4 squares; narrower refused")
+           f"smallest area that holds a board at {p} mm: {small[0]} x {small[1]} px, 5 x 4 squares; narrower refused")
     # the board held while it fits: same squares and pixels, centred again; another pitch or too small: laid out anew
     held = layout((960, 1032), p)
     moved = layout((1010, 1040), p, hold=held)
@@ -683,7 +717,7 @@ def test_layouts():
     expect(moved["squares"] == held["squares"] and moved["square_px"] == held["square_px"]
            and moved["origin_px"] != held["origin_px"] and shrunk["squares"] != held["squares"]
            and other["pitch_mm"] != held["pitch_mm"],
-           f"held board: kept when the window grows ({moved['squares']}, centred again), laid out anew when it no "
+           f"held board: kept when the area grows ({moved['squares']}, centred again), laid out anew when it no "
            f"longer fits ({shrunk['squares']}) or the monitor changes")
 
 

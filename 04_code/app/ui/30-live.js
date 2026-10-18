@@ -19,6 +19,7 @@ const LIVE = {
     if (step === 'board') {
       showView('board');
       showPanel('live-board');
+      if (LIVE.state) LIVE.renderBoard(LIVE.state);
     } else {
       showView('live');
       showPanel('live');
@@ -62,7 +63,8 @@ const LIVE = {
     return T(PHONE.link === 'wifi' ? 'live.err.wifi' : 'live.err.generic');
   },
 
-  // the first step: which board, and the card on the stage
+  // the first step: which board; on the stage the calibration board (on this monitor, or physical) or the
+  // patient board's card
   renderBoard: function (s) {
     const sheet = s.prefs.board === 'sheet';
     document.querySelectorAll('#lvBoards .mitem').forEach(function (it) {
@@ -70,15 +72,20 @@ const LIVE = {
     });
     $('lvBd').classList.toggle('hidden', !sheet);
     BOARD.render(s.board_ui);
-    if (!sheet) $('lvBdMore').classList.add('hidden');
+    // the view: the board on this monitor beside the picture (hidden in the picture, so the phone sees it once)
+    const beside = sheet && s.board_ui.kind === 'screen' && STEP.live === 'view';
+    $('bdHostLive').classList.toggle('hidden', !beside);
+    if (STEP.live === 'view') BOARDVIEW.place(beside ? 'bdHostLive' : null);
     if (STEP.live !== 'board') return;
-    if (sheet) { BOARD.card(s.board_ui); return; }
+    $('bdPatient').classList.toggle('hidden', sheet);
+    if (sheet) { BOARD.stage(s.board_ui); return; }
+    ['bdAsk', 'bdSplit', 'bdPhys'].forEach(function (id) { $(id).classList.add('hidden'); });
+    BOARDVIEW.place(null);
     const b = s.board;
     $('bdTitle').textContent = T('live.card.patient');
-    $('bdLine').textContent = T('board.card.line', b.squares[0], b.squares[1], cifre(b.square_mm, b.square_mm % 1 ? 2 : 0),
-                                cifre(b.square_mm * b.squares[0], 0));
+    $('bdLine').textContent = T('live.card.patient.line', b.squares[0], b.squares[1],
+                                cifre(b.square_mm, b.square_mm % 1 ? 2 : 0));
     $('bdHint').textContent = T('live.card.patient.hint');
-    $('bdDot').className = 'live-dot ok';
   },
 
   render: function (s) {
@@ -207,7 +214,8 @@ const LIVE = {
   },
 
   onEvent: function (e) {
-    if (e.type !== 'live') return;
+    // the stream of a calibration in the streaming mode is Calibrate's own (CAL.onEvent): never stopped from here
+    if (e.type !== 'live' || e.purpose === 'calibration') return;
     if (e.action === 'started') {
       work(false);
       if (page === 'live' && STEP.live === 'view') toast(T('live.said.started'));

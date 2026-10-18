@@ -14,6 +14,10 @@ Three threads work on the frames of the stream (live.py), always on the newest o
             and an outline at the opacity asked for (soft edges and shading: no shimmer), board axes and corners on
             request, the picture turned by quarter turns to stand the way the phone is held (the pose stays in the
             sensor's frame), JPEG. It owns the OpenGL context.
+With hide_board (the board on the same monitor as the picture of the live view, as ImpactGuide shows it), the
+board itself is covered in the picture shown, so the phone never films a second board inside the first: on a frame
+with its own pose the board's area (with half a square around it) is filled with a dark flat colour, on a frame
+without one the whole picture is shown blurred and dimmed (nothing in it can be read as a marker).
 So each frame is drawn at the pose found on that same frame, at the rate of the stream; when the computer falls
 behind, frames are skipped, never queued. The overlay comes late by the stream's latency (about 150 ms on the cable)
 plus the processing, but on its own frame. The page's calls (status, configure, next_jpeg) only read or set values;
@@ -56,8 +60,11 @@ For the app:
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
     ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...,
-                 opacity=..., view_rotation=...)     # opacity 0-1 of the overlay's fill and outline (default OPACITY);
-                                                     # view_rotation None (the phone's way up) or 0/90/180/270
+                 opacity=..., view_rotation=..., hide_board=...)
+                                                     # opacity 0-1 of the overlay's fill and outline (default OPACITY);
+                                                     # view_rotation None (the phone's way up) or 0/90/180/270;
+                                                     # hide_board: the board covered in the picture shown
+    ar.still()                                       # the newest frame at full size (BGR), for a calibration
     ar.set_registration(path or None)
     ar.set_tracking(hold_s=..., ...)                 # TRACKING and board_tracker.TRACK overrides
     ar.stop(); ar.shutdown()
@@ -78,7 +85,9 @@ For the app:
                             measuring versions of the live AR on the same frames (bench --replay OUT.h264)
     python live_ar.py test  pose filter; board tracker (board_tracker.py test); synthetic stream: pose against the
                             truth, overlay, light, video rate, a hand over the board, MJPEG; frames of the digital
-                            twin with the true registration; exit 1 on failure
+                            twin with the true registration; the board beside its own live view on one screen
+                            (echo); exit 1 on failure
+    python live_ar.py echo  only the last: the pose with hide_board, and without it
 """
 import argparse
 import json
@@ -124,7 +133,10 @@ JPEG_QUALITY = 80
 OPACITY = 0.3
 SOFT = {"feather_px": 0.8, "smooth_px": 2.0}   # the overlay's edge feathered and its shading blurred (display px)
 STYLE = {"face": {"fill": 0.85, "line": 2.5, "shade": 0.6}, "mandible": {"fill": 0.9, "line": 2.2, "shade": 0.6}}
-COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC"}
+COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC",
+          "hidden": "#16161A"}
+HIDE = {"margin_squares": 0.5, "shrink": 12, "dim": 0.5}   # hide_board: the area around the board, the blur and
+                                                            # dimming of a frame without its own pose
 BOARDS = ("patient", "sheet")
 TRACKING = {
     # temporal filter of the pose (pose_filter.py); the tracking itself is board_tracker.TRACK (set_tracking takes both)
@@ -686,7 +698,7 @@ class LiveAR:
     def __init__(self, board="sheet", square_mm=None, registration=None, face=True, mandible=False, axes=True,
                  intrinsics=STREAM_INTRINSICS, synthetic=False, serial=None, size="1920x1440", fps=30,
                  display_width=DISPLAY_WIDTH, colors=None, log=None, replay=None, replay_truth=None, tracking=None,
-                 script=None, exposure_s=0.0, squares=None, marker_mm=None, opacity=OPACITY):
+                 script=None, exposure_s=0.0, squares=None, marker_mm=None, opacity=OPACITY, hide_board=False):
         if board not in BOARDS:
             raise LiveARError(f"unknown board {board}")
         self.intrinsics_path = Path(intrinsics) if intrinsics else None
@@ -708,7 +720,8 @@ class LiveAR:
                       "marker_mm": float(marker_mm) if marker_mm else None,
                       "registration": str(registration) if registration else "", "face": bool(face),
                       "mandible": bool(mandible), "axes": bool(axes),
-                      "opacity": float(np.clip(opacity, 0.0, 1.0)), "view_rotation": None, "version": 1}
+                      "opacity": float(np.clip(opacity, 0.0, 1.0)), "view_rotation": None,
+                      "hide_board": bool(hide_board), "version": 1}
         self._tracking_version = 1
         self._stream = None
         self._starting = False
@@ -822,8 +835,9 @@ class LiveAR:
     def configure(self, **kw):
         """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
         mandible, axes, opacity (0-1, of the overlay's fill and outline), view_rotation (None: the phone's way up,
-        else 0, 90, 180 or 270 degrees clockwise): applied from the next frame. Only a change of the board starts the
-        tracking again; the layers, the opacity and the rotation do not touch it."""
+        else 0, 90, 180 or 270 degrees clockwise), hide_board (the board covered in the picture shown): applied from
+        the next frame. Only a change of the board starts the tracking again; the layers, the opacity, the rotation and
+        hide_board do not touch it."""
         if kw.get("board") is not None and kw["board"] not in BOARDS:
             raise LiveARError(f"unknown board {kw['board']}")
         if "view_rotation" in kw and kw["view_rotation"] not in (None, 0, 90, 180, 270):
@@ -838,7 +852,7 @@ class LiveAR:
                 self._want["squares"] = [int(n) for n in kw["squares"]] if kw["squares"] else None
             if "marker_mm" in kw:
                 self._want["marker_mm"] = float(kw["marker_mm"]) if kw["marker_mm"] else None
-            for k in ("face", "mandible", "axes"):
+            for k in ("face", "mandible", "axes", "hide_board"):
                 if kw.get(k) is not None:
                     self._want[k] = bool(kw[k])
             if kw.get("opacity") is not None:
@@ -921,6 +935,15 @@ class LiveAR:
     def stream(self):
         return self._stream
 
+    def still(self):
+        """(the newest frame of the stream at its full size as BGR, its counter), or (None, 0) when stopped: what a
+        calibration of the streaming mode keeps."""
+        stream = self._stream
+        item = stream.latest_item() if stream is not None and hasattr(stream, "latest_item") else None
+        if item is None:
+            return None, 0
+        return item.bgr().copy(), item.n
+
     def settings(self):
         """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes, opacity."""
         with self._lock:
@@ -937,6 +960,7 @@ class LiveAR:
                    "synthetic": self.synthetic or self.replay is not None, "replay": self.replay is not None,
                    "renderer": self.renderer,
                    "layers": {k: want[k] for k in ("face", "mandible", "axes")}, "opacity": want["opacity"],
+                   "hide_board": want["hide_board"],
                    "models": {k: k in self._models for k in ("face", "mandible")},
                    "triangles": {k: int(len(f)) for k, (_, f) in self._models.items()},
                    "board": self._spec, "registration": self._setup["registration"], "score": None})
@@ -1270,6 +1294,8 @@ class LiveAR:
             kind = "measured"
         else:
             kind = "fading" if state == "fading" else "holding"
+        if want.get("hide_board"):
+            self._hide(img, T if kind == "measured" else None, Kd, dist, spec)
         t2 = time.perf_counter()
         drawn, masks = {}, {}
         alpha = want["opacity"] * vis
@@ -1316,6 +1342,25 @@ class LiveAR:
                                    "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show,
                                    "size": [w, h], "view": 90 * k})
             self._frame_ready.notify_all()
+
+    def _hide(self, img, T, Kd, dist, spec):
+        """hide_board: the board's area filled with a dark flat colour at the frame's own pose T, or, without one, the
+        whole picture blurred and dimmed, in place."""
+        h, w = img.shape[:2]
+        if T is not None:
+            nx, ny = spec["squares"]
+            sq = spec["square_mm"]
+            m = HIDE["margin_squares"] * sq
+            quad = np.array([[-m, -m, 0], [nx * sq + m, -m, 0], [nx * sq + m, ny * sq + m, 0], [-m, ny * sq + m, 0]],
+                            np.float64)
+            if np.all(marker_pose.transform(T, quad)[:, 2] > 1.0):
+                p = marker_pose.project(quad, T, Kd, dist)
+                if np.all(np.isfinite(p)) and np.all(np.abs(p) < 8 * max(w, h)):
+                    cv2.fillConvexPoly(img, np.round(p * 16).astype(np.int32), self.colors["hidden"], cv2.LINE_AA, 4)
+                    return
+        k = HIDE["shrink"]
+        small = cv2.resize(img, (max(1, w // k), max(1, h // k)), interpolation=cv2.INTER_AREA)
+        img[:] = cv2.convertScaleAbs(cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR), alpha=HIDE["dim"])
 
     def _view_quarter(self, T, setup, want, stream):
         """Quarter turns (clockwise) of the composed frame so that it stands the way the phone is held, as in the
@@ -2068,6 +2113,7 @@ def run_test():
         burst_check(ar, expect)
     finally:
         ar.shutdown()
+    echo_check(expect)
     # no board in view: grey light
     board, spec = make_board("sheet", 24.0)
     K, _, _ = stream_intrinsics((1920, 1440))
@@ -2246,9 +2292,100 @@ def hand_check(ar, expect):
            f"{still.get('jitter_found_px', 0):.3f} px as found, {still.get('jitter_drawn_px', 0):.3f} px drawn")
 
 
+class EchoStream(SyntheticStream):
+    """The board on a monitor beside the live view of itself, as ImpactGuide shows them on one screen: the camera
+    films the monitor, whose video box shows the newest picture the live AR composed (ar.composed()). lay is the
+    board's layout (screen_board) in the canvas at canvas_px of the monitor; box the video box (x, y, w, h), monitor
+    px; the monitor is monitor_px at the layout's pitch, the app's dark around the canvas."""
+
+    def __init__(self, ar, lay, canvas_px, box, monitor_px=(1920, 1080), K=None, size=(1920, 1440), fps=30, seed=3):
+        import screen_board
+        board, spec = make_board("sheet", lay["square_mm"], lay["squares"], lay["marker_mm"])
+        if K is None:
+            K = stream_intrinsics(size)[0]
+        self.ar, self.box = ar, box         # before the thread of SyntheticStream starts drawing
+        mw, mh = monitor_px
+        base = np.full((mh, mw), 22, np.uint8)
+        cx, cy = canvas_px
+        canvas = screen_board.render(lay)
+        base[cy:cy + canvas.shape[0], cx:cx + canvas.shape[1]] = canvas
+        self._base = base
+        p = lay["pitch_mm"]
+        ox, oy = cx + lay["origin_px"][0], cy + lay["origin_px"][1]
+        # texture pixel (i, j) has its centre at ((i + 0.5 - ox) p, (j + 0.5 - oy) p) mm on the board
+        self._S = np.array([[p, 0, (0.5 - ox) * p], [0, p, (0.5 - oy) * p], [0, 0, 1.0]])
+        super().__init__(None, spec, K, size, fps, seed=seed)
+        self._S = np.array([[p, 0, (0.5 - ox) * p], [0, p, (0.5 - oy) * p], [0, 0, 1.0]])
+        self._dist = 340.0
+
+    def _board(self, T):
+        tex = self._base.copy()
+        shown = self.ar.composed() if self.ar is not None else None
+        if shown is not None:
+            x, y, w, h = self.box
+            g = cv2.cvtColor(shown, cv2.COLOR_BGR2GRAY)
+            s = min(w / g.shape[1], h / g.shape[0])
+            gw, gh = max(1, int(g.shape[1] * s)), max(1, int(g.shape[0] * s))
+            x0, y0 = x + (w - gw) // 2, y + (h - gh) // 2
+            tex[y0:y0 + gh, x0:x0 + gw] = cv2.resize(g, (gw, gh), interpolation=cv2.INTER_AREA)
+        img = self._bg.copy()
+        H = self.K @ np.column_stack([T[:3, 0], T[:3, 1], T[:3, 3]]) @ self._S
+        cv2.warpPerspective(tex, H, self.size, dst=img, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT)
+        return img
+
+
+def echo_check(expect, seconds=10.0):
+    """The board on a monitor and the live view of it on the same monitor (one screen, as ImpactGuide shows them):
+    the camera sees the board and, in the video box beside it, the picture of the live view, which shows the board
+    again. With hide_board that second board is covered: the pose stays on the real one, with no jump; without it
+    the second board is there to be found (counted, not required)."""
+    import screen_board
+    lay = screen_board.layout((1000, 760), 0.17921)
+    out = {}
+    for hide in (True, False):
+        ar = LiveAR("sheet", lay["square_mm"], squares=lay["squares"], marker_mm=lay["marker_mm"], face=True,
+                    axes=True, hide_board=hide)
+        try:
+            stream = EchoStream(ar, lay, (60, 160), (1090, 210, 800, 600))
+            ar.attach(stream.wait_first())
+            t0 = time.perf_counter()
+            errs, seen = [], set()
+            while time.perf_counter() - t0 < seconds:
+                time.sleep(0.03)
+                n, T = ar.last_pose()
+                if T is None or n in seen:
+                    continue
+                seen.add(n)
+                Tt = stream.truth(n)
+                if Tt is not None and time.perf_counter() - t0 > 1.5:
+                    e = marker_pose.pose_error(T, Tt)
+                    errs.append((e["rot_deg"], e["trans_mm"]))
+            st = ar.status()
+            errs = np.array(errs).reshape(-1, 2)
+            out[hide] = {"poses": len(errs), "jumps": int(np.sum(errs[:, 1] > 5.0)) if len(errs) else -1,
+                         "max_mm": float(errs[:, 1].max()) if len(errs) else float("nan"),
+                         "max_deg": float(errs[:, 0].max()) if len(errs) else float("nan"),
+                         "fps": st.get("fps_ar", 0), "tracked": st.get("tracked")}
+            if hide:
+                shot = ar.composed()
+                if shot is not None:
+                    WORK.joinpath("live_engine").mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(WORK / "live_engine" / "echo_hidden.jpg"), shot)
+                    cv2.imwrite(str(WORK / "live_engine" / "echo_camera.jpg"), stream.latest()[0])
+        finally:
+            ar.shutdown()
+            stream.close()
+    h, o = out[True], out[False]
+    expect(h["poses"] > 100 and h["jumps"] == 0 and h["max_mm"] < 3.0 and h["max_deg"] < 0.5 and h["fps"] > 15,
+           f"board and its live view on one screen, hide_board: {h['poses']} poses, {h['jumps']} off by more than "
+           f"5 mm, at most {h['max_mm']:.2f} mm and {h['max_deg']:.2f} deg from the truth, {h['fps']} fps; without it "
+           f"{o['poses']} poses, {o['jumps']} off by more than 5 mm, at most {o['max_mm']:.1f} mm")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["view", "test", "bench", "clip"])
+    ap.add_argument("command", choices=["view", "test", "bench", "clip", "echo"])
     ap.add_argument("out", nargs="?", help="clip: the file to write (OUT.h264, OUT_times.npy, OUT_truth.npz)")
     ap.add_argument("--board", choices=BOARDS, default="sheet")
     ap.add_argument("--square", type=float, default=None, help="square of the calibration board, mm (the A4 "
@@ -2273,6 +2410,11 @@ def main():
     a = ap.parse_args()
     if a.command == "test":
         sys.exit(run_test())
+    if a.command == "echo":
+        fails = []
+        echo_check(lambda ok, what: (print(("ok    " if ok else "FAIL  ") + what, flush=True),
+                                     None if ok else fails.append(what)))
+        sys.exit(1 if fails else 0)
     if a.command == "clip":
         if not a.out:
             ap.error("clip needs OUT")

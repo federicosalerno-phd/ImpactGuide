@@ -309,30 +309,188 @@ def solve(views, size):
     obj = [v[0] for v in views.values()]
     img = [v[1] for v in views.values()]
     crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 200, 1e-12)
-    rms, K, dist, _, _, std, _, per_view = cv2.calibrateCameraExtended(obj, img, size, None, None, criteria=crit)
-    return rms, K, dist.ravel(), std.ravel(), dict(zip(views, per_view.ravel()))
+    rms, K, dist, rvecs, tvecs, std, _, per_view = cv2.calibrateCameraExtended(obj, img, size, None, None,
+                                                                              criteria=crit)
+    return (rms, K, dist.ravel(), std.ravel(), dict(zip(views, per_view.ravel())),
+            dict(zip(views, zip(rvecs, tvecs))))
 
 
-def calibrate(views, size):
-    """Calibrate, drop the views with an error above 3 times the median, calibrate again."""
-    if len(views) < MIN_VIEWS:
-        sys.exit(f"only {len(views)} usable photos, at least {MIN_VIEWS} needed")
-    rms, K, dist, std, per_view = solve(views, size)
+def view_rms(view, K, dist, pose=None):
+    """(RMS in px, residuals N x 2) of one view under a camera model, at its pose (rvec, tvec) or at the one PnP finds."""
+    obj, img = view
+    if pose is None:
+        _, rvec, tvec = cv2.solvePnP(obj, img, K, dist)
+        pose = (rvec, tvec)
+    proj = cv2.projectPoints(obj, pose[0], pose[1], K, dist)[0].reshape(-1, 2)
+    r = proj - img.reshape(-1, 2)
+    return float(np.sqrt(np.mean(np.sum(r ** 2, 1)))), r
+
+
+def corner_residuals(views, poses, K, dist, square):
+    """Where on the board the model misses: for each inner corner (i, j) of the chessboard, the RMS of its
+    reprojection error over the views that see it, how many do, and its mean error vector (px)."""
+    acc = {}
+    for name, view in views.items():
+        _, r = view_rms(view, K, dist, poses.get(name))
+        ij = np.rint(view[0].reshape(-1, 3)[:, :2] / square).astype(int) - 1
+        for (i, j), e in zip(ij, r):
+            acc.setdefault((int(i), int(j)), []).append(e)
+    rows, mags = [], []
+    for (i, j), es in sorted(acc.items()):
+        es = np.asarray(es)
+        m = float(np.sqrt(np.mean(np.sum(es ** 2, 1))))
+        mags.append(m)
+        mx, my = es.mean(0)
+        rows.append([i, j, round(m, 4), len(es), round(float(mx), 4), round(float(my), 4)])
+    return {"corners": rows, "max_px": round(float(max(mags)), 4) if mags else 0.0,
+            "p95_px": round(float(np.percentile(mags, 95)), 4) if mags else 0.0}
+
+
+def calibrate(views, size, exclude=(), square=None):
+    """Calibrate on the views but the excluded ones (chosen by hand), drop the views with an error above 3 times the
+    median, calibrate again. With square (mm), where on the board the error is (corner_residuals). Every view, used
+    or not, gets its error under the final model (per_view_all_px: PnP for those left out)."""
+    exclude = sorted(set(exclude) & set(views))
+    use = {k: v for k, v in views.items() if k not in exclude}
+    if len(use) < MIN_VIEWS:
+        sys.exit(f"only {len(use)} usable photos, at least {MIN_VIEWS} needed")
+    rms, K, dist, std, per_view, poses = solve(use, size)
     limit = max(3 * float(np.median(list(per_view.values()))), 0.3)
     dropped = sorted(k for k, e in per_view.items() if e > limit)
-    if dropped and len(views) - len(dropped) >= MIN_VIEWS:
-        views = {k: v for k, v in views.items() if k not in dropped}
-        rms, K, dist, std, per_view = solve(views, size)
+    if dropped and len(use) - len(dropped) >= MIN_VIEWS:
+        use = {k: v for k, v in use.items() if k not in dropped}
+        rms, K, dist, std, per_view, poses = solve(use, size)
     else:
         dropped = []
-    return {
+    every = {k: (float(per_view[k]) if k in per_view else view_rms(v, K, dist)[0]) for k, v in views.items()}
+    out = {
         "image_size": list(size), "K": K.tolist(), "dist": dist.tolist(),
-        "rms_px": round(float(rms), 4), "n_views": len(views),
-        "n_corners": int(sum(len(v[0]) for v in views.values())),
+        "rms_px": round(float(rms), 4), "n_views": len(use),
+        "n_corners": int(sum(len(v[0]) for v in use.values())),
         "std": {k: round(float(s), 4) for k, s in zip(["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3"], std)},
         "per_view_rms_px": {k: round(float(e), 4) for k, e in per_view.items()},
-        "dropped": dropped,
+        "per_view_all_px": {k: round(e, 4) for k, e in sorted(every.items())},
+        "dropped": dropped, "excluded": exclude, "limit_px": round(limit, 4),
     }
+    if square:
+        out["residuals"] = corner_residuals(use, poses, K, dist, float(square))
+    return out
+
+
+def plain(cal):
+    """The intrinsics in plain units: focal length (px, and the field of view in degrees across and down), where the
+    optical centre is from the middle of the image (px, + right and down), how far the lens bends at the corners of
+    the image (px between where a point is and where a lens without distortion would put it), with their standard
+    deviations."""
+    K, d = np.array(cal["K"]), np.array(cal["dist"])
+    w, h = cal["image_size"]
+    s = cal.get("std", {})
+    corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.float64).reshape(-1, 1, 2)
+    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 40, 1e-12)
+    ideal = cv2.undistortPoints(corners, K, d, None, None, K, crit).reshape(-1, 2)
+    bend = float(np.max(np.linalg.norm(ideal - corners.reshape(-1, 2), axis=1)))
+    return {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "f_std": float(np.hypot(s.get("fx", 0), s.get("fy", 0)) / 2),
+            "fov_x": float(np.degrees(2 * np.arctan(w / 2 / K[0, 0]))),
+            "fov_y": float(np.degrees(2 * np.arctan(h / 2 / K[1, 1]))),
+            "cx_off": float(K[0, 2] - (w - 1) / 2), "cy_off": float(K[1, 2] - (h - 1) / 2),
+            "c_std": float(max(s.get("cx", 0), s.get("cy", 0))), "bend_px": bend, "size": [int(w), int(h)]}
+
+
+# ── the check of each photo as it comes ──────────────────────────────────────
+BLUR_PX = 4.0           # a photo is blurred past this sigma (px at 4080 px across, scaled with the width, at least
+BLUR_MIN_PX = 2.5       # this): the corners then move and the calibration suffers (T5.1: 3.5 px still calibrates)
+BLUR_FLOOR = 0.8        # what the estimate gives for an edge with no blur at all (the derivative's own width)
+
+
+def blur_px(gray, obj, imgp, square):
+    """The blur of a photo of the board, as the sigma (px) of a Gaussian: at each corner found, across the board's two
+    sets of edges, the contrast over the steepest slope (an edge blurred by sigma rises by contrast / (sigma sqrt(2
+    pi)) per px at most), the larger of the two (a shake blurs one way), the median over the corners."""
+    obj2 = obj.reshape(-1, 3)[:, :2].astype(np.float64)
+    pts = imgp.reshape(-1, 2).astype(np.float64)
+    if len(pts) < 4:
+        return float("nan")
+    H, _ = cv2.findHomography(obj2, pts)
+    if H is None:
+        return float("nan")
+    out = []
+    g = gray.astype(np.float32)
+    hh, ww = g.shape
+    for (X, Y), (u, v) in zip(obj2, pts):
+        p = H @ [X, Y, 1.0]
+        ex = H @ [X + square, Y, 1.0]
+        ey = H @ [X, Y + square, 1.0]
+        jx = ex[:2] / ex[2] - p[:2] / p[2]          # one square along the board's x, in the image
+        jy = ey[:2] / ey[2] - p[:2] / p[2]
+        side = min(np.linalg.norm(jx), np.linalg.norm(jy))
+        r = int(np.clip(0.3 * side, 3, 25))
+        x0, y0 = int(round(u)) - r, int(round(v)) - r
+        if x0 < 1 or y0 < 1 or x0 + 2 * r + 2 > ww or y0 + 2 * r + 2 > hh:
+            continue
+        patch = g[y0 - 1:y0 + 2 * r + 2, x0 - 1:x0 + 2 * r + 2]
+        gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)[1:-1, 1:-1] / 8
+        gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)[1:-1, 1:-1] / 8
+        inner = patch[1:-1, 1:-1]
+        c = float(np.percentile(inner, 97) - np.percentile(inner, 3))
+        if c < 20:
+            continue
+        sig = []
+        for j in (jx, jy):
+            n = np.array([-j[1], j[0]]) / max(np.linalg.norm(j), 1e-9)     # across the edges that run along j
+            slope = float(np.percentile(np.abs(gx * n[0] + gy * n[1]), 99))
+            sig.append(c / (np.sqrt(2 * np.pi) * max(slope, 1e-6)))
+        out.append(max(sig))
+    if not out:
+        return float("nan")
+    est = float(np.median(out))
+    return float(np.sqrt(max(0.0, est ** 2 - BLUR_FLOOR ** 2)))
+
+
+def blur_limit(width):
+    return max(BLUR_MIN_PX, BLUR_PX * width / SYNTH_SIZE[0])
+
+
+def check_photo(path, board, size=None):
+    """The check of one photo as it arrives: can it go into the calibration? {"ok", "why" (none: no board found,
+    few: fewer than MIN_CORNERS corners, size: another size than the photos before it (the phone held another way),
+    blur: blurred past blur_limit, unreadable), "corners", "of", "blur_px", "size", "points" (where the corners are,
+    fractions of the width and height, at most 120)}."""
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    nx, ny = board.getChessboardSize()
+    out = {"ok": False, "why": "", "corners": 0, "of": (nx - 1) * (ny - 1), "blur_px": None, "size": None,
+           "points": []}
+    if img is None:
+        out["why"] = "unreadable"
+        return out
+    w, h = img.shape[::-1]
+    out["size"] = [w, h]
+    if size and list(size) != [w, h]:
+        out["why"] = "size"
+        return out
+    corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(img)
+    n = 0 if ids is None else len(ids)
+    out["corners"] = n
+    if n:
+        pts = corners.reshape(-1, 2)
+        k = np.linspace(0, n - 1, min(n, 120)).astype(int)
+        out["points"] = [[round(float(x / w), 4), round(float(y / h), 4)] for x, y in pts[k]]
+    if n == 0:
+        out["why"] = "none"
+        return out
+    collinear = board.checkCharucoCornersCollinear(ids)
+    b = float("nan")
+    if n >= 4 and not collinear:        # blurred is said before few: a blur also loses corners
+        obj, imgp = board.matchImagePoints(corners, ids)
+        b = blur_px(img, obj, imgp, board.getSquareLength())
+        out["blur_px"] = None if b != b else round(b, 2)
+    if b == b and b > blur_limit(w):
+        out["why"] = "blur"
+        return out
+    if n < MIN_CORNERS or collinear:
+        out["why"] = "few"
+        return out
+    out["ok"] = True
+    return out
 
 
 def model_difference(K1, d1, K2, d2, size, step=32):
@@ -373,6 +531,8 @@ def summary(cal, skipped):
         print(f"skipped {name}: {why}")
     for name in cal["dropped"]:
         print(f"dropped {name}: per-view error above 3 times the median")
+    for name in cal.get("excluded", []):
+        print(f"left out {name}: chosen by hand")
 
 
 def print_compare(c):
@@ -381,10 +541,10 @@ def print_compare(c):
           f"model max {c['model_max_px']:.3f} px, RMS {c['model_rms_px']:.3f} px")
 
 
-def run_calibrate(images, out, truth, square, squares=None, marker=None):
+def run_calibrate(images, out, truth, square, squares=None, marker=None, exclude=()):
     board = make_board(square, squares, marker)
     views, skipped, size = detect(find_images(images), board)
-    cal = calibrate(views, size)
+    cal = calibrate(views, size, exclude, board.getSquareLength())
     cal = {"images": str(Path(images)), "date": date.today().isoformat(), "board": board_spec(board),
            "skipped": dict(skipped), **cal}
     summary(cal, skipped)

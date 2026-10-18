@@ -21,9 +21,9 @@ const HOME = {
 
   // the intrinsics stored for the two camera modes
   cal: function (s) {
-    const p = !!s.modes.photo.stored, v = !!s.modes.video.stored;
+    const p = !!s.modes.photo.stored, v = !!s.modes.stream.stored;
     setStcell($('hsCal'), p && v ? 'ok' : 'warn',
-              T(p && v ? 'home.cal.both' : p ? 'home.cal.photo' : v ? 'home.cal.video' : 'home.cal.none'));
+              T(p && v ? 'home.cal.both' : p ? 'home.cal.photo' : v ? 'home.cal.stream' : 'home.cal.none'));
   },
 
   // the trial open now, or the next one of the sequence
