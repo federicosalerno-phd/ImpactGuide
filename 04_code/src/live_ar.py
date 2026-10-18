@@ -10,10 +10,10 @@ Three threads work on the frames of the stream (live.py), always on the newest o
   detect    now and then (TRACK["detect_every_s"], or at once when the tracking weakens or the board is lost): the
             full ChArUco detection, in a box around the board or in the whole frame; its corners re-anchor the
             tracking a few frames later.
-  compose   the newest frame tracked: the face (and the mandible) drawn at its filtered pose with gl_overlay.py, a fill
-            and an outline at the opacity asked for (soft edges and shading: no shimmer), board axes and corners on
-            request, the picture turned by quarter turns to stand the way the phone is held (the pose stays in the
-            sensor's frame), JPEG. It owns the OpenGL context.
+  compose   the newest frame tracked: the face (and the mandible) drawn at its filtered pose with gl_overlay.py, a veil
+            at the opacity asked for with nothing on its edge (anti-aliased silhouette, smooth shading), board axes
+            and corners on request, the picture turned by quarter turns to stand the way the phone is held (the pose
+            stays in the sensor's frame), JPEG. It owns the OpenGL context.
 With hide_board (the board on the same monitor as the picture of the live view, as ImpactGuide shows it), the
 board itself is covered in the picture shown, so the phone never films a second board inside the first: on a frame
 with its own pose the board's area (with half a square around it) is filled with a dark flat colour, on a frame
@@ -61,7 +61,7 @@ For the app:
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
     ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...,
                  opacity=..., view_rotation=..., hide_board=...)
-                                                     # opacity 0-1 of the overlay's fill and outline (default OPACITY);
+                                                     # opacity 0-1 of the overlay (default OPACITY);
                                                      # view_rotation None (the phone's way up) or 0/90/180/270;
                                                      # hide_board: the board covered in the picture shown
     ar.still()                                       # the newest frame at full size (BGR), for a calibration
@@ -127,12 +127,18 @@ STREAM_LATENCY_MS = {"usb": 149.0, "wifi": None}
 MAX_RMS = {"calibrated": 1.0, "nominal": 3.0}
 DISPLAY_WIDTH = 1280
 JPEG_QUALITY = 80
-# the look of the overlay: a fill and a thin outline in the colours of the palette, with a light shading (its depth:
-# 0 flat, 1 black where the surface is seen edge on). Their opacity is the setting `opacity` (0-1) times fill and line
-# (capped at 1): at the default OPACITY a soft tint and a clear outline, at 1 a nearly opaque face.
+# the look of the overlay: each model a veil in its colour of the palette with a light shading, and nothing on its
+# edge (no outline, no rim): the silhouette is the veil's own anti-aliased border, so everything follows the opacity
+# together. The veil's opacity is the setting `opacity` (0-1) times fill (capped at 1): barely there at the lowest
+# setting, a soft even veil at the default OPACITY, a nearly opaque face at 1. The shading is a light at the camera
+# (both sides lit), smooth across the triangles: the colour times 1 - shade * (1 - cos) ** SHADE_GAMMA, cos of the
+# angle between the surface and the line of sight (1 face on, 0 edge on); a gamma under 1 spreads it over the
+# surface instead of darkening a band along the silhouette.
 OPACITY = 0.3
-SOFT = {"feather_px": 0.8, "smooth_px": 2.0}   # the overlay's edge feathered and its shading blurred (display px)
-STYLE = {"face": {"fill": 0.85, "line": 2.5, "shade": 0.6}, "mandible": {"fill": 0.9, "line": 2.2, "shade": 0.6}}
+STYLE = {"face": {"fill": 0.95, "shade": 0.45}, "mandible": {"fill": 0.95, "shade": 0.45}}
+SHADE_GAMMA = 0.6
+SOFT = {"feather_px": 0.8, "smooth_px": 2.0}   # NumPy renderer only: its hard mask feathered and its flat shading
+                                               # blurred (display px)
 COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC",
           "hidden": "#16161A"}
 HIDE = {"margin_squares": 0.5, "shrink": 12, "dim": 0.5}   # hide_board: the area around the board, the blur and
@@ -834,7 +840,7 @@ class LiveAR:
 
     def configure(self, **kw):
         """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
-        mandible, axes, opacity (0-1, of the overlay's fill and outline), view_rotation (None: the phone's way up,
+        mandible, axes, opacity (0-1, of the overlay), view_rotation (None: the phone's way up,
         else 0, 90, 180 or 270 degrees clockwise), hide_board (the board covered in the picture shown): applied from
         the next frame. Only a change of the board starts the tracking again; the layers, the opacity, the rotation and
         hide_board do not touch it."""
@@ -1300,17 +1306,7 @@ class LiveAR:
         drawn, masks = {}, {}
         alpha = want["opacity"] * vis
         if T is not None and T_M_B is not None and alpha > 0:
-            T_C_B = T @ T_M_B
-            for name in ("mandible", "face"):
-                rend = self._renderer(name) if want[name] and name in self._models else None
-                if rend is not None:
-                    gl = type(rend).__name__ == "GLMeshRenderer"     # it can leave out the edges: the outline comes from the mask
-                    r = rend.render(Kd, dist, T_C_B, (dw, dh), edges=False) if gl else rend.render(Kd, dist, T_C_B, (dw, dh))
-                    drawn[name] = int(np.count_nonzero(r.mask))
-                    masks[name] = r.mask
-                    st = STYLE[name]
-                    shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
-                    self._paint(img, r, self.colors[name], st, alpha, shade, SOFT["feather_px"], SOFT["smooth_px"])
+            drawn, masks = self._draw_models(img, T @ T_M_B, Kd, dist, want, alpha)
         t3 = time.perf_counter()
         if want["axes"] and T is not None and vis > 0.5:
             self._draw_board(img, T, Kd, dist, spec, setup, res, s)
@@ -1448,25 +1444,61 @@ class LiveAR:
             self.log(self._error)
         time.sleep(0.01)
 
+    def _draw_models(self, img, T_C_B, Kd, dist, want, alpha):
+        """The mandible and the face (those asked for) over the picture, camera from model T_C_B, at opacity alpha
+        (the setting times the fade): ({model: pixels covered}, {model: silhouette at the display size})."""
+        drawn, masks = {}, {}
+        size = (img.shape[1], img.shape[0])
+        for name in ("mandible", "face"):
+            rend = self._renderer(name) if want[name] and name in self._models else None
+            if rend is None:
+                continue
+            st = STYLE[name]
+            a = min(1.0, st["fill"] * float(alpha))      # a Python float: a NumPy one would make the weights float64
+            if hasattr(rend, "overlay"):       # OpenGL: coverage of each pixel and a light per vertex
+                light = 1.0 - st["shade"] * (1.0 - rend.facing(T_C_B)) ** SHADE_GAMMA if st["shade"] > 0 else None
+                r = rend.overlay(Kd, dist, T_C_B, size, light)
+                self._paint_veil(img, r, self.colors[name], a)
+            else:                               # NumPy: hard mask and a light per triangle
+                r = rend.render(Kd, dist, T_C_B, size)
+                shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
+                self._paint(img, r, self.colors[name], a, shade, SOFT["feather_px"], SOFT["smooth_px"])
+            drawn[name] = int(cv2.countNonZero(r.mask))
+            masks[name] = r.mask
+        return drawn, masks
+
+    @staticmethod
+    def _paint_veil(img, o, colour, a):
+        """A model (gl_overlay.Overlay) over the picture as a veil of opacity a: the colour times the light, each
+        pixel weighted by the share of it the model covers. Nothing is drawn on the edge: its anti-aliasing is that
+        coverage, so the silhouette fades with the veil and stays steady under a sub-pixel motion."""
+        bh, bw = o.cover.shape
+        if not (bh and bw) or a <= 0:
+            return
+        x0, y0 = o.offset
+        roi = img[y0:y0 + bh, x0:x0 + bw]
+        w = o.cover.astype(np.float32) * np.float32(a / 255)
+        light = cv2.divide(o.light, o.cover, scale=255)       # the light itself (0 where nothing is covered)
+        tint = cv2.multiply(cv2.cvtColor(light, cv2.COLOR_GRAY2BGR), tuple(c / 255 for c in colour) + (0,))
+        roi[:] = cv2.blendLinear(roi, tint, 1.0 - w, w)
+
     def _shade(self, name, rend, T, depth):
-        """Brightness of each triangle under a light at the camera (both sides lit), from 1 face on down to 1 - depth
-        edge on: a light hint of the shape."""
+        """Brightness of each triangle under a light at the camera (both sides lit), as in STYLE and SHADE_GAMMA, for
+        the NumPy renderer (one value per triangle)."""
         if name not in self._centroids:
             self._centroids[name] = rend.v[rend.f].mean(1)
         c = self._centroids[name] @ T[:3, :3].T + T[:3, 3]
         cos = np.abs(np.sum((rend.n @ T[:3, :3].T) * c, 1)) / np.maximum(np.linalg.norm(c, axis=1), 1e-9)
         # 0 first: the visibility buffer holds -1 for the background, so buffer + 1 indexes this table directly
-        return np.concatenate([[0], np.rint(255 * (1 - depth * (1 - cos)))]).astype(np.uint8)
+        return np.concatenate([[0], np.rint(255 * (1 - depth * (1 - cos) ** SHADE_GAMMA))]).astype(np.uint8)
 
     @staticmethod
-    def _paint(img, r, colour, style, alpha=1.0, shade=None, feather=0.8, smooth=2.0):
-        """The visible model as a tint over the image and a thin smooth outline; alpha (the opacity setting times
-        the fade) scales both. Against shimmer the silhouette is feathered by about a pixel (feather, px) and the flat
-        shading of the triangles blurred inside it (smooth, px; normalised, so the edges do not darken): a pose that
-        moves by a fraction of a pixel changes the picture by less than with a hard mask and flat facets (16/10:
-        flicker under a smooth sub-pixel motion 0.41 to 0.36 grey levels, 99th percentile 8.3 to 5.7)."""
+    def _paint(img, r, colour, a, shade=None, feather=0.8, smooth=2.0):
+        """The veil of _paint_veil from a hard mask and a flat light per triangle (the NumPy renderer, without
+        OpenGL): against shimmer the silhouette is feathered by about a pixel (feather, px) and the shading blurred
+        inside it (smooth, px; normalised, so the edge does not darken)."""
         bh, bw = r.faces.shape
-        if not (bh and bw) or alpha <= 0:
+        if not (bh and bw) or a <= 0:
             return
         x0, y0 = r.offset
         H, W = img.shape[:2]
@@ -1476,9 +1508,8 @@ class LiveAR:
         m = r.mask[ya:yb, xa:xb]
         if not cv2.countNonZero(m):
             return
-        a_fill = min(1.0, style["fill"] * alpha)
         soft = cv2.GaussianBlur(m, (0, 0), feather) if feather > 0 else m
-        w = soft.astype(np.float32) * (a_fill / 255)
+        w = soft.astype(np.float32) * np.float32(a / 255)
         if shade is None:
             light = np.full(m.shape, 255, np.uint8)
         else:
@@ -1492,20 +1523,6 @@ class LiveAR:
                 light = sh
         tint = cv2.multiply(cv2.cvtColor(light, cv2.COLOR_GRAY2BGR), tuple(c / 255 for c in colour) + (0,))
         roi[:] = cv2.blendLinear(roi, tint, 1.0 - w, w)
-        outline, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-        lines = []
-        for c in outline:
-            c = c.reshape(-1, 2).astype(np.float32)
-            if len(c) >= 7:      # the pixel staircase of the mask, smoothed along the contour
-                c = sum(np.roll(c, k, 0) for k in (-2, -1, 0, 1, 2)) / 5
-            lines.append(np.round(c * 8).astype(np.int32))
-        la = min(1.0, style["line"] * alpha)
-        if la >= 0.999:
-            cv2.polylines(roi, lines, True, colour, 1, cv2.LINE_AA, 3)
-        else:
-            layer = roi.copy()
-            cv2.polylines(layer, lines, True, colour, 1, cv2.LINE_AA, 3)
-            cv2.addWeighted(layer, la, roi, 1 - la, 0, dst=roi)
 
 
 # ── the frames for the page ──────────────────────────────────────────────────
