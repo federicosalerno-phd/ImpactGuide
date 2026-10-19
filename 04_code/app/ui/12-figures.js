@@ -7,7 +7,9 @@
 // dot per corner, larger and brighter where the error is larger), and the A4
 // sheet with what to measure. Plain functions of the data the backend gives;
 // a figure never holds state of its own.
+'use strict';
 
+/** The calibration's figures, each a function of the backend's data that fills a host element. */
 const FIG = {
   NS: 'http://www.w3.org/2000/svg',
 
@@ -34,7 +36,7 @@ const FIG = {
   // the pose in words, two short lines: where from and how far round, then the distance and the turn
   caption: function (g) {
     const v = g.view === 'front' ? T('guide.view.front') : T('guide.view.' + g.view) + ' ' + g.tilt + '°';
-    const parts = [cifre(g.dist_cm, 0) + ' cm'];
+    const parts = [fmtNum(g.dist_cm, 0) + ' cm'];
     if (Math.abs(g.roll) >= 5) parts.push(T('guide.turned', Math.abs(g.roll)));
     return [v, parts.join(' · ')];
   },
@@ -160,7 +162,7 @@ const FIG = {
     const step = FIG.nice(top / 3);
     for (let v = 0; v <= top + 1e-9; v += step) {
       FIG.el('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v ? 'ax-grid' : 'ax-base' }, s);
-      FIG.text(s, L - 5, y(v) + 3.5, cifre(v, step < 0.1 ? 2 : 1), 'fig-t fig-t-s', 'end');
+      FIG.text(s, L - 5, y(v) + 3.5, fmtNum(v, step < 0.1 ? 2 : 1), 'fig-t fig-t-s', 'end');
     }
     FIG.text(s, L - 5, Tp - 1, 'px', 'fig-t fig-t-s', 'end');
     const band = (W - L - R) / n, bw = Math.max(2, Math.min(12, band * 0.45));
@@ -170,7 +172,7 @@ const FIG = {
       FIG.el('rect', { x: L + i * band, y: Tp, width: band, height: H - Tp - B, class: 'bar-hit' }, g);
       FIG.el('path', { d: 'M' + x + ' ' + y(0) + 'v' + (-(h - r)) + 'q0 ' + (-r) + ' ' + r + ' ' + (-r) + 'h' + (bw - 2 * r)
                          + 'q' + r + ' 0 ' + r + ' ' + r + 'v' + (h - r) + 'z', class: 'bar-v' }, g);
-      FIG.title(g, (i + 1) + ' · ' + p.name + ' · ' + cifre(p.err, 2) + ' px · ' + T('cal.res.state.' + p.state));
+      FIG.title(g, (i + 1) + ' · ' + p.name + ' · ' + fmtNum(p.err, 2) + ' px · ' + T('cal.res.state.' + p.state));
       if (toggle) g.addEventListener('click', function () { toggle(p.name); });
       if (n <= 24 || i % Math.ceil(n / 12) === 0) FIG.text(s, x + bw / 2, H - 5, String(i + 1), 'fig-t fig-t-s', 'middle');
     });
@@ -212,13 +214,13 @@ const FIG = {
       FIG.el('circle', { cx: ox + (c[0] + 1) * sq, cy: oy + (c[1] + 1) * sq, r: sq * 0.5, class: 'rmap-hit' }, g);
       FIG.el('circle', { cx: ox + (c[0] + 1) * sq, cy: oy + (c[1] + 1) * sq, r: r(c[2]).toFixed(2),
                          class: 'rmap-dot', 'fill-opacity': o(c[2]).toFixed(2) }, g);
-      FIG.title(g, cifre(c[2], 2) + ' px · ' + T('cal.res.seen', c[3]));
+      FIG.title(g, fmtNum(c[2], 2) + ' px · ' + T('cal.res.seen', c[3]));
     });
     // the legend: the smallest and the largest dot, with their errors
     const lx = ox + nx * sq + 22;
     [[lo, oy + 18], [hi, oy + 46]].forEach(function (k) {
       FIG.el('circle', { cx: lx, cy: k[1], r: r(k[0]), class: 'rmap-dot', 'fill-opacity': o(k[0]) }, s);
-      FIG.text(s, lx + 10, k[1] + 3.5, cifre(k[0], 2) + ' px', 'fig-t fig-t-s');
+      FIG.text(s, lx + 10, k[1] + 3.5, fmtNum(k[0], 2) + ' px', 'fig-t fig-t-s');
     });
     host.append(s);
     return { lo: lo, hi: hi };
@@ -254,7 +256,7 @@ const FIG = {
     FIG.el('path', { d: 'M' + bx + ' ' + ly + 'H' + x1 + 'M' + (bx + 5) + ' ' + (ly - 2.5) + 'L' + bx + ' ' + ly + 'L' + (bx + 5)
                        + ' ' + (ly + 2.5) + 'M' + (x1 - 5) + ' ' + (ly - 2.5) + 'L' + x1 + ' ' + ly + 'L' + (x1 - 5) + ' '
                        + (ly + 2.5), class: 'sh-dim' }, s);
-    FIG.text(s, (bx + x1) / 2, ly - 5, cifre(info.nominal_mm, 1) + ' mm', 'fig-t sh-len', 'middle');
+    FIG.text(s, (bx + x1) / 2, ly - 5, fmtNum(info.nominal_mm, 1) + ' mm', 'fig-t sh-len', 'middle');
     host.append(s);
   },
 };

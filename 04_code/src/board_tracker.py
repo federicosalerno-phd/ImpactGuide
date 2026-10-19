@@ -1,5 +1,5 @@
-"""Board tracking for the live AR (T20.3): the ChArUco corners followed from frame to frame, the full detection only
-now and then.
+"""Board tracking for the live AR: the ChArUco corners followed from frame to frame, the full detection only now and
+then.
 
 Finding the ChArUco markers in a frame costs 5 to 60 ms and fails on a blurred or partly covered frame; following
 corners already found costs about a millisecond. So the live AR follows the corners on every frame of the stream and
@@ -27,15 +27,24 @@ runs the detection in a worker thread, every TRACK["detect_every_s"] or as soon 
 
     det = Detector(board, spec, settings)
     found = det.detect(gray, box=None, marker_px=None)          # Detection: corners, ids, markers, time
+    det.configure(settings)                                     # new settings from the next detection
     tr = Tracker(board, spec, settings, anchor_points)          # anchor_points: model points in the board frame (mm)
     res = tr.step(gray, t, n, K, dist, detection=found)         # TrackResult: T, ok, sure, corners, rms, ...
 
+A Detector may be shared by threads (detect() holds its lock), but each thread of the live AR has its own, so a
+detection in the worker never makes the tracking wait. A Tracker belongs to one thread.
+
     python board_tracker.py test     synthetic sequences of both boards: tracking against the truth, still and
                                      moving, a detection carried to a later frame, the mirrored pose, the small board
-                                     at 25-60 cm; exit 1 on failure
+                                     at 25-60 cm, the pose through many outliers, the detector's cache and lock;
+                                     exit 1 on failure
 """
+from __future__ import annotations
+
 import sys
+import threading
 import time
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -68,6 +77,8 @@ TRACK = {
 
 _SUBPIX = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 20, 0.01)
 _LK = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 20, 0.02)
+DETECTOR_CACHE = 32         # ArUco detectors kept per Detector (one per marker size and image size), least used out
+RANSAC_ITERATIONS = 60
 
 
 def matrix(rvec, tvec):
@@ -102,7 +113,13 @@ class Detection:
 
 
 class Detector:
-    """ChArUco detection tuned for small markers (see the module docstring)."""
+    """ChArUco detection tuned for small markers (see the module docstring).
+
+    Args:
+        board: the cv2.aruco.CharucoBoard.
+        spec: its description (make_board of live_ar).
+        settings: overrides of TRACK.
+    """
 
     def __init__(self, board, spec, settings=None):
         self.board, self.spec = board, spec
@@ -114,13 +131,21 @@ class Detector:
         dp = cv2.aruco.DetectorParameters()
         dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self.charuco = cv2.aruco.CharucoDetector(board, cp, dp)
-        self._aruco = {}
+        self._aruco = OrderedDict()
+        self._lock = threading.Lock()       # one detection at a time: OpenCV's detectors keep state
+
+    def configure(self, settings):
+        """New settings (overrides of TRACK), used from the next detection."""
+        with self._lock:
+            self.s = {**TRACK, **(settings or {})}
 
     def _markers(self, marker_px, longest):
         """ArUco detector for markers about marker_px wide in an image whose longest side is `longest` (None: any
-        size in a whole frame)."""
+        size in a whole frame); at most DETECTOR_CACHE are kept, the least recently used dropped first."""
         key = None if marker_px is None else (int(round(marker_px)), int(longest) // 64)
-        if key not in self._aruco:
+        if key in self._aruco:
+            self._aruco.move_to_end(key)
+        else:
             dp = cv2.aruco.DetectorParameters()
             if marker_px is None:
                 dp.adaptiveThreshWinSizeMin, dp.adaptiveThreshWinSizeMax, dp.adaptiveThreshWinSizeStep = 5, 35, 10
@@ -136,11 +161,17 @@ class Detector:
             dp.minCornerDistanceRate = 0.05
             dp.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE      # refined at full resolution below
             self._aruco[key] = cv2.aruco.ArucoDetector(self.dictionary, dp)
+            while len(self._aruco) > DETECTOR_CACHE:
+                self._aruco.popitem(last=False)
         return self._aruco[key]
 
     def detect(self, gray, box=None, marker_px=None, n=0, t=0.0):
         """Corners of the board in the gray frame: in box (x0, y0, x1, y1) with markers about marker_px wide, or in
         the whole frame. Returns a Detection (no corners: empty arrays)."""
+        with self._lock:
+            return self._detect(gray, box, marker_px, n, t)
+
+    def _detect(self, gray, box, marker_px, n, t):
         t0 = time.perf_counter()
         h, w = gray.shape[:2]
         x0, y0, x1, y1 = (0, 0, w, h) if box is None else box
@@ -308,9 +339,11 @@ class Tracker:
         return p1.astype(np.float32), ok
 
     def _ippe(self, obj, img, K, dist, refine=True):
-        """Both IPPE poses (refined by Levenberg-Marquardt): [(T, rms)] best first."""
+        """Both IPPE poses (refined by Levenberg-Marquardt): [(T, rms)] best first; [] when the solver finds none."""
         n, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, img, K, dist, flags=cv2.SOLVEPNP_IPPE)
         out = []
+        if errs is None:
+            return out
         for r, t, e in zip(rvecs, tvecs, np.ravel(errs)):
             if refine:
                 r, t = cv2.solvePnPRefineLM(obj, img, K, dist, r.copy(), t.copy())
@@ -321,7 +354,8 @@ class Tracker:
 
     def _fit(self, ids, pts, K, dist, prior):
         """Pose from corners: LM from the prior (or IPPE without one), corners far from the pose dropped, RANSAC when
-        many are. Returns (T, rms, keep mask) or (None, rms, keep)."""
+        many are (the refinement then starts from RANSAC's pose: a prior pulled off by the outliers could lead it to a
+        wrong minimum). Returns (T, rms, keep mask), or (None, None, keep) when a solver fails."""
         obj = self.obj[ids]
         img = pts.astype(np.float64)
         keep = np.ones(len(ids), bool)
@@ -330,7 +364,8 @@ class Tracker:
             ok, rvec, tvec = cv2.solvePnP(obj, img, K, dist, rvec.copy(), tvec.copy(), True, cv2.SOLVEPNP_ITERATIVE)
             T = matrix(rvec, tvec) if ok else None
         else:
-            T = self._ippe(obj, img, K, dist)[0][0]
+            sols = self._ippe(obj, img, K, dist)
+            T = sols[0][0] if sols else None
         if T is None:
             return None, None, keep
         for _ in range(2):
@@ -340,20 +375,24 @@ class Tracker:
             bad = r > thr
             if not bad.any():
                 break
+            start = T
             if bad.mean() > self.s["ransac_share"] and len(ids) >= 6:
                 ok, rvec, tvec, inl = cv2.solvePnPRansac(obj, img, K, dist, reprojectionError=self.s["outlier_px"],
-                                                          iterationsCount=60, flags=cv2.SOLVEPNP_SQPNP)
+                                                          iterationsCount=RANSAC_ITERATIONS, flags=cv2.SOLVEPNP_SQPNP)
                 if not ok or inl is None or len(inl) < 4:
                     return None, None, keep
                 keep = np.zeros(len(ids), bool)
                 keep[inl.ravel()] = True
+                start = matrix(rvec, tvec)
             else:
                 keep = ~bad
             if keep.sum() < 4:
                 return None, None, keep
-            rvec, tvec = vectors(T)
+            rvec, tvec = vectors(start)
             ok, rvec, tvec = cv2.solvePnP(obj[keep], img[keep], K, dist, rvec.copy(), tvec.copy(), True,
                                           cv2.SOLVEPNP_ITERATIVE)
+            if not ok:
+                return None, None, keep
             T = matrix(rvec, tvec)
         r = np.linalg.norm(project(obj[keep], T, K, dist) - img[keep], axis=1)
         return T, float(np.sqrt(np.mean(r ** 2))), keep
@@ -609,8 +648,9 @@ class Tracker:
 
 # ── checks ───────────────────────────────────────────────────────────────────
 def run_test():
-    """Synthetic frames of both boards (live_ar.SyntheticStream renders them with the stream's camera)."""
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+    """Synthetic frames of both boards (live_ar.SyntheticStream renders them with the nominal camera of the stream,
+    whatever calibration is on this computer); the pose through many outliers from a prior pulled off; the detector's
+    cache, settings and lock."""
     import live_ar
     import marker_pose
     fails = []
@@ -620,7 +660,7 @@ def run_test():
         if not ok:
             fails.append(what)
 
-    K, dist, _ = live_ar.stream_intrinsics((1920, 1440))
+    K, dist, _ = live_ar.stream_intrinsics((1920, 1440), None)
     for name in ("sheet", "patient"):
         board, spec = live_ar.make_board(name, 24.0)
         s = live_ar.SyntheticStream(board, spec, K, exposure_s=0.0, noise=2.0, script=live_ar.bench_script(spec))
@@ -686,11 +726,78 @@ def run_test():
     print("      small board, distance mm / detections with corners of 4 / frames with a pose of 20 / rotation "
           "error deg: " + "; ".join(f"{a} / {b} / {c} / {d:.2f}" for a, b, c, d in rows))
     expect(all(r[2] >= 18 for r in rows if r[0] <= 500), "small board tracked from 20 to 50 cm")
+    outlier_check(expect, K)
+    detector_check(expect, K)
+    corners = np.tile([[960.0, 720.0]], (6, 1))     # degenerate: every corner on one point
+    expect(marker_pose.estimate_pose(board, corners, np.arange(6), K) is None,
+           "marker_pose: no pose from degenerate corners (no error)")
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
     return 1 if fails else 0
 
 
+def outlier_check(expect, K):
+    """The patient board nearly face on at 35 cm, 40 % of its corners thrown off by 5-40 px, the prior at the mirrored
+    IPPE pose: RANSAC finds the inliers, and the refinement from RANSAC's pose gives the true pose (from the prior it
+    stayed on the mirrored one, 32 degrees off). Fixed random draws: the same corners on every run."""
+    import live_ar
+    import marker_pose
+    board, spec = live_ar.make_board("patient")
+    tr = Tracker(board, spec)
+    rng = np.random.default_rng(3)
+    T = np.eye(4)
+    T[:3, :3] = cv2.Rodrigues(np.radians([180 + rng.uniform(-8, 8), rng.uniform(-8, 8), rng.uniform(0, 30)]))[0]
+    side = spec["squares"][0] * spec["square_mm"]
+    T[:3, 3] = [-side / 2, side / 2, 350.0]
+    ids = np.arange(len(tr.obj))
+    clean_pts = marker_pose.project(tr.obj, T, K) + rng.normal(0, 0.15, (len(ids), 2))
+    sols = tr._ippe(tr.obj, clean_pts, K, np.zeros(5))
+    mirrored = max(sols, key=lambda s: marker_pose.pose_error(s[0], T)["rot_deg"])
+    pts = clean_pts.copy()
+    bad = rng.choice(len(ids), int(0.4 * len(ids)), replace=False)
+    pts[bad] += rng.uniform(5, 40, (len(bad), 2)) * rng.choice([-1, 1], (len(bad), 2))
+    Tf, rms, keep = tr._fit(ids, pts, K, np.zeros(5), mirrored[0])
+    e = marker_pose.pose_error(Tf, T) if Tf is not None else {"rot_deg": np.inf, "trans_mm": np.inf}
+    e0 = marker_pose.pose_error(mirrored[0], T)["rot_deg"]
+    expect(Tf is not None and e["rot_deg"] < 1.0 and e["trans_mm"] < 1.0 and not keep[bad].any() and keep.sum() >= 8,
+           f"40 % outliers, prior at the mirrored pose ({e0:.1f} deg off): pose {e['rot_deg']:.2f} deg, "
+           f"{e['trans_mm']:.2f} mm from the truth, {int(keep.sum())} of {len(ids) - len(bad)} clean corners kept, "
+           f"no outlier")
+
+
+def detector_check(expect, K):
+    """The detector's cache stays bounded, new settings reach it, and two threads detecting with it at once find what
+    one finds alone."""
+    import live_ar
+    board, spec = live_ar.make_board("sheet", 24.0)
+    det = Detector(board, spec)
+    for marker_px in range(8, 120):
+        det._markers(float(marker_px), 1920)
+    det.configure({"marker_px": 50.0})
+    expect(len(det._aruco) <= DETECTOR_CACHE and det.s["marker_px"] == 50.0
+           and det.s["min_scale"] == TRACK["min_scale"],
+           f"detector cache bounded ({len(det._aruco)} of {DETECTOR_CACHE} after 112 marker sizes); settings reach it")
+    s = live_ar.SyntheticStream(board, spec, K, exposure_s=0.0, noise=2.0)
+    s.close()
+    img, _ = s.render(1.0, 0)
+    alone = det.detect(img)
+    found = []
+
+    def worker():
+        for _ in range(6):
+            d = det.detect(img)
+            found.append(np.array_equal(d.ids, alone.ids) and np.allclose(d.corners, alone.corners))
+    threads = [threading.Thread(target=worker, name=f"detector_check_{k}") for k in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=60.0)
+    expect(len(found) == 12 and all(found) and len(alone.ids) > 20,
+           f"one detector, two threads at once: {sum(found)} of 12 detections equal to the one made alone "
+           f"({len(alone.ids)} corners)")
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["test"]:
-        sys.exit(run_test())
+        import board_tracker        # the module live_ar imports, not a second copy run as __main__
+        sys.exit(board_tracker.run_test())
     sys.exit(__doc__)

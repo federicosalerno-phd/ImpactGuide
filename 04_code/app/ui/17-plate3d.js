@@ -8,9 +8,17 @@
 // (ui/libs), lit as UniGuide lights its models: a soft sky and ground, a key
 // light, a fill and a rim, and a studio gradient for the reflections. It draws
 // only when something changes.
+'use strict';
 
+// The kinds of numbers a glTF accessor holds (componentType), as typed arrays.
+const GLB_TYPES = { 5121: Uint8Array, 5123: Uint16Array, 5125: Uint32Array, 5126: Float32Array };
+const GLB_MAGIC = 0x46546C67;     // 'glTF'
+
+/** The 3D-printed plate in 3D (three.js), turned with the mouse, drawn only when something changes. */
 const PLATE3D = {
   r: null, scene: null, cam: null, root: null, model: null, lines: null, raf: 0, info: null, failed: false,
+  turned: false,    // moved by hand: a new size of its box keeps the view
+  short: false,     // the short side's length drawn too (its fold is open)
   view: { az: -0.3, el: 0.92, dist: 0.62 },
   home: { az: -0.3, el: 0.92, dist: 0.62 },
 
@@ -44,7 +52,26 @@ const PLATE3D = {
     const rim = new THREE.DirectionalLight(white, 0.3);
     rim.position.set(-0.2, 0.5, -0.8);
     sc.add(rim);
-    try {       // the soft studio gradient the reflections come from
+    PLATE3D.environment();
+    PLATE3D.root = new THREE.Group();
+    sc.add(PLATE3D.root);
+    PLATE3D.wire(canvas);
+    new ResizeObserver(function () {
+      PLATE3D.size();
+      if (!PLATE3D.turned) Object.assign(PLATE3D.view, PLATE3D.home);
+      PLATE3D.draw();
+    }).observe($('bd3d'));
+    // the GPU reset: three.js restores its context by itself; the reflections are made again and the plate drawn
+    canvas.addEventListener('webglcontextrestored', function () { PLATE3D.environment(); PLATE3D.draw(); });
+    window.addEventListener('pagehide', PLATE3D.dispose);
+    PLATE3D.load();
+    return true;
+  },
+
+  // The soft studio gradient the reflections come from (made on the GPU: again after a reset of its context).
+  environment: function () {
+    const sc = PLATE3D.scene;
+    try {
       const c = document.createElement('canvas');
       c.width = c.height = 64;
       const g = c.getContext('2d');
@@ -54,21 +81,15 @@ const PLATE3D = {
       g.fillRect(0, 0, 64, 64);
       const tex = new THREE.CanvasTexture(c);
       tex.mapping = THREE.EquirectangularReflectionMapping;
-      sc.environment = new THREE.PMREMGenerator(r).fromEquirectangular(tex).texture;
-    } catch (e) { /* lit without reflections */ }
-    PLATE3D.root = new THREE.Group();
-    sc.add(PLATE3D.root);
-    PLATE3D.wire(canvas);
-    new ResizeObserver(function () {
-      PLATE3D.size();
-      if (!PLATE3D.turned) Object.assign(PLATE3D.view, PLATE3D.home);
-      PLATE3D.draw();
-    }).observe($('bd3d'));
-    PLATE3D.load();
-    return true;
+      if (sc.environment) sc.environment.dispose();
+      const pm = new THREE.PMREMGenerator(PLATE3D.r);
+      sc.environment = pm.fromEquirectangular(tex).texture;
+      pm.dispose();
+      tex.dispose();
+    } catch (e) { sc.environment = null; }     // lit without reflections
   },
 
-  // the GLB: its JSON, its binary chunk, a BufferGeometry per mesh with its material's colour and roughness
+  // the GLB: its JSON, its binary chunk, a BufferGeometry per primitive with its material's colour and roughness
   load: function () {
     const x = new XMLHttpRequest();
     x.open('GET', 'ui/models/charuco_plate.glb', true);
@@ -81,25 +102,30 @@ const PLATE3D = {
 
   build: function (buf) {
     const dv = new DataView(buf);
-    if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('not a GLB');
+    if (dv.getUint32(0, true) !== GLB_MAGIC) throw new Error('not a GLB');
     const jl = dv.getUint32(12, true);
     const doc = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jl)));
     const bin = 28 + jl;
-    const arr = function (i, Type, comps) {
-      const a = doc.accessors[i], v = doc.bufferViews[a.bufferView];
-      return new Type(buf, bin + v.byteOffset + (a.byteOffset || 0), a.count * comps);
+    // an accessor's numbers, copied out of the buffer (a copy is aligned whatever its offset), of the kind it says
+    const arr = function (i, comps) {
+      const a = doc.accessors[i], v = doc.bufferViews[a.bufferView], Type = GLB_TYPES[a.componentType];
+      if (!Type || (v.byteStride && v.byteStride !== comps * Type.BYTES_PER_ELEMENT)) throw new Error('accessor ' + i);
+      const start = bin + (v.byteOffset || 0) + (a.byteOffset || 0);
+      return new Type(buf.slice(start, start + a.count * comps * Type.BYTES_PER_ELEMENT));
     };
     const group = new THREE.Group();
     doc.meshes.forEach(function (m) {
-      const pr = m.primitives[0], mat = doc.materials[pr.material].pbrMetallicRoughness;
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(arr(pr.attributes.POSITION, Float32Array, 3)), 3));
-      g.setIndex(new THREE.BufferAttribute(new Uint32Array(arr(pr.indices, Uint32Array, 1)), 1));
-      g.computeVertexNormals();
-      const c = mat.baseColorFactor;
-      const material = new THREE.MeshStandardMaterial({ color: new THREE.Color(c[0], c[1], c[2]), roughness: mat.roughnessFactor,
-                                                        metalness: 0, flatShading: true, envMapIntensity: 0.35 });
-      group.add(new THREE.Mesh(g, material));
+      m.primitives.forEach(function (pr) {
+        const mat = doc.materials[pr.material].pbrMetallicRoughness;
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(arr(pr.attributes.POSITION, 3), 3));
+        if (pr.indices !== undefined) g.setIndex(new THREE.BufferAttribute(arr(pr.indices, 1), 1));
+        g.computeVertexNormals();
+        const c = mat.baseColorFactor;
+        const material = new THREE.MeshStandardMaterial({ color: new THREE.Color(c[0], c[1], c[2]), roughness: mat.roughnessFactor,
+                                                          metalness: 0, flatShading: true, envMapIntensity: 0.35 });
+        group.add(new THREE.Mesh(g, material));
+      });
     });
     PLATE3D.root.add(group);
     PLATE3D.model = group;
@@ -200,4 +226,18 @@ const PLATE3D = {
   },
 
   hide: function () { /* nothing runs while it is hidden: it draws only on a change */ },
+
+  // The page goes away: the GPU's memory is given back (geometries, materials, the reflections, the context).
+  dispose: function () {
+    if (!PLATE3D.r) return;
+    if (PLATE3D.raf) cancelAnimationFrame(PLATE3D.raf);
+    PLATE3D.root.traverse(function (o) {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    });
+    if (PLATE3D.scene.environment) PLATE3D.scene.environment.dispose();
+    PLATE3D.r.dispose();
+    PLATE3D.r = null;
+    PLATE3D.failed = true;
+  },
 };

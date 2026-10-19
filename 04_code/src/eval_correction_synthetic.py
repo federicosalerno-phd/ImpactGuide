@@ -1,8 +1,9 @@
-"""Misalignment score, correction and conformal threshold on synthetic perturbations of the T5.4 views (T14.1, T14.2).
+"""Misalignment score, correction and conformal threshold on synthetic perturbations of the bench phone views.
 
 Input: the photo-resolution run of render_phone_views.py (DATA, 4080 x 3072: four views, ground truth, mandible mesh in
-the board frame), the only views there are until T13.1 renders the face. Truth: the registration of the renders (B =
-board frame, T_M_B = I). Observed mask of each view: the mesh rendered by mesh_overlay.py at the true registration, its
+the board frame), the views of the old bench scene. The mandible mesh is given in the board frame, so its model frame
+is M itself and the true registration is the identity (T_M_B = I; this B is not the head frame of the bench scene).
+Observed mask of each view: the mesh rendered by mesh_overlay.py at the true registration, its
 outline moved by a smooth random field (NOISE_MM, correlation CORR_MM) as a stand-in for SAM. In a share DEFECT of the
 samples one view also gets a segmentation defect (a disc cut out of the mask or added to it at its outline).
 Drape samples (stress set): a drape covers the part of the object beyond a random plane (a share DRAPE_FRAC of the
@@ -13,18 +14,19 @@ Perturbations of the registration (stale registration T_M_B0 = P, true update P^
 - rigid: rotation about the model centroid, angle uniform up to MAX_DEG, plus a translation uniform up to MAX_MM.
 For every sample and view set (1 view: a random one; 2 views: 1+3 or 2+4; 4 views): score at the true registration
 (pre-impact) and at the stale one, correction (correct.py) from the stale one.
-Targets of the TRE: TARGETS vertices by farthest point sampling (stand-in for the clinical targets of T1.3).
+Targets of the TRE: TARGETS vertices by farthest point sampling (stand-in for the clinical targets).
 Samples with an even index are the validation half (tau), the odd ones the test half (detection).
 The first TIMING samples of each perturbation run one at a time in this process: their times go in the tables; the
 others run in parallel worker processes. Samples already in samples.csv are not run again.
 
 Writes
-- C:\\work\\marker-impact\\t14\\samples.csv: one row per sample and view set;
+- WORK/samples.csv (WORK: t14 in the work folder, environment variable IMPACTGUIDE_WORK): one row per sample and
+  view set;
 - 05_results/detection_synthetic.csv: samples without defects; tau (95th percentile of the pre-impact scores of the
   validation half), AUC, sensitivity and specificity on the test half, false alarms on its pre-impact images; for
   comparison the threshold on the 2 mm label (Youden, validation half) and its sensitivity and specificity;
 - 05_results/correction_synthetic.csv: per perturbation and view set, samples without defects; kappa_95 is the kappa
-  that would make the predicted 95% TRE cover 95% of them (indication only: kappa is calibrated in T15.3);
+  that would make the predicted 95% TRE cover 95% of them (indication only: kappa is calibrated on validation data);
 - 05_results/conformal_synthetic.csv: all samples, drapes included; observed silent error rate against alpha over random
   calibration and test splits, with the score gate (tau) and with u alone, for the 2 mm limit and, since synthetic
   corrections never get there, for STRESS_MM (the guarantee holds for any limit).
@@ -50,8 +52,9 @@ import mesh_overlay as mo     # noqa: E402
 import score as sc            # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = Path(r"C:\work\marker-impact\synthetic_pose")
-WORK = Path(r"C:\work\marker-impact\t14")
+WORK_ROOT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
+DATA = WORK_ROOT / "synthetic_pose"
+WORK = WORK_ROOT / "t14"
 RESULTS = ROOT / "05_results"
 A1_BALL_Z = 7.0                 # ball centre above the pad frame origin, P["a1"]["base"][1] in build_test_bench.py
 NOISE_MM, CORR_MM = 0.3, 2.0    # outline noise of the observed masks
@@ -114,6 +117,8 @@ def observed(mask, scale, rng, defect=None):
     out[fd.y0:fd.y0 + d.shape[0], fd.x0:fd.x0 + d.shape[1]] = np.where(d + n < 0.5, 255, 0).astype(np.uint8)
     if defect:
         ys, xs = np.nonzero(sc.outline(out))
+        if not len(xs):          # the noise left no outline: nothing to cut or to add
+            return out
         k = rng.integers(len(xs))
         ys_m, xs_m = np.nonzero(out)
         size = max(np.ptp(xs_m), np.ptp(ys_m))
@@ -230,8 +235,11 @@ def summarize(rows):
         s_test, y_test = [r["score_before_mm"] for r in test], [r["tre_before_mm"] > LIMIT_MM for r in test]
         d = sc.detection(s_test, y_test, tau)
         s_val, y_val = np.array([r["score_before_mm"] for r in val]), np.array([r["tre_before_mm"] > LIMIT_MM for r in val])
-        youden = max(s_val, key=lambda t: np.mean(s_val[y_val] > t) + np.mean(s_val[~y_val] <= t))
-        dy = sc.detection(s_test, y_test, youden)
+        if y_val.any() and (~y_val).any():
+            youden = max(s_val, key=lambda t: np.mean(s_val[y_val] > t) + np.mean(s_val[~y_val] <= t))
+            dy = sc.detection(s_test, y_test, youden)
+        else:                    # the Youden index needs lost and valid registrations in the validation half
+            youden, dy = float("nan"), {"sensitivity": float("nan"), "specificity": float("nan")}
         det.append({"key": name, "tau_mm": f"{tau:.3f}", "auc": f"{d['auc']:.3f}", "sensitivity": f"{d['sensitivity']:.3f}",
                     "specificity": f"{d['specificity']:.3f}", "n_lost": d["n_lost"], "n_valid": d["n_valid"],
                     "false_alarm_pre": f"{np.mean([r['score_pre_mm'] > tau for r in test]):.3f}",

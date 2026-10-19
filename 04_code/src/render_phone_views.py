@@ -1,9 +1,10 @@
-"""Render the smartphone photo views of the test bench with the ground truth of the marker pose (T5.4).
+"""Render the smartphone photo views of the test bench with the ground truth of the marker pose.
 
 Run with Blender 5.2 in the background; the scene is rebuilt from 04_code/tools/build_test_bench.py and nothing is saved:
     blender --background --factory-startup --python 04_code/src/render_phone_views.py -- [--out DIR] [--size W H]
         [--samples N] [--variant a1]
-Writes in DIR (default OUT), for each photo position k = 1..4:
+Writes in DIR (default OUT: synthetic_pose in the work folder, environment variable IMPACTGUIDE_WORK), for each
+photo position k = 1..4:
     view_k.png           what the phone sees (silicone on, pendulum latched up, phone body hidden)
     mandible_mask_k.png  alpha of the mandible alone, to check the overlay renderer
 and gt.json (OpenCV intrinsics, camera from world, world from board, board parameters) and mandible_board.npz (mandible
@@ -15,6 +16,7 @@ printed columns, y along the rows, z into the board.
 """
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +26,7 @@ from mathutils import Matrix
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = ROOT / "04_code" / "tools" / "build_test_bench.py"
-OUT = Path(r"C:\work\marker-impact\synthetic_pose")
+OUT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "synthetic_pose"
 SIZE = (4080, 3072)   # Poco X7 Pro main camera, 12.5 MP binned photo (4:3)
 CV_FROM_BLENDER = Matrix.Diagonal((1.0, -1.0, -1.0, 1.0))   # Blender cameras look along -z with y up
 

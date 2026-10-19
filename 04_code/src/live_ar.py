@@ -1,4 +1,4 @@
-"""Live AR on the phone stream (T20.3; module 8 of ai_design.md): board pose, face overlay and status light.
+"""Live AR on the phone stream: board pose, face overlay and status light.
 
 Three threads work on the frames of the stream (live.py), always on the newest one, never on a queue:
   track     every frame: the board's ChArUco corners followed from the previous frame by optical flow and put back on
@@ -23,8 +23,8 @@ behind, frames are skipped, never queued. The overlay comes late by the stream's
 plus the processing, but on its own frame. The page's calls (status, configure, next_jpeg) only read or set values;
 only a change of the board starts the tracking again (not the layers, the opacity or the rotation).
 
-Frames as ai_design.md (Notazione): C camera (OpenCV), M board (cv2.aruco.CharucoBoard: origin at the outer corner of
-the first square, x along the printed columns, y along the rows, z into the board), B head (bench scene, mm).
+Frames: C camera (OpenCV), M board (cv2.aruco.CharucoBoard: origin at the outer corner of the first square, x along
+the printed columns, y along the rows, z into the board), B head (bench scene, mm).
 
 Boards
     patient   the 5 x 5 board of the marker holder; squares and markers from marker_pose.BOARD
@@ -34,28 +34,44 @@ Boards
               the one on a monitor; without them it is the A4 one
 A pose is used with at least board_tracker.TRACK["min_corners"] corners (8 to start on the calibration board; with
 fewer than 10 they must spread over the board and fit tighter) and a reprojection RMS under the limit: 1 px with
-intrinsics calibrated for the stream (ai_design.md, module 1), 3 px with the nominal ones, which leave out the lens
-distortion. The small patient board works from about 20 to 64 cm (15/10, board shown at its true size on the laptop
-screen; at 1920 x 1440, 20 px per square at the far end).
+intrinsics calibrated for the stream, 3 px with the nominal ones, which leave out the lens distortion. The small
+patient board works from about 20 to 64 cm (15/10/2026, board shown at its true size on the laptop screen; at
+1920 x 1440, 20 px per square at the far end).
 
 Intrinsics of the streaming mode: 03_data/processed/calibration/intrinsics_stream.json, in the format
-calibrate_charuco.py writes for intrinsics_photo.json (T5.3), calibrated on frames of the stream at the working
-distance; scaled if the stream has another size. Until it exists: nominal Poco X7 Pro, 3070 px at the 3072 px height of
-the 4:3 sensor field (as synth_twin.py), so 1439 px at 1920 x 1440, principal point at the centre, no distortion.
+calibrate_charuco.py writes for intrinsics_photo.json, calibrated on frames of the stream at the working distance;
+scaled if the stream has another size of the same shape (a calibration of another aspect ratio, or a file that cannot
+be read, is not used: the nominal camera, with "error": "intrinsics_bad" in its source). Until it exists: nominal Poco
+X7 Pro, 3070 px at the 3072 px height of the 4:3 sensor field (as synth_twin.py), so 1439 px at 1920 x 1440, principal
+point at the centre, no distortion. The synthetic stand-in renders without distortion: its frames are tracked
+without it whatever the calibration says.
 
 Registration T_M_B: a JSON file holding a 4 x 4 "T_M_B" in mm (what ground_truth.py measure writes). Until there is
 one, a demo registration at a fixed offset from the board, which the page always labels as demo:
     patient   the registration of the bench design (the scene, meshes/occluders.npz of synth_twin.py)
     sheet     the face lying on the sheet, centred, looking up
 
-Models in B (mm): the decimated face of T13.1 (synth_twin.py meshes) and the mandible of the bench scene
+Models in B (mm): the decimated face (synth_twin.py meshes) and the mandible of the bench scene
 (build_targets.py), both under C:\\work\\marker-impact and written again by those scripts; for the live view each is
 decimated again to LIVE_TRIANGLES (quadric edge collapse) and kept in LIVE_MODELS.
 
+States (status()["stream_state"], STATES): idle (no stream: never started, or stopped), starting, running, failed
+(the stream gave up, or the last start failed: status()["error"] says why with a code of ERRORS and "cause" the
+link's; start() opens a new stream, no stop() needed), closed (after shutdown()). running is True only for a live
+stream. A frame that fails (tracking, drawing, one model's renderer) is logged and counted (status()["frame_errors"],
+["last_frame_error"]): the picture keeps its last good frame and the threads go on with the next one; "error" says
+frames_failing only when no frame has come out for FAILING_S, and clears with the next good one. A model whose
+renderer cannot be made is left out of the picture (status()["models"][name] False); the rest goes on.
+
 For the app:
-    ar = LiveAR(board="sheet", square_mm=24.0)       # one per process: its compose thread owns the OpenGL context
-                                                     # (squares=(14, 7), marker_mm=... for the board on a monitor)
-    ar.start()                                       # closes the camera app, opens the stream (a few seconds)
+    ar = LiveAR(board="sheet", square_mm=24.0)       # one per process is enough; each compose thread makes and
+                                                     # releases its own OpenGL context
+                                                     # (squares=(14, 7), marker_mm=... for the board on a monitor;
+                                                     # prepare=False: nothing loaded, quick on a GUI thread)
+    ar.prepare()                                     # the models loaded (seconds the first time): on a worker thread;
+                                                     # start() does it when it was not done
+    ar.start()                                       # closes the camera app, opens the stream (a few seconds); after
+                                                     # the stream died, a new one
     jpeg, n = ar.next_jpeg(after=n)                  # newest composed frame
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
     ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
@@ -67,7 +83,7 @@ For the app:
     ar.still()                                       # the newest frame at full size (BGR), for a calibration
     ar.set_registration(path or None)
     ar.set_tracking(hold_s=..., ...)                 # TRACKING and board_tracker.TRACK overrides
-    ar.stop(); ar.shutdown()
+    ar.stop(); ar.shutdown()                         # stop: the stream closed (a start under way cancelled)
     MjpegServer(ar).url                              # the frames for an <img>, on 127.0.0.1
     phone_view.ViewServer(ar)                        # the frames for the phone's screen (cable, Wi-Fi, network)
 
@@ -86,11 +102,17 @@ For the app:
     python live_ar.py test  pose filter; board tracker (board_tracker.py test); synthetic stream: pose against the
                             truth, overlay, light, video rate, a hand over the board, MJPEG; frames of the digital
                             twin with the true registration; the board beside its own live view on one screen
-                            (echo); exit 1 on failure
-    python live_ar.py echo  only the last: the pose with hide_board, and without it
+                            (echo); start, stop and a stream that dies; frames that fail; bad settings and
+                            calibration files; exit 1 on failure (all on the nominal camera, whatever calibration is
+                            on this computer)
+    python live_ar.py echo [DIR]  only the echo check: the pose with hide_board, and without it (pictures into DIR)
 """
+from __future__ import annotations
+
 import argparse
+import hmac
 import json
+import logging
 import secrets
 import sys
 import threading
@@ -109,6 +131,8 @@ import live
 import marker_pose
 import pose_filter
 
+logger = logging.getLogger(__name__)
+
 ROOT = Path(__file__).resolve().parents[2]
 STREAM_INTRINSICS = ROOT / "03_data" / "processed" / "calibration" / "intrinsics_stream.json"
 WORK = Path(r"C:\work\marker-impact")
@@ -117,14 +141,16 @@ DESIGN = WORK / "synth" / "meshes" / "occluders.npz"          # T_M_B of the ben
 MANDIBLE_MESH = WORK / "targets" / "mandible.npz"
 TWIN = WORK / "synth" / "sessions"                              # frames of the digital twin, for the test
 LIVE_MODELS = WORK / "live_models"                              # the models decimated for the live view
+LIVE_REFERENCES = WORK / "live_references"      # reference poses of clips kept inside the project (read-only there)
 LIVE_TRIANGLES = {"face": 4000, "mandible": 6000}
 CAMERA_APP = acquisition.CAMERA_APP     # the phone's camera app holds the camera while it is open
 NOMINAL_F = 3070.0 / 3072.0             # focal length over the height of the 4:3 sensor field (synth_twin.NOMINAL)
-# camera to decoded frame on each link, median of the screen flashes (live.py latency): cable 149 ms on 15/10 night
+# camera to decoded frame on each link, median of the screen flashes (live.py latency): cable 149 ms on 15/10/2026
 # with live.CODEC_OPTIONS (169 ms without, 195 ms in the first test); Wi-Fi not measured yet (None: the page says so
 # and counts only the processing)
 STREAM_LATENCY_MS = {"usb": 149.0, "wifi": None}
 MAX_RMS = {"calibrated": 1.0, "nominal": 3.0}
+ASPECT_TOLERANCE = 0.01                 # a calibration of a frame shape this far off (share) is not used
 DISPLAY_WIDTH = 1280
 JPEG_QUALITY = 80
 # the look of the overlay: each model a veil in its colour of the palette with a light shading, and nothing on its
@@ -144,43 +170,48 @@ COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "repro
 HIDE = {"margin_squares": 0.5, "shrink": 12, "dim": 0.5}   # hide_board: the area around the board, the blur and
                                                             # dimming of a frame without its own pose
 BOARDS = ("patient", "sheet")
+BOARD_KEYS = ("board", "square_mm", "squares", "marker_mm")    # the settings that make the board
 TRACKING = {
-    # temporal filter of the pose (pose_filter.py); the tracking itself is board_tracker.TRACK (set_tracking takes both)
-    "smooth": True,           # False: every frame at its own pose as it comes (the tests of the geometry)
-    "min_cutoff_hz": 2.0,     # smoothing while still: lower is calmer and slower to settle
-    "beta": 0.25,             # cutoff added per px/s of the model's speed past the dead band: higher lags less
-    "d_cutoff_hz": 2.0,       # smoothing of that speed
-    "lead": True,             # moving, the filter carries the pose on by its speed first: no lag at a steady speed
-    "still_px_s": 8.0,        # dead band at least this (px/s at the stream size): slower is noise, not motion
-    "predict_s": 0.3,         # a frame without its own pose is drawn at the pose carried on, at most this far,
-    "predict_tau_s": 0.12,    #   the speed dying away with this time constant (no freeze, no running off)
-    "glide_gap_s": 0.1,       # a jump after this long without the board is taken at once (no glide from a stale pose)
-    "gate_px": 40.0,          # a pose moving the model more than this (px, stream size) from the prediction is a jump:
-    "strong_corners": 0.5,    #   believed with at least this share of the board's corners
-    "strong_rms": 0.6,        #   and an RMS under this share of the limit (gliding there), otherwise only if the next
-    "glide_s": 0.15,          #   pose agrees
-    "noise_k": 2.0,           # each channel's dead band: this many times the speed its expected noise gives
-    "noise_ref_px": 0.5,      # the lowest cutoff scales with noise_ref_px over the expected noise (px per frame),
-    "min_cutoff_floor": 0.4,  #   down to this share for a noisy measure (a small board far away)
-    "min_cutoff_cap": 3.0,    #   and up to this many times for a precise one: the overlay stays glued to the board
+    # the temporal filter of the pose: pose_filter.DEFAULTS (its one source: smoothing, gate, glide, hold and fade);
+    # the tracking itself is board_tracker.TRACK (set_tracking takes both)
+    **pose_filter.DEFAULTS,
+    "strong_corners": 0.5,    # a jump past the filter's gate is believed with at least this share of the
+    "strong_rms": 0.6,        #   board's corners and an RMS under this share of the limit, or when the next pose agrees
     "wait_sure": True,        # a new acquisition is drawn once its mirrored pose is ruled out (board_tracker.py)
-    # loss of the board
-    "hold_s": 0.7,            # the last pose stays drawn this long
-    "fade_s": 0.35,           # then fades out over this time
-    "fade_in_s": 0.1,         # and fades in when the board is found again,
-    "acquire_frames": 2,      #   after this many poses in a row
     "roi_s": 0.4,             # after the board was lost the detection looks where it was for this long
     "recover_s": 0.8,         # and for this long each frame without the board is searched at once where the board
                               #   should be (the pose carried on): the overlay picks it up again on the next frame,
     "recover_px": 250000,     #   when that box, at the scale of the search, is at most this many px (a few ms)
     "views": False,           # separate views, not a video (tests): every frame detected on its own, nothing carried
 }
-_GL_THREAD = None                       # the thread that owns gl_overlay's OpenGL context
-_SUBPIX = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+# the stream's state (status()["stream_state"]) and why it failed (status()["error"])
+IDLE, STARTING, RUNNING, FAILED, CLOSED = STATES = ("idle", "starting", "running", "failed", "closed")
+ERRORS = live.CODES + ("start_failed", "stream_stopped", "replay_unreadable", "frames_failing", "bad_board",
+                       "bad_value", "bad_registration", "closed")
+FAILING_S = 1.5             # frames failing and none composed for this long: status()["error"] says frames_failing
+FAILING_COUNT = 5           #   (and at least this many failures since the last frame composed)
+LOG_EVERY_S = 5.0           # a failing frame is logged at most this often (with the count)
+FAIL_PAUSE_S = 0.2          # a stream object that raises: the track thread waits this long before asking again
+RENDER_FAILS = 3            # a model's renderer failing this many frames in a row: OpenGL gives way to NumPy, then out
+POLL_S = 0.2                # the threads wake at least this often (shutdown)
+WAIT_FRAME_S = 0.1          # the track thread's wait for the next frame
+START_WAIT_S = 30.0         # a start() while another is under way waits for it this long
+JOIN_S = 2.0                # shutdown(), close(): each thread is waited for this long
+MJPEG_CLIENTS = 8           # MJPEG clients served at once
+MJPEG_SOCKET_S = 10.0       # a client that stops reading is dropped after this
 
 
 class LiveARError(RuntimeError):
-    pass
+    """A failure of the live AR meant for the user.
+
+    Args:
+        msg: what happened, for the log.
+        code: why, from ERRORS.
+    """
+
+    def __init__(self, msg, code="start_failed"):
+        super().__init__(msg)
+        self.code = code
 
 
 # ── boards, intrinsics, registration, models ─────────────────────────────────
@@ -200,8 +231,24 @@ def make_board(name, square_mm=None, squares=None, marker_mm=None):
         spec = {"name": name, "squares": [nx, ny], "square_mm": sq, "marker_mm": float(board.getMarkerLength()),
                 "dictionary": calibrate_charuco.BOARD["dictionary"]}
     else:
-        raise LiveARError(f"unknown board {name}")
+        raise LiveARError(f"unknown board {name}", "bad_value")
     spec["corners"] = int(len(board.getChessboardCorners()))
+    return board, spec
+
+
+def check_board(name, square_mm=None, squares=None, marker_mm=None):
+    """The board of these settings, if it can be made (markers smaller than the squares, at least 2 x 2 squares, a
+    dictionary large enough); raises LiveARError ("bad_board") otherwise."""
+    for v in (square_mm, marker_mm):
+        if v is not None and not (np.isfinite(v) and v > 0):
+            raise LiveARError(f"board {name}: a size of {v} mm", "bad_board")
+    try:
+        board, spec = make_board(name, square_mm, squares, marker_mm)
+    except (cv2.error, SystemError, ValueError, TypeError) as e:     # SystemError: OpenCV's assertion, wrapped
+        raise LiveARError(f"board {name} {squares} {square_mm} {marker_mm}: {e}", "bad_board") from e
+    if not 0 < spec["marker_mm"] < spec["square_mm"] or min(spec["squares"]) < 2:
+        raise LiveARError(f"board {name}: marker {spec['marker_mm']} mm, square {spec['square_mm']} mm, squares "
+                          f"{spec['squares']}", "bad_board")
     return board, spec
 
 
@@ -216,39 +263,85 @@ def stream_intrinsics(size, path=STREAM_INTRINSICS):
     """K, dist and their source ({"source": calibrated|nominal, "path", "f"}) for a stream of size (w, h). A stream
     turned upright (taller than wide) against a calibration made across gets the calibration turned a quarter: focal
     lengths and principal point swapped, tangential terms swapped (the sense of the turn is not known: fine for a
-    principal point near the centre, and labelled "turned")."""
+    principal point near the centre, and labelled "turned"). A file that cannot be read, or a calibration of another
+    frame shape (more than ASPECT_TOLERANCE off), is not used: the nominal camera, its source saying
+    "error": "intrinsics_bad" and why ("detail"). Never raises."""
     w, h = size
+    error = None
     if path and Path(path).is_file():
-        d = json.loads(Path(path).read_text(encoding="utf-8"))
-        cw, ch = d["image_size"]
-        K0 = np.array(d["K"], np.float64)
-        dist = np.asarray(d.get("dist", np.zeros(5)), np.float64).ravel()
-        turned = (w > h) != (cw > ch)
-        if turned:
-            K0 = np.array([[K0[1, 1], 0, K0[1, 2]], [0, K0[0, 0], K0[0, 2]], [0, 0, 1.0]])
-            cw, ch = ch, cw
-            if len(dist) >= 4:
-                dist = dist.copy()
-                dist[[2, 3]] = dist[[3, 2]]
-        K = scale_K(K0, w / cw, h / ch)
-        src = {"source": "calibrated", "path": str(path), "date": d.get("date", ""), "rms_px": d.get("rms_px"),
-               "turned": bool(turned)}
-    else:
-        f = NOMINAL_F * min(w, h)       # the sensor's 4:3 field, across or upright
-        K = np.array([[f, 0, (w - 1) / 2], [0, f, (h - 1) / 2], [0, 0, 1.0]])
-        dist = np.zeros(5)
-        src = {"source": "nominal", "path": "", "date": "", "rms_px": None}
+        try:
+            return _calibrated(w, h, Path(path))
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+            error = f"{type(e).__name__}: {e}"
+            _warn_once(Path(path), error)
+    f = NOMINAL_F * min(w, h)       # the sensor's 4:3 field, across or upright
+    K = np.array([[f, 0, (w - 1) / 2], [0, f, (h - 1) / 2], [0, 0, 1.0]])
+    src = {"source": "nominal", "path": "", "date": "", "rms_px": None}
+    if error:
+        src.update({"error": "intrinsics_bad", "detail": error[:200], "path": str(path)})
     src.update({"f": round(float((K[0, 0] + K[1, 1]) / 2), 1), "size": [int(w), int(h)]})
+    return K, np.zeros(5), src
+
+
+def _calibrated(w, h, path):
+    """K, dist, source of a calibration file for frames of w x h (stream_intrinsics); raises when it cannot be used."""
+    d = json.loads(path.read_text(encoding="utf-8"))
+    cw, ch = (int(v) for v in d["image_size"])
+    K0 = np.array(d["K"], np.float64)
+    dist = np.asarray(d.get("dist", np.zeros(5)), np.float64).ravel()
+    if cw <= 0 or ch <= 0 or K0.shape != (3, 3) or not np.all(np.isfinite(K0)) or K0[0, 0] <= 0 or K0[1, 1] <= 0 \
+            or not np.all(np.isfinite(dist)):
+        raise ValueError(f"image_size {cw} x {ch}, K {K0.tolist()}, dist {dist.tolist()}")
+    turned = (w > h) != (cw > ch)
+    if turned:
+        K0 = np.array([[K0[1, 1], 0, K0[1, 2]], [0, K0[0, 0], K0[0, 2]], [0, 0, 1.0]])
+        cw, ch = ch, cw
+        if len(dist) >= 4:
+            dist = dist.copy()
+            dist[[2, 3]] = dist[[3, 2]]
+    if abs((w / h) / (cw / ch) - 1.0) > ASPECT_TOLERANCE:
+        raise ValueError(f"calibrated at {cw} x {ch}, the stream is {w} x {h}: another shape")
+    K = scale_K(K0, w / cw, h / ch)
+    src = {"source": "calibrated", "path": str(path), "date": d.get("date", ""), "rms_px": d.get("rms_px"),
+           "turned": bool(turned), "f": round(float((K[0, 0] + K[1, 1]) / 2), 1), "size": [int(w), int(h)]}
     return K, dist, src
 
 
+_WARNED = set()     # calibration files already reported as not usable (path, modification time)
+
+
+def _warn_once(path, error):
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        key = (str(path), None)
+    if key not in _WARNED:
+        _WARNED.add(key)
+        logger.warning("%s cannot be used (%s): the nominal camera instead", path.name, error)
+
+
 def load_registration(path):
-    """T_M_B (4 x 4, mm) from a JSON file: {"T_M_B": [[...]]} as ground_truth.py writes it, or the bare matrix."""
-    d = json.loads(Path(path).read_text(encoding="utf-8"))
-    T = np.asarray(d["T_M_B"] if isinstance(d, dict) else d, np.float64)
-    if T.shape != (4, 4) or not np.allclose(T[3], [0, 0, 0, 1]) or not np.allclose(T[:3, :3] @ T[:3, :3].T, np.eye(3),
-                                                                                     atol=1e-4):
-        raise LiveARError(f"{Path(path).name}: T_M_B is not a 4 x 4 rigid transform")
+    """T_M_B (4 x 4, mm, in the bench frame B) from a JSON file: {"T_M_B": [[...]]} as ground_truth.py writes it, or
+    the bare matrix. Raises LiveARError (bad_registration) for anything else: a file that cannot be read, a result of
+    ground_truth.py written before its two frames had their names (its "T_M_B" is in the mandible frame, not in B), a
+    result whose head frame was unknown (T_M_B null), a matrix that is not a rigid transform."""
+    name = Path(path).name
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise LiveARError(f"{name}: not readable as JSON ({e})", "bad_registration") from e
+    if isinstance(d, dict) and "G" in d and "T_M_mandible" not in d:
+        raise LiveARError(f"{name}: an older ground_truth result, its T_M_B in the mandible frame: measure again",
+                          "bad_registration")
+    if isinstance(d, dict) and d.get("T_M_B") is None:
+        raise LiveARError(f"{name}: no T_M_B (the head frame B was unknown when it was measured)", "bad_registration")
+    try:
+        T = np.asarray(d["T_M_B"] if isinstance(d, dict) else d, np.float64)
+    except (TypeError, ValueError) as e:
+        raise LiveARError(f"{name}: T_M_B is not a matrix of numbers", "bad_registration") from e
+    if T.shape != (4, 4) or not np.all(np.isfinite(T)) or not np.allclose(T[3], [0, 0, 0, 1]) \
+            or not np.allclose(T[:3, :3] @ T[:3, :3].T, np.eye(3), atol=1e-4) or np.linalg.det(T[:3, :3]) <= 0:
+        raise LiveARError(f"{name}: T_M_B is not a 4 x 4 rigid transform", "bad_registration")
     return T
 
 
@@ -360,11 +453,26 @@ def close_camera_app(serial=None):
 
 
 # ── stand-ins for the phone ──────────────────────────────────────────────────
+PAUSE_STEP_S = 0.05     # a stand-in's pause looks at its stop event at least this often
+
+
+def _pause(stop, seconds):
+    """Waits `seconds` unless `stop` (an Event) is set first: with time.sleep, whose timer is fine (about 1 ms) where an
+    Event's wait on Windows goes by the 15.6 ms system tick and would bunch the frames of a stand-in."""
+    end = time.perf_counter() + seconds
+    while not stop.is_set():
+        left = end - time.perf_counter()
+        if left <= 0:
+            return
+        time.sleep(min(left, PAUSE_STEP_S))
+
+
 class _Frames:
-    """What the stand-ins share with live.PhoneStream: the newest frame with its time and counter, the rate."""
+    """What the stand-ins share with live.PhoneStream: the newest frame with its time and counter, the rate, alive,
+    error and code, close(). Their thread starts with start() (or wait_first()), not in the constructor."""
 
     def _init_frames(self):
-        self.error, self.restarts = None, 0
+        self.error, self.code, self.cause, self.restarts = None, "", "", 0
         self._lock = threading.Lock()
         self._new = threading.Condition(self._lock)
         self._frame, self._t, self._n = None, 0.0, 0
@@ -372,6 +480,15 @@ class _Frames:
         self._times = deque(maxlen=120)
         self._decode_ms = deque(maxlen=120)
         self._stop = threading.Event()
+        self.thread = None
+
+    def start(self):
+        """Starts the thread that makes the frames (once)."""
+        with self._lock:
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._run, daemon=True, name=self.THREAD)
+                self.thread.start()
+        return self
 
     def _put(self, img, decode_ms=None, t_capture=None):
         t = time.perf_counter()
@@ -421,17 +538,33 @@ class _Frames:
 
     @property
     def alive(self):
-        return self.thread.is_alive()
+        return self.thread is not None and self.thread.is_alive()
 
     def close(self):
+        """Stops the thread and waits for it (JOIN_S)."""
         self._stop.set()
         with self._new:
             self._new.notify_all()
+        th = self.thread
+        if th is not None and th is not threading.current_thread():
+            th.join(JOIN_S)
+
+    def _ended(self, error, code):
+        """The thread ends on its own (cannot read): why, for alive, error and code."""
+        with self._new:
+            self.error, self.code = error, code
+            self._new.notify_all()
 
     def wait_first(self, timeout=5.0):
-        t0 = time.perf_counter()
-        while self.latest()[0] is None and time.perf_counter() - t0 < timeout:
-            time.sleep(0.01)
+        """Starts the thread and returns once the first frame is in (or it ended, or the timeout passed)."""
+        self.start()
+        deadline = time.perf_counter() + timeout
+        with self._new:
+            while self._frame is None and not self._stop.is_set() and self.error is None:
+                left = deadline - time.perf_counter()
+                if left <= 0 or not self.thread.is_alive():
+                    break
+                self._new.wait(min(left, 0.05))
         return self
 
 
@@ -459,10 +592,14 @@ def bench_script(spec, period=24.0):
 
 class SyntheticStream(_Frames):
     """Stand-in for live.PhoneStream: the board on a grey table, filmed by a camera that sways above it, rendered with
-    the same pinhole camera the page uses. truth(n) is the true T_C_M of frame n. With board None there is no board.
-    script(t) -> (phase, hands) drives the sway and lays hands over the board (bench_script); exposure_s blurs the
-    frame along the motion (the mean of three renders over the exposure); noise is the sensor noise (sigma, grey
-    levels)."""
+    the same pinhole camera the page uses, without lens distortion (distortion_free: the live AR tracks its frames
+    without any). truth(n) is the true T_C_M of frame n. With board None there is no board. script(t) -> (phase,
+    hands) drives the sway and lays hands over the board (bench_script); exposure_s blurs the frame along the motion
+    (the mean of three renders over the exposure); noise is the sensor noise (sigma, grey levels). The frames come
+    once start() or wait_first() is called; render() works without."""
+
+    THREAD = "synthetic_stream"
+    distortion_free = True
 
     def __init__(self, board, spec, K, size=(1920, 1440), fps=30, seed=0, script=None, exposure_s=0.0, noise=2.0):
         self._init_frames()
@@ -495,8 +632,6 @@ class SyntheticStream(_Frames):
         self._centre = np.array([nx * spec["square_mm"] / 2, ny * spec["square_mm"] / 2, 0.0])
         self._dist = 520.0 if spec["name"] == "sheet" else 380.0
         self._pan = 0.25 * min(nx, ny) * spec["square_mm"]
-        self.thread = threading.Thread(target=self._run, daemon=True, name="synthetic_stream")
-        self.thread.start()
 
     def pose(self, t):
         """T_C_M at phase t (s with the default sway): the camera sways in front of the board, below its bottom edge,
@@ -563,7 +698,7 @@ class SyntheticStream(_Frames):
                 self._truth[n] = T
                 self._truth.pop(n - 3000, None)
             nxt += period
-            time.sleep(max(0.0, nxt - time.perf_counter()))
+            _pause(self._stop, nxt - time.perf_counter())
 
     def truth(self, n):
         with self._lock:
@@ -577,6 +712,7 @@ class ReplayStream(_Frames):
     (`T_C_M`, N x 4 x 4). truth(n) gives back the item of `truth` (or of that file) that goes with frame n."""
 
     VIDEO = (".mp4", ".mov", ".mkv", ".avi", ".h264", ".264")
+    THREAD = "replay_stream"
 
     def __init__(self, source, fps=10, truth=None):
         self._init_frames()
@@ -591,7 +727,7 @@ class ReplayStream(_Frames):
         self._images = [] if self._video else src
         self.fps = fps if self._video else min(fps, 10)       # images: at most 10 a second
         if not self._video and not self._images:
-            raise LiveARError(f"nothing to play in {source}")
+            raise LiveARError(f"nothing to play in {source}", "replay_unreadable")
         self._times_rec, self._pts_rec = None, None
         if self._video is not None:
             stem = self._video.with_suffix("")
@@ -607,8 +743,6 @@ class ReplayStream(_Frames):
         self._truth = list(truth) if truth is not None else None
         self._k = 0                       # index of the frame in the recording
         self._index = {}                  # stream counter -> index in the recording
-        self.thread = threading.Thread(target=self._run, daemon=True, name="replay_stream")
-        self.thread.start()
 
     def _frames(self):
         """(image, decode ms, index in the recording), in a loop."""
@@ -621,9 +755,17 @@ class ReplayStream(_Frames):
                 with open(self._video, "rb") as fh:
                     while not self._stop.is_set():
                         data = fh.read(1 << 18)
-                        for packet in codec.parse(data):
+                        try:
+                            packets = codec.parse(data)
+                        except av.error.FFmpegError:        # bytes that are not H.264: skipped
+                            packets = []
+                        for packet in packets:
                             t0 = time.perf_counter()
-                            for frame in codec.decode(packet):
+                            try:
+                                frames = codec.decode(packet)
+                            except av.error.FFmpegError:    # a bad packet: skipped (none good: replay_unreadable)
+                                continue
+                            for frame in frames:
                                 img = frame.to_ndarray(format="bgr24")
                                 yield img, (time.perf_counter() - t0) * 1e3, k
                                 k += 1
@@ -631,13 +773,13 @@ class ReplayStream(_Frames):
                         if not data:
                             break
                 if k == 0:
-                    self.error = f"cannot read {self._video.name}"
+                    self._ended(f"cannot read {self._video.name}", "replay_unreadable")
                     return
             elif self._video is not None:
                 cap = cv2.VideoCapture(str(self._video))
                 ok, img = cap.read()
                 if not ok:
-                    self.error = f"cannot read {self._video.name}"
+                    self._ended(f"cannot read {self._video.name}", "replay_unreadable")
                     return
                 k = 0
                 while ok and not self._stop.is_set():
@@ -649,7 +791,7 @@ class ReplayStream(_Frames):
                 for k, p in enumerate(self._images):
                     img = p if isinstance(p, np.ndarray) else cv2.imread(str(p), cv2.IMREAD_COLOR)
                     if img is None:
-                        self.error = f"cannot read {p.name}"
+                        self._ended(f"cannot read {p.name}", "replay_unreadable")
                         return
                     yield img, None, k
 
@@ -662,7 +804,7 @@ class ReplayStream(_Frames):
             if rec is not None and k < len(rec):
                 if k == 0:
                     t_loop = time.perf_counter()
-                time.sleep(max(0.0, t_loop + rec[k] - time.perf_counter()))
+                _pause(self._stop, t_loop + rec[k] - time.perf_counter())
             if k == 0 or img.shape[:2] != size:     # a new loop or a new frame size: the tracking starts again
                 self._session += 1
                 size = img.shape[:2]
@@ -678,7 +820,7 @@ class ReplayStream(_Frames):
                 self._index.pop(n - 20000, None)
             if rec is None or k >= len(rec):
                 nxt += period
-                time.sleep(max(0.0, nxt - time.perf_counter()))
+                _pause(self._stop, nxt - time.perf_counter())
             if self._stop.is_set():
                 return
 
@@ -696,17 +838,32 @@ class ReplayStream(_Frames):
 class LiveAR:
     """Phone stream -> board tracked on every frame -> filtered pose -> face overlay (see the module docstring).
 
-    The threads live as long as the object: track, detect and compose (which owns the OpenGL context and so is never
-    replaced): stop() and start() only close and open the stream. Meant as one per process (the app keeps one); a
-    later one makes its own OpenGL context. Nothing here blocks the caller's thread for long: the calls of the page
-    (status, configure, set_tracking, next_jpeg) only read or set values under a lock."""
+    Three threads (track, detect, compose) start with the first start() or attach() and live until shutdown(); the
+    compose thread makes, uses and releases its own OpenGL context. stop() and start() only close and open the stream.
+    The calls of the page (status, configure, set_tracking, next_jpeg) only read or set values under a short lock;
+    start() waits for the stream (seconds) and prepare() loads the models (seconds the first time): both belong on a
+    worker thread, never on a GUI thread.
+
+    Args:
+        board: "patient" or "sheet" (BOARDS); square_mm, squares, marker_mm: the sheet's layout (None: the A4 one).
+        registration: a JSON file with T_M_B (None: the demo registration).
+        face, mandible, axes, opacity, hide_board: what is drawn (see configure()).
+        intrinsics: the stream's calibration file (None: the nominal camera).
+        synthetic, replay, replay_truth, script, exposure_s: a stand-in for the phone (tests, bench).
+        serial, size, fps: the phone's stream.
+        display_width, colors: the picture's width and the palette.
+        log: a callable for progress lines (None: quiet).
+        tracking: overrides of TRACKING and board_tracker.TRACK.
+        prepare: load the models now (True, as before); False leaves it to prepare() or the first start().
+    """
 
     def __init__(self, board="sheet", square_mm=None, registration=None, face=True, mandible=False, axes=True,
                  intrinsics=STREAM_INTRINSICS, synthetic=False, serial=None, size="1920x1440", fps=30,
                  display_width=DISPLAY_WIDTH, colors=None, log=None, replay=None, replay_truth=None, tracking=None,
-                 script=None, exposure_s=0.0, squares=None, marker_mm=None, opacity=OPACITY, hide_board=False):
+                 script=None, exposure_s=0.0, squares=None, marker_mm=None, opacity=OPACITY, hide_board=False,
+                 prepare=True):
         if board not in BOARDS:
-            raise LiveARError(f"unknown board {board}")
+            raise LiveARError(f"unknown board {board}", "bad_value")
         self.intrinsics_path = Path(intrinsics) if intrinsics else None
         self.synthetic, self.serial, self.size, self.fps = synthetic, serial, size, fps
         self.replay, self.replay_truth = replay, replay_truth     # recorded frames in place of the phone
@@ -720,7 +877,9 @@ class LiveAR:
         self._frame_ready = threading.Condition(self._lock)
         self._det_cv = threading.Condition(self._lock)
         self._job_cv = threading.Condition(self._lock)
+        self._state_cv = threading.Condition(self._lock)     # the stream or the state changed
         self._apply_lock = threading.Lock()
+        self._prepare_lock = threading.Lock()
         self._want = {"board": board, "square_mm": float(square_mm or calibrate_charuco.BOARD["square"]),
                       "squares": [int(n) for n in squares] if squares else None,
                       "marker_mm": float(marker_mm) if marker_mm else None,
@@ -730,27 +889,28 @@ class LiveAR:
                       "hide_board": bool(hide_board), "version": 1}
         self._tracking_version = 1
         self._stream = None
-        self._starting = False
+        self._opening = None            # the phone stream start() is opening: stop() closes it
+        self._state, self._gen = IDLE, 0    # the stream's state; each start, stop and attach is a new generation
+        self._error, self._error_detail, self._cause = "", "", ""
         self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = None, 0, None, None
         self._link = None               # the link of the phone's stream (usb, wifi); None for the stand-ins
+        self._t_logged = -np.inf        # when a failure was last logged
         self._reset_run()
         self._status = {}
-        self._error = ""
         self._quit = threading.Event()
-        self._models = load_models(log=self.log)
-        self._renderers, self._centroids = {}, {}
+        self._models, self._prepared = {}, False
+        self._unrenderable = {}         # model -> why no renderer could be made for it (left out of the picture)
+        self._renderers, self._centroids, self._render_fails, self._numpy_only = {}, {}, {}, set()
+        self._gl, self._gl_failed = None, False     # the compose thread's OpenGL context
         self.renderer = ""
         self._applied = 0
         self._setup = None
         self._cam = (None, None, {})       # K, dist, source for the size of the last frame
         self._cam_size = None
-        self._apply(dict(self._want))
         self._threads = []
-        for name, target in (("live_ar_compose", self._compose_loop), ("live_ar_track", self._track_loop),
-                             ("live_ar_detect", self._detect_loop)):
-            th = threading.Thread(target=target, daemon=True, name=name)
-            th.start()
-            self._threads.append(th)
+        if prepare:
+            self.prepare()
+        self._apply(dict(self._want))
 
     def _reset_run(self):
         """What belongs to one run of the stream (under the lock, or before the threads start)."""
@@ -777,101 +937,291 @@ class LiveAR:
         self._skipped = 0                 # frames tracked but not drawn (the compose thread was busy)
         self._view_k = None               # quarter turns of the composed frame (_view_quarter)
         self._cpu = deque(maxlen=40)      # (wall, process CPU time) for the load
+        self._frame_errors = 0            # frames (or stages of one) that failed in this run
+        self._fails_since_good = 0        # failures since the last frame composed
+        self._last_frame_error = None     # {"where", "what", "t"} of the last one
+        self._t_good = time.perf_counter()   # the last frame composed (or the start of the run)
 
     # ── control, from any thread ─────────────────────────────────────────
     @property
     def running(self):
-        return self._stream is not None
+        """True while a stream is attached and alive; False for one that died (start() opens a new one)."""
+        stream = self._stream
+        return stream is not None and bool(stream.alive)
 
-    def start(self, timeout=20.0):
-        """Closes the camera app and opens the stream; returns once the first frame is in (raises on failure)."""
-        if self._stream is not None:
-            return self
-        self._starting, self._error = True, ""
+    @property
+    def closed(self):
+        """True after shutdown(): the frames' readers end (next_jpeg and next_frame only time out)."""
+        return self._quit.is_set()
+
+    @property
+    def state(self):
+        """The stream's state (STATES)."""
+        with self._lock:
+            return self._state_now()
+
+    def prepare(self):
+        """Loads the models (decimated for the live view the first time: seconds), once, thread safe. start() and
+        attach() call it; an app calls it first on a worker thread so that its GUI never waits for it.
+
+        Returns:
+            self.
+        """
+        with self._prepare_lock:
+            if self._prepared:
+                return self
+            models = load_models(log=self.log)
+            with self._lock:
+                self._models, self._prepared = models, True
+                if self._setup is not None:
+                    self._want["version"] += 1      # the demo registration and the model points use the face
+                want = dict(self._want)
+            if self._setup is not None and not self.running:
+                self._apply(want)
+        return self
+
+    def start(self, timeout=None):
+        """Opens the stream (closing the phone's camera app first) and returns once the first frame is in. A stream
+        that died is closed and a new one opened, without stop(). A call while another start is under way waits for
+        it; stop() during the start cancels it (the stream opened is closed, start() returns, running stays False).
+        timeout is not used (kept for the callers).
+
+        Returns:
+            self.
+
+        Raises:
+            LiveARError: after shutdown() ("closed"), or a stand-in that cannot play ("replay_unreadable").
+            live.LiveError: the phone's stream did not start (its code says why); status() says it too.
+        """
+        with self._lock:
+            if self._quit.is_set():
+                raise LiveARError("the live AR was shut down", "closed")
+            if self._state == STARTING:
+                self._state_cv.wait_for(lambda: self._state != STARTING or self._quit.is_set(), START_WAIT_S)
+                return self
+            if self._state_now() == RUNNING:
+                return self
+            dead, self._stream = self._stream, None
+            self._gen += 1
+            gen = self._gen
+            self._state = STARTING
+            self._error, self._error_detail, self._cause = "", "", ""
+            self._jpeg, self._bgr = None, None
+            self._state_cv.notify_all()
+        if dead is not None:
+            self._close(dead)
         try:
-            if self.replay is not None:
-                stream = ReplayStream(self.replay, self.fps, self.replay_truth).wait_first()
-            elif self.synthetic:
-                stream = self._synthetic_stream()
+            self.prepare()
+            self._ensure_threads()
+            stream = self._open(gen)
+        except BaseException as e:  # recorded for status() (a SystemExit too: never STARTING for ever), then raised
+            with self._lock:
+                mine = self._gen == gen
+                if mine:
+                    self._state = FAILED
+                    code = getattr(e, "code", "") if isinstance(e, Exception) else ""    # SystemExit's is its text
+                    self._error = code if isinstance(code, str) and code else "start_failed"
+                    self._cause = getattr(e, "cause", "") or ""
+                    self._state_cv.notify_all()
+            logger.info("live AR: start failed (%s): %s", getattr(e, "code", ""), e)
+            if not mine and isinstance(e, Exception):   # stop() came meanwhile: a cancelled start, not a failure
+                return self
+            raise
+        if stream is None:          # cancelled while opening
+            return self
+        with self._lock:
+            mine = self._gen == gen and not self._quit.is_set()
+            if mine:
+                self._install(stream)
+        if not mine:
+            self._close(stream)
+        return self
+
+    def _open(self, gen):
+        """The stream of this run, started (the first frame in); None when stop() cancelled the start."""
+        if self.replay is not None:
+            stream = ReplayStream(self.replay, self.fps, self.replay_truth)
+        elif self.synthetic:
+            stream = self._synthetic_stream()
+        else:
+            close_camera_app(self.serial)
+            stream = live.PhoneStream(self.serial, self.size, self.fps, log=self.log)
+        with self._lock:
+            cancelled = self._gen != gen
+            if not cancelled:
+                self._opening = stream
+        if cancelled:
+            self._close(stream)
+            return None
+        try:
+            if isinstance(stream, live.PhoneStream):
+                stream.start()
             else:
-                close_camera_app(self.serial)
-                stream = live.open_stream(self.serial, self.size, self.fps, log=self.log)
-        except Exception as e:
-            self._error = str(e)
+                stream.wait_first()
+        except live.LiveError as e:
+            if e.code == "stopped":     # closed by stop()
+                return None
             raise
         finally:
-            self._starting = False
-        self.attach(stream)
-        return self
+            with self._lock:
+                if self._opening is stream:
+                    self._opening = None
+        if stream.latest_item() is None and not stream.alive:      # a stand-in that ended at once
+            stream.close()
+            raise LiveARError(stream.error or "the stream ended", getattr(stream, "code", "") or "stream_stopped")
+        return stream
 
     def attach(self, stream):
-        """Works on a stream opened elsewhere (anything with wait_item or wait_frame, stats, alive, error, close)."""
+        """Works on a stream opened elsewhere (anything with wait_item or wait_frame, stats, alive, error, close); the
+        one before is closed."""
+        self.prepare()
+        self._ensure_threads()
         with self._lock:
-            self._stream = stream
-            self._link = getattr(stream, "link", None)
-            self._status = {}
-            self._reset_run()               # nothing of the stream before
-            self._cam_size = None           # intrinsics read again: a calibration may have been saved meanwhile
+            if self._quit.is_set():
+                raise LiveARError("the live AR was shut down", "closed")
+            self._gen += 1
+            old = self._stream
+            self._install(stream)
+        if old is not None and old is not stream:
+            self._close(old)
         return self
 
+    def _install(self, stream):
+        """The stream of a new run (under the lock)."""
+        self._stream = stream
+        self._link = getattr(stream, "link", None)
+        self._status = {}
+        self._reset_run()               # nothing of the stream before
+        self._cam_size = None           # intrinsics read again: a calibration may have been saved meanwhile
+        self._state = RUNNING
+        self._error, self._error_detail, self._cause = "", "", ""
+        self._state_cv.notify_all()
+
     def _synthetic_stream(self):
-        w, h = (int(x) for x in self.size.split("x"))
+        w, h = self._size_wh()
         K, _, _ = stream_intrinsics((w, h), self.intrinsics_path)
-        return SyntheticStream(self._setup["board"], self._spec, K, (w, h), self.fps, script=self.script,
-                               exposure_s=self.exposure).wait_first()
+        setup = self._setup
+        return SyntheticStream(setup["board"], setup["spec"], K, (w, h), self.fps, script=self.script,
+                               exposure_s=self.exposure)
 
     def stop(self):
+        """Closes the stream, or cancels a start under way; the picture goes. Returns once the stream is closed."""
         with self._lock:
+            self._gen += 1
             stream, self._stream = self._stream, None
+            opening, self._opening = self._opening, None
+            if self._state != CLOSED:
+                self._state = IDLE
+            self._error, self._error_detail, self._cause = "", "", ""
             self._jpeg, self._bgr = None, None
-            self._frame_ready.notify_all()
-            self._det_cv.notify_all()
-        if stream is not None:
-            stream.close()
+            for cv in (self._frame_ready, self._det_cv, self._state_cv):
+                cv.notify_all()
+        for s in (opening, stream):
+            if s is not None:
+                self._close(s)
 
     def shutdown(self):
+        """Stops the stream and the threads (each joined for JOIN_S); the compose thread releases its renderers and
+        its OpenGL context. The object cannot start again."""
         self.stop()
-        self._quit.set()
         with self._lock:
-            self._det_cv.notify_all()
-            self._job_cv.notify_all()
-        for th in self._threads:
-            th.join(timeout=2.0)
+            self._quit.set()
+            self._state = CLOSED
+            for cv in (self._det_cv, self._job_cv, self._frame_ready, self._state_cv):
+                cv.notify_all()
+            threads = list(self._threads)
+        for th in threads:
+            th.join(timeout=JOIN_S)
+
+    @staticmethod
+    def _close(stream):
+        try:
+            stream.close()
+        except (OSError, RuntimeError) as e:    # a stream that fails to close must not stop the caller
+            logger.warning("live AR: closing the stream failed: %s", e)
+
+    def _ensure_threads(self):
+        with self._lock:
+            if self._threads or self._quit.is_set():
+                return
+            for name, target in (("live_ar_compose", self._compose_loop), ("live_ar_track", self._track_loop),
+                                 ("live_ar_detect", self._detect_loop)):
+                th = threading.Thread(target=target, daemon=True, name=name)
+                th.start()
+                self._threads.append(th)
+
+    def _state_now(self):
+        """The state, a stream that died seen at once (under the lock)."""
+        if self._state == RUNNING and (self._stream is None or not self._stream.alive):
+            self._stream_died(self._stream)
+        return self._state
+
+    def _stream_died(self, stream):
+        """The stream gave up (under the lock): failed, with its code and the link's cause."""
+        self._state = FAILED
+        self._error = getattr(stream, "code", "") or "stream_stopped"
+        self._cause = getattr(stream, "cause", "") or ""
+        self._state_cv.notify_all()
+        logger.info("live AR: the stream stopped (%s): %s", self._error, getattr(stream, "error", ""))
+
+    def _error_now(self):
+        """status()["error"] (under the lock): why the stream failed, or frames_failing when no frame has come out
+        for FAILING_S with failures meanwhile; "" otherwise."""
+        if self._state == FAILED:
+            return self._error or "stream_stopped"
+        if (self._state == RUNNING and self._fails_since_good >= FAILING_COUNT
+                and time.perf_counter() - self._t_good > FAILING_S):
+            return "frames_failing"
+        return ""
 
     def configure(self, **kw):
         """board, square_mm, squares and marker_mm (the calibration board's layout: None for the A4 one), face,
         mandible, axes, opacity (0-1, of the overlay), view_rotation (None: the phone's way up,
         else 0, 90, 180 or 270 degrees clockwise), hide_board (the board covered in the picture shown): applied from
         the next frame. Only a change of the board starts the tracking again; the layers, the opacity, the rotation and
-        hide_board do not touch it."""
+        hide_board do not touch it. Everything is checked before anything is taken.
+
+        Raises:
+            LiveARError: an unknown board or rotation, a value that is not a number ("bad_value"), a board that cannot
+                be made ("bad_board": a marker not smaller than its square, too many squares); nothing is changed.
+        """
         if kw.get("board") is not None and kw["board"] not in BOARDS:
-            raise LiveARError(f"unknown board {kw['board']}")
+            raise LiveARError(f"unknown board {kw['board']}", "bad_value")
         if "view_rotation" in kw and kw["view_rotation"] not in (None, 0, 90, 180, 270):
-            raise LiveARError(f"view_rotation {kw['view_rotation']}: None, 0, 90, 180 or 270")
+            raise LiveARError(f"view_rotation {kw['view_rotation']}: None, 0, 90, 180 or 270", "bad_value")
         with self._lock:
-            before = {k: self._want[k] for k in ("board", "square_mm", "squares", "marker_mm")}
-            if kw.get("board") is not None:
-                self._want["board"] = kw["board"]
-            if kw.get("square_mm") is not None:
-                self._want["square_mm"] = float(kw["square_mm"])
-            if "squares" in kw:
-                self._want["squares"] = [int(n) for n in kw["squares"]] if kw["squares"] else None
-            if "marker_mm" in kw:
-                self._want["marker_mm"] = float(kw["marker_mm"]) if kw["marker_mm"] else None
-            for k in ("face", "mandible", "axes", "hide_board"):
-                if kw.get(k) is not None:
-                    self._want[k] = bool(kw[k])
-            if kw.get("opacity") is not None:
-                self._want["opacity"] = float(np.clip(float(kw["opacity"]), 0.0, 1.0))
-            if "view_rotation" in kw:
-                self._want["view_rotation"] = kw["view_rotation"]
-            board_changed = before != {k: self._want[k] for k in before}
-            if board_changed:
-                self._want["version"] += 1
             want = dict(self._want)
+            try:
+                if kw.get("board") is not None:
+                    want["board"] = kw["board"]
+                if kw.get("square_mm") is not None:
+                    want["square_mm"] = float(kw["square_mm"])
+                if "squares" in kw:
+                    want["squares"] = [int(n) for n in kw["squares"]] if kw["squares"] else None
+                if "marker_mm" in kw:
+                    want["marker_mm"] = float(kw["marker_mm"]) if kw["marker_mm"] else None
+                for k in ("face", "mandible", "axes", "hide_board"):
+                    if kw.get(k) is not None:
+                        want[k] = bool(kw[k])
+                if kw.get("opacity") is not None:
+                    opacity = float(kw["opacity"])
+                    if not np.isfinite(opacity):
+                        raise ValueError(f"opacity {opacity}")
+                    want["opacity"] = float(np.clip(opacity, 0.0, 1.0))
+                if "view_rotation" in kw:
+                    want["view_rotation"] = kw["view_rotation"]
+            except (TypeError, ValueError) as e:
+                raise LiveARError(f"a setting that is not a number: {e}", "bad_value") from e
+            board_changed = any(want[k] != self._want[k] for k in BOARD_KEYS)
+            if board_changed:
+                check_board(want["board"], want["square_mm"], want["squares"], want["marker_mm"])
+                want["version"] += 1
+            self._want = want
+            want = dict(want)
+            setup = self._setup
         if not self.running:
             self._apply(want)
-        elif self.synthetic and board_changed and (want["board"] != self._spec["name"] or want["board"] == "sheet"):
+        elif self.synthetic and board_changed and (want["board"] != setup["spec"]["name"] or want["board"] == "sheet"):
             self._apply(want)       # the synthetic stream films the board it was made with: a new one for a new board
             self.stop()
             self.start()
@@ -889,34 +1239,37 @@ class LiveAR:
 
     def set_tracking(self, **kw):
         """Overrides of TRACKING and of board_tracker.TRACK (unknown keys refused); tracker and filter start again
-        from the next frame."""
+        from the next frame, the detectors take theirs at once."""
         bad = [k for k in kw if k not in TRACKING and k not in board_tracker.TRACK]
         if bad:
-            raise LiveARError(f"unknown tracking settings {bad}")
+            raise LiveARError(f"unknown tracking settings {bad}", "bad_value")
         with self._lock:
             self.tracking = {**self.tracking, **kw}
             self._tracking_version += 1
+            setup, tracking = self._setup, self.tracking
+        if setup is not None:
+            for d in (setup["detector"], setup["detector_track"]):
+                d.configure(tracking)
 
     # ── what the page reads ──────────────────────────────────────────────
     def next_jpeg(self, after=0, timeout=1.0):
-        """(JPEG bytes, frame counter) of a composed frame newer than `after`; (None, after) on timeout or when
-        stopped."""
-        with self._frame_ready:
-            self._frame_ready.wait_for(lambda: (self._jpeg is not None and self._jpeg_n != after) or self._quit.is_set(),
-                                       timeout=timeout)
-            if self._jpeg is None or self._jpeg_n == after:
-                return None, after
-            return self._jpeg, self._jpeg_n
+        """(JPEG bytes, frame counter) of a composed frame newer than `after`; (None, after) on timeout, when stopped,
+        or once shut down (then after the whole timeout: a client loop never spins; it ends on `closed`)."""
+        jpeg, n, _ = self.next_frame(after, timeout)
+        return jpeg, n
 
     def next_frame(self, after=0, timeout=1.0):
         """As next_jpeg, with the time.perf_counter() when the frame was composed: (JPEG, counter, time), or
         (None, after, None)."""
+        deadline = time.perf_counter() + timeout
         with self._frame_ready:
-            self._frame_ready.wait_for(lambda: (self._jpeg is not None and self._jpeg_n != after) or self._quit.is_set(),
-                                       timeout=timeout)
-            if self._jpeg is None or self._jpeg_n == after:
-                return None, after, None
-            return self._jpeg, self._jpeg_n, self._jpeg_t
+            self._frame_ready.wait_for(
+                lambda: (self._jpeg is not None and self._jpeg_n != after) or self._quit.is_set(), timeout=timeout)
+            if not self._quit.is_set() and self._jpeg is not None and self._jpeg_n != after:
+                return self._jpeg, self._jpeg_n, self._jpeg_t
+        if self._quit.is_set():
+            time.sleep(max(0.0, deadline - time.perf_counter()))
+        return None, after, None
 
     def note_served(self, ms):
         """The MJPEG server wrote a frame to the page in `ms`."""
@@ -951,27 +1304,43 @@ class LiveAR:
         return item.bgr().copy(), item.n
 
     def settings(self):
-        """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes, opacity."""
+        """The settings asked for: board, square_mm, squares, marker_mm, registration, face, mandible, axes, opacity,
+        view_rotation, hide_board."""
         with self._lock:
             return {k: v for k, v in self._want.items() if k != "version"}
 
     def status(self):
+        """What the page shows: the keys listed in the module docstring (state, error, light, rates, timings,
+        sources, layers). Never raises for a bad calibration file (its source says intrinsics_bad)."""
         with self._lock:
+            state = self._state_now()
+            error, cause, detail = self._error_now(), self._cause, self._error_detail
             st = dict(self._status)
             stream = self._stream
             want = dict(self._want)
             served = list(self._served)
             cpu = list(self._cpu)
-        st.update({"running": stream is not None, "starting": self._starting, "error": self._error,
+            setup = self._setup
+            models, prepared, unrenderable = self._models, self._prepared, set(self._unrenderable)
+            frame_errors, last = self._frame_errors, self._last_frame_error
+            cam = self._cam[2]
+        now = time.perf_counter()
+        if prepared:
+            have = {k: k in models and k not in unrenderable for k in ("face", "mandible")}
+        else:                           # not loaded yet: what is on this computer
+            have = {"face": FACE_MESH.is_file(), "mandible": MANDIBLE_MESH.is_file()}
+        st.update({"running": state == RUNNING, "starting": state == STARTING, "stream_state": state,
+                   "error": error, "cause": cause, "error_detail": detail, "frame_errors": frame_errors,
+                   "last_frame_error": None if last is None else {"where": last["where"], "what": last["what"],
+                                                                  "age_s": round(now - last["t"], 1)},
                    "synthetic": self.synthetic or self.replay is not None, "replay": self.replay is not None,
                    "renderer": self.renderer,
                    "layers": {k: want[k] for k in ("face", "mandible", "axes")}, "opacity": want["opacity"],
-                   "hide_board": want["hide_board"],
-                   "models": {k: k in self._models for k in ("face", "mandible")},
-                   "triangles": {k: int(len(f)) for k, (_, f) in self._models.items()},
-                   "board": self._spec, "registration": self._setup["registration"], "score": None})
+                   "hide_board": want["hide_board"], "models": have,
+                   "triangles": {k: int(len(f)) for k, (_, f) in models.items()},
+                   "board": setup["spec"], "registration": setup["registration"], "score": None})
         if not st.get("intrinsics"):
-            st["intrinsics"] = self._cam[2] or stream_intrinsics(self._size_wh(), self.intrinsics_path)[2]
+            st["intrinsics"] = cam or stream_intrinsics(self._size_wh(), self.intrinsics_path)[2]
         if stream is None:
             st.update({"tracked": False, "fps_stream": 0.0, "fps_ar": 0.0, "fps_pose": 0.0})
             return st
@@ -983,7 +1352,6 @@ class LiveAR:
         tm = dict(st.get("timings", {}))
         if s.get("decode_ms") == s.get("decode_ms"):     # not NaN
             tm["decode_ms"] = round(s["decode_ms"], 1)
-        now = time.perf_counter()
         recent = [ms for t, ms in served if now - t < 2.0]
         if recent:
             tm["serve_ms"] = round(float(np.mean(recent)), 1)
@@ -1000,9 +1368,9 @@ class LiveAR:
         st["link_waiting"] = bool(s.get("waiting"))     # the link dropped: the stream waits for it to come back
         st["link_drops"] = s.get("link_drops", 0)
         st["restarts"] = s.get("restarts", 0)
-        if not stream.alive:
-            st["error"] = stream.error or "stream stopped"
-            st["cause"] = getattr(stream, "cause", "")
+        if state != RUNNING or error == "frames_failing":
+            # stopped, or no frame composed for FAILING_S: the rates and the light of the last good frame are stale
+            st.update({"tracked": False, "fps_ar": 0.0, "fps_pose": 0.0})
         return st
 
     def _size_wh(self):
@@ -1011,33 +1379,37 @@ class LiveAR:
 
     # ── setup ────────────────────────────────────────────────────────────
     def _apply(self, want):
-        """Board, detector and registration for the wanted settings (worker thread, or any thread while stopped)."""
+        """Board, detectors and registration for the wanted settings (track thread, or any thread while stopped)."""
         with self._apply_lock:
             if want["version"] == self._applied and self._setup is not None:
                 return
             old = self._setup
             board, spec = make_board(want["board"], want["square_mm"], want["squares"], want["marker_mm"])
             if old is not None and spec == old["spec"]:
-                board, detector = old["board"], old["detector"]
-            else:
+                board, detector, detector_track = old["board"], old["detector"], old["detector_track"]
+                for d in (detector, detector_track):
+                    d.configure(self.tracking)
+            else:   # one detector per thread: a detection in the worker never makes the tracking wait
                 detector = board_tracker.Detector(board, spec, self.tracking)
+                detector_track = board_tracker.Detector(board, spec, self.tracking)
+            models = self._models
             reg = {"source": "demo", "path": "", "demo": "", "error": ""}
             T = None
             if want["registration"]:
                 try:
                     T = load_registration(want["registration"])
                     reg.update(source="file", path=want["registration"])
-                except (OSError, ValueError, KeyError, LiveARError) as e:
+                except (OSError, ValueError, KeyError, TypeError, LiveARError) as e:
                     reg["error"] = str(e)
-            if T is None and "face" in self._models:
-                T, reg["demo"] = demo_registration(spec, self._models["face"][0])
+            if T is None and "face" in models:
+                T, reg["demo"] = demo_registration(spec, models["face"][0])
             # one assignment, so a worker never sees the board of one setting with the detector of another
             # the way up of the model in M: +z of the bench frame (the top of the head); the top of the board without
             # a registration
             up = T[:3, :3] @ np.array([0, 0, 1.0]) if T is not None else np.array([0, -1.0, 0])
-            self._setup = {"board": board, "spec": spec, "detector": detector, "T_M_B": T, "registration": reg,
-                           "version": want["version"], "obj": board.getChessboardCorners().astype(np.float64),
-                           "up_M": up / np.linalg.norm(up)}
+            self._setup = {"board": board, "spec": spec, "detector": detector, "detector_track": detector_track,
+                           "T_M_B": T, "registration": reg, "version": want["version"],
+                           "obj": board.getChessboardCorners().astype(np.float64), "up_M": up / np.linalg.norm(up)}
             self._applied = want["version"]
 
     @property
@@ -1045,44 +1417,100 @@ class LiveAR:
         return self._setup["spec"]
 
     def _renderer(self, name):
-        """The renderer of a model, made in the compose thread (OpenGL, or NumPy when OpenGL is not there)."""
-        if name not in self._renderers:
-            v, f = self._models[name]
+        """The renderer of a model, made in the compose thread: OpenGL on the thread's own context, or NumPy when
+        OpenGL is not there (or failed on this model); None when neither can be made (the model is left out)."""
+        r = self._renderers.get(name)
+        if r is not None or name in self._unrenderable:
+            return r
+        v, f = self._models[name]
+        kind = "opengl"
+        if not self._gl_failed and name not in self._numpy_only:
             try:
                 import gl_overlay
-                global _GL_THREAD
-                if _GL_THREAD not in (None, threading.get_ident()):
-                    # gl_overlay keeps one context, bound to the thread that made it: the compose thread of an
-                    # earlier LiveAR. This thread makes its own.
-                    gl_overlay._CTX = None
-                _GL_THREAD = threading.get_ident()
-                r, kind = gl_overlay.GLMeshRenderer(v, f), "opengl"
-            except Exception as e:  # noqa: BLE001
-                self.log(f"{name}: OpenGL renderer not available ({e}); NumPy renderer")
+                if self._gl is None:
+                    self._gl = gl_overlay.standalone_context()
+            except Exception as e:  # noqa: BLE001  no OpenGL here (no moderngl, no driver): NumPy for every model
+                self._gl_failed = True
+                self.log(f"OpenGL not available ({type(e).__name__}: {e}); NumPy renderer")
+            else:
                 try:
-                    import mesh_overlay
-                    r, kind = mesh_overlay.MeshRenderer(v, f), "numpy"
-                except Exception as e2:  # noqa: BLE001  the model is left out, the rest goes on
-                    self._models.pop(name, None)
-                    self._error = f"{name}: {e2}"
-                    return None
-            self._renderers[name] = r
-            if self.renderer != "numpy":
-                self.renderer = kind
-        return self._renderers[name]
+                    r = gl_overlay.GLMeshRenderer(v, f, ctx=self._gl)
+                except Exception as e:  # noqa: BLE001  this model only: NumPy
+                    self.log(f"{name}: OpenGL renderer not available ({type(e).__name__}: {e}); NumPy renderer")
+        if r is None:
+            kind = "numpy"
+            try:
+                import mesh_overlay
+                r = mesh_overlay.MeshRenderer(v, f)
+            except Exception as e:  # noqa: BLE001  the model is left out, the rest goes on
+                with self._lock:
+                    self._unrenderable[name] = type(e).__name__
+                self.log(f"{name}: no renderer ({type(e).__name__}: {e}); left out of the picture")
+                return None
+        self._renderers[name] = r
+        if self.renderer != "numpy":
+            self.renderer = kind
+        return r
 
-    def _intrinsics(self, w, h):
-        if self._cam_size != (w, h):
-            self._cam = stream_intrinsics((w, h), self.intrinsics_path)
-            self._cam_size = (w, h)
+    def _render_failed(self, name, rend, error):
+        """A model that failed to draw on a frame: left out of that frame; after RENDER_FAILS in a row its OpenGL
+        renderer gives way to the NumPy one, and a NumPy one that fails as often leaves the model out of the run."""
+        n = self._render_fails.get(name, 0) + 1
+        self._render_fails[name] = n
+        if n < RENDER_FAILS:
+            return
+        self._render_fails[name] = 0
+        self._renderers.pop(name, None)
+        if hasattr(rend, "release"):
+            self._release(rend)
+        if name in self._numpy_only:
+            with self._lock:
+                self._unrenderable[name] = type(error).__name__
+            self.log(f"{name}: left out of the picture after {RENDER_FAILS} failures in a row")
+        else:
+            self._numpy_only.add(name)
+            self.log(f"{name}: OpenGL failed {RENDER_FAILS} times in a row; NumPy renderer")
+
+    @staticmethod
+    def _release(rend):
+        try:
+            rend.release()
+        except Exception as e:  # noqa: BLE001  freeing GPU objects at the end: nothing else to do
+            logger.debug("renderer release failed: %s", e)
+
+    def _release_gl(self):
+        """The renderers and the OpenGL context freed, on the compose thread that made them."""
+        for rend in list(self._renderers.values()):
+            if hasattr(rend, "release"):
+                self._release(rend)
+        self._renderers.clear()
+        if self._gl is not None:
+            try:
+                self._gl.release()
+            except Exception as e:  # noqa: BLE001  as above
+                logger.debug("OpenGL context release failed: %s", e)
+            self._gl = None
+
+    def _intrinsics(self, w, h, stream=None):
+        """K, dist and their source for frames of w x h: the stream's calibration or the nominal camera; without the
+        lens distortion for a stand-in that renders without it (SyntheticStream)."""
+        plain = bool(getattr(stream, "distortion_free", False))
+        if self._cam_size != (w, h, plain):
+            K, dist, src = stream_intrinsics((w, h), self.intrinsics_path)
+            if plain and np.any(dist):
+                dist = np.zeros_like(dist)
+                src = {**src, "distortion": "none (synthetic frames)"}
+            self._cam = (K, dist, src)
+            self._cam_size = (w, h, plain)
         return self._cam
 
     def _model_points(self, setup):
         """Points of the face (or of the board) in M: the anchor of the filter and what the tracker weighs the two
         mirrored poses on."""
         T_M_B = setup["T_M_B"]
-        if T_M_B is not None and "face" in self._models:
-            v = self._models["face"][0]
+        models = self._models
+        if T_M_B is not None and "face" in models:
+            v = models["face"][0]
             v = v[np.linspace(0, len(v) - 1, min(200, len(v))).astype(int)]
             return v @ T_M_B[:3, :3].T + T_M_B[:3, 3]
         nx, ny = setup["spec"]["squares"]
@@ -1110,29 +1538,43 @@ class LiveAR:
     def _next_item(self, stream, after):
         """The newest frame after `after` as a live.Frame (streams without wait_item: wrapped)."""
         if hasattr(stream, "wait_item"):
-            return stream.wait_item(after, timeout=0.1)
-        frame, t, n = stream.wait_frame(after, timeout=0.1)
+            return stream.wait_item(after, timeout=WAIT_FRAME_S)
+        frame, t, n = stream.wait_frame(after, timeout=WAIT_FRAME_S)
         return None if frame is None else live.Frame(n, t, bgr=frame)
 
     # ── thread 1: every frame, the board tracked ─────────────────────────
     def _track_loop(self):
-        cur, last = None, 0
+        cur, last, dead = None, 0, None
         while not self._quit.is_set():
-            stream = self._stream
-            if stream is None:
-                cur = None
-                time.sleep(0.02)
-                continue
+            with self._lock:
+                stream = self._stream
+                if stream is None or stream is dead:
+                    self._state_cv.wait(POLL_S)
+                    continue
             if stream is not cur:
                 cur, last = stream, 0
-            item = self._next_item(stream, last)
+            t0 = time.perf_counter()
+            try:
+                item = self._next_item(stream, last)
+            except Exception as e:  # noqa: BLE001  a stream object that fails: counted, a pause, then again
+                self._failed(stream, "stream", e)
+                self._quit.wait(FAIL_PAUSE_S)
+                continue
             if item is None:
+                if not stream.alive:
+                    with self._lock:
+                        if self._stream is stream and self._state == RUNNING:
+                            self._stream_died(stream)
+                    dead = stream
+                elif time.perf_counter() - t0 < 1e-3:     # a closed stream answers at once: no spinning on it
+                    self._quit.wait(WAIT_FRAME_S)
                 continue
             last = item.n
             try:
                 self._track(stream, item)
-            except Exception as e:  # noqa: BLE001  a bad frame must not end the thread
-                self._failed(stream, e)
+            except Exception as e:  # noqa: BLE001  one bad frame must not end the thread nor stop the picture
+                self._failed(stream, "track", e)
+                self._post_plain(stream, item)
 
     def _track(self, stream, item):
         t0 = time.perf_counter()
@@ -1142,24 +1584,24 @@ class LiveAR:
             self._apply(want)
         setup = self._setup
         w, h = item.size
-        K, dist, cam = self._intrinsics(w, h)
+        K, dist, cam = self._intrinsics(w, h, stream)
         limit = MAX_RMS[cam["source"]]
         tracker, filt = self._tracker_for(setup, K, item)
         s = self.tracking
-        tracker.s = {**tracker.s, **{k: v for k, v in s.items() if k in board_tracker.TRACK}}
         key = self._tracker_key
         with self._lock:
             done, self._det_done = self._det_done, None
+            lost_box, det_t = self._lost_box, self._det_t
         det = done[0] if done is not None and done[1] == key else None
         gray = item.gray()
         if s.get("views"):
             tracker.reset()
-            det = setup["detector"].detect(gray, n=item.n, t=item.t_capture)
+            det = setup["detector_track"].detect(gray, n=item.n, t=item.t_capture)
         t1 = time.perf_counter()
         res = tracker.step(gray, item.t_capture, item.n, K, dist, limit, det)
         t2 = time.perf_counter()
         if not res.ok and not s.get("views"):
-            res = self._recover(tracker, filt, setup, gray, item, K, dist, limit, res)
+            res = self._recover(tracker, filt, setup, gray, item, K, dist, limit, res, lost_box)
         if res.ok and not res.sure and filt.t_good is not None and item.t_capture - filt.t_good <= s["hold_s"]:
             # found again after a short loss where the overlay still is: the same of the two mirrored poses
             prior = filt.prior(item.t_capture)
@@ -1172,22 +1614,24 @@ class LiveAR:
             strong = True
         verdict = filt.measure(item.t_capture, use, strong, res.noise_px, res.noise_pos_px)
         T, vis, state = filt.pose_at(item.t_capture)
+        tracked, rejected = filt.tracked, filt.counts["rejected"]   # copied here: the filter is this thread's
         t3 = time.perf_counter()
         # the next detection: in the box around the board, or where it was last, or in the whole frame
         if res.ok and res.box is not None:
-            self._lost_box = (res.box, res.marker_px, item.t_capture)
+            lost_box = (res.box, res.marker_px, item.t_capture)
         ask = None
-        if not s.get("views") and tracker.want_detection(res, item.t_capture, self._det_t):
+        if not s.get("views") and tracker.want_detection(res, item.t_capture, det_t):
             box, mpx = (res.box, res.marker_px) if res.ok else (None, None)
-            lb = self._lost_box
-            if box is None and lb is not None and item.t_capture - lb[2] < s["roi_s"]:
-                box, mpx = lb[0], lb[1]
+            if box is None and lost_box is not None and item.t_capture - lost_box[2] < s["roi_s"]:
+                box, mpx = lost_box[0], lost_box[1]
             ask = (item, box, mpx, key)
         tm = {"gray_ms": (t1 - t0) * 1e3, "track_ms": (t2 - t1) * 1e3, "filter_ms": (t3 - t2) * 1e3,
               **{k: v for k, v in res.tm.items() if k != "track_ms"}}
         with self._lock:
             if self._stream is not stream:
                 return
+            if res.ok and res.box is not None:
+                self._lost_box = lost_box
             if ask is not None and not self._det_busy:
                 self._det_req, self._det_busy, self._det_t = ask, True, item.t_capture
                 self._det_cv.notify_all()
@@ -1206,7 +1650,7 @@ class LiveAR:
                 self._skipped += 1
             self._job = {"stream": stream, "item": item, "T": T, "vis": vis, "state": state, "res": res,
                          "verdict": verdict, "K": K, "dist": dist, "cam": cam, "setup": setup, "want": want,
-                         "filter": filt, "t_tracked": t3}
+                         "tracked": tracked, "rejected": rejected, "t_tracked": t3}
             self._job_cv.notify_all()
             if self.trace is not None:
                 self.trace.append({"what": "track", "n": item.n, "t": item.t, "tc": item.t_capture, "ok": res.ok,
@@ -1218,10 +1662,29 @@ class LiveAR:
                                    "recovered": res.source == "recovered",
                                    "t_done": t3, "tm": tm, "detection": None if det is None else det.n})
 
-    def _recover(self, tracker, filt, setup, gray, item, K, dist, limit, res):
+    def _post_plain(self, stream, item):
+        """A frame whose tracking failed still goes to the picture, without a pose: the video goes on."""
+        try:
+            setup = self._setup
+            K, dist, cam = self._intrinsics(*item.size, stream)
+            with self._lock:
+                if self._stream is not stream:
+                    return
+                want = dict(self._want)
+                if self._job is not None:
+                    self._skipped += 1
+                self._job = {"stream": stream, "item": item, "T": None, "vis": 0.0, "state": "lost",
+                             "res": board_tracker.TrackResult(), "verdict": "missed", "K": K, "dist": dist, "cam": cam,
+                             "setup": setup, "want": want, "tracked": False, "rejected": 0,
+                             "t_tracked": time.perf_counter()}
+                self._job_cv.notify_all()
+        except Exception as e:  # noqa: BLE001  the frame is skipped; the failure was counted already
+            logger.debug("live AR: frame %s not shown: %s", item.n, e)
+
+    def _recover(self, tracker, filt, setup, gray, item, K, dist, limit, res, lost_box):
         """The board lost on this frame shortly after it was followed: searched at once in the box where the pose
         carried on puts it (grown by its speed), on this same frame, so the overlay does not wait for the worker."""
-        lb = self._lost_box
+        lb = lost_box
         if lb is None or item.t_capture - lb[2] > self.tracking["recover_s"]:
             return res
         prior = filt.prior(item.t_capture)
@@ -1233,7 +1696,7 @@ class LiveAR:
         scale = min(1.0, self.tracking["marker_px"] / max(mpx or 1.0, 1.0))
         if (box[2] - box[0]) * (box[3] - box[1]) * scale * scale > self.tracking["recover_px"]:
             return res
-        d = setup["detector"].detect(gray, box, mpx, n=item.n, t=item.t_capture)
+        d = setup["detector_track"].detect(gray, box, mpx, n=item.n, t=item.t_capture)
         if len(d.ids) < tracker.min_detect:
             return res
         res2 = tracker.step(gray, item.t_capture, item.n, K, dist, limit, d)
@@ -1247,16 +1710,17 @@ class LiveAR:
     def _detect_loop(self):
         while not self._quit.is_set():
             with self._det_cv:
-                self._det_cv.wait_for(lambda: self._det_req is not None or self._quit.is_set(), timeout=0.2)
+                self._det_cv.wait_for(lambda: self._det_req is not None or self._quit.is_set(), timeout=POLL_S)
                 req, self._det_req = self._det_req, None
                 stream = self._stream
+                setup = self._setup
             if req is None:
                 continue
             item, box, mpx, key = req
             try:
-                d = self._setup["detector"].detect(item.gray(), box, mpx, n=item.n, t=item.t_capture)
-            except Exception as e:  # noqa: BLE001
-                self._failed(stream, e)
+                d = setup["detector"].detect(item.gray(), box, mpx, n=item.n, t=item.t_capture)
+            except Exception as e:  # noqa: BLE001  a failed detection: the tracking asks again
+                self._failed(stream, "detect", e)
                 d = None
             with self._lock:
                 self._det_busy = False
@@ -1272,16 +1736,24 @@ class LiveAR:
 
     # ── thread 3: the newest frame tracked, drawn ────────────────────────
     def _compose_loop(self):
-        while not self._quit.is_set():
-            with self._job_cv:
-                self._job_cv.wait_for(lambda: self._job is not None or self._quit.is_set(), timeout=0.2)
-                job, self._job = self._job, None
-            if job is None:
-                continue
-            try:
-                self._compose(job)
-            except Exception as e:  # noqa: BLE001
-                self._failed(job["stream"], e)
+        try:
+            # the OpenGL context and the renderers made now, while the stream opens: the first frame with the overlay
+            # does not wait for them (a few hundred ms)
+            for name in ("face", "mandible"):
+                if name in self._models and not self._quit.is_set():
+                    self._renderer(name)
+            while not self._quit.is_set():
+                with self._job_cv:
+                    self._job_cv.wait_for(lambda: self._job is not None or self._quit.is_set(), timeout=POLL_S)
+                    job, self._job = self._job, None
+                if job is None:
+                    continue
+                try:
+                    self._compose(job)
+                except Exception as e:  # noqa: BLE001  one bad frame: the picture keeps its last good frame
+                    self._failed(job["stream"], "compose", e)
+        finally:
+            self._release_gl()
 
     def _compose(self, job):
         tc = time.perf_counter()
@@ -1306,7 +1778,7 @@ class LiveAR:
         drawn, masks = {}, {}
         alpha = want["opacity"] * vis
         if T is not None and T_M_B is not None and alpha > 0:
-            drawn, masks = self._draw_models(img, T @ T_M_B, Kd, dist, want, alpha)
+            drawn, masks = self._draw_models(img, T @ T_M_B, Kd, dist, want, alpha, job["stream"])
         t3 = time.perf_counter()
         if want["axes"] and T is not None and vis > 0.5:
             self._draw_board(img, T, Kd, dist, spec, setup, res, s)
@@ -1325,7 +1797,8 @@ class LiveAR:
                 return
             self._tm_show.append(tm_show)
             self._shown_times.append(t5)
-            st = self._status_of(job["filter"], state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, t5 - item.t)
+            st = self._status_of(job["tracked"], job["rejected"], state, kind, vis, T, cam, spec, drawn, w, h, dw, dh,
+                                 t5 - item.t)
             st["view_rotation"] = 90 * k
             st["display"] = [img.shape[1], img.shape[0]]
             self._status = st
@@ -1333,6 +1806,7 @@ class LiveAR:
                 self._masks = (item.n, masks)
             if ok:
                 self._jpeg, self._jpeg_n, self._bgr, self._jpeg_t = buf.tobytes(), self._jpeg_n + 1, img, t5
+                self._t_good, self._fails_since_good = t5, 0
             if self.trace is not None:
                 self.trace.append({"what": "shown", "n": item.n, "t": item.t, "tc": item.t_capture, "t_done": t5,
                                    "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show,
@@ -1401,8 +1875,9 @@ class LiveAR:
             for x, y in np.round(c[inside] * 16).astype(np.int32):
                 cv2.circle(img, (int(x), int(y)), 2 * 16, self.colors["corners"], -1, cv2.LINE_AA, 4)
 
-    def _status_of(self, filt, state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, processing):
-        """The status after a frame was drawn (under the lock)."""
+    def _status_of(self, tracked, rejected, state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, processing):
+        """The status after a frame was drawn (under the lock); tracked and rejected as the track thread copied them
+        from its filter."""
         def mean(rows, key):
             vals = [r[key] for r in rows if key in r]
             return round(float(np.mean(vals)), 1) if vals else 0.0
@@ -1418,7 +1893,7 @@ class LiveAR:
             return round((len(times) - 1) / (times[-1] - times[0]), 1) if len(times) > 1 and times[-1] > times[0] else 0.0
         v = list(self._verdicts)
         latest = self._latest or {}
-        st = {"tracked": filt.tracked, "state": state, "kind": kind, "opacity_now": round(float(vis), 2),
+        st = {"tracked": tracked, "state": state, "kind": kind, "opacity_now": round(float(vis), 2),
               "corners": latest.get("corners", 0), "markers": latest.get("markers", 0),
               "rms_px": None if latest.get("rms_px") is None else round(latest["rms_px"], 3),
               "rms_limit_px": MAX_RMS[cam["source"]], "min_corners": board_tracker.TRACK["min_corners"],
@@ -1427,7 +1902,7 @@ class LiveAR:
               "fps_detect": rate(self._det_times), "source": latest.get("source"), "sure": latest.get("sure"),
               "tracking": latest.get("counts", {}), "skipped": self._skipped,
               "missed_share": round(sum(x == "missed" for x in v) / len(v), 3) if v else 0.0,
-              "rejected": filt.counts["rejected"]}
+              "rejected": rejected}
         if T is not None:
             nx, ny = spec["squares"]
             centre = np.array([nx, ny, 0.0]) * [spec["square_mm"], spec["square_mm"], 0] / 2
@@ -1438,15 +1913,29 @@ class LiveAR:
                          "total_ms": round((stream_ms or 0.0) + processing * 1e3, 1), "link": self._link}
         return st
 
-    def _failed(self, stream, e):
-        if stream is not None and self._stream is stream:
-            self._error = f"{type(e).__name__}: {e}"
-            self.log(self._error)
-        time.sleep(0.01)
+    def _failed(self, stream, where, error):
+        """A frame (or a stage of one) that failed at `where`: counted and logged (at most every LOG_EVERY_S); the
+        threads go on with the next frame and the picture keeps its last good one."""
+        now = time.perf_counter()
+        with self._lock:
+            if stream is not None and self._stream is not stream:
+                return
+            self._frame_errors += 1
+            self._fails_since_good += 1
+            self._last_frame_error = {"where": where, "what": type(error).__name__, "t": now}
+            count = self._frame_errors
+            log_now = now - self._t_logged >= LOG_EVERY_S
+            if log_now:
+                self._t_logged = now
+        if log_now:
+            logger.warning("live AR: %s failed (%d in this run): %s: %s", where, count, type(error).__name__, error)
+            logger.debug("live AR: %s failed", where, exc_info=error)
+            self.log(f"{where} failed ({count} in this run): {type(error).__name__}: {error}")
 
-    def _draw_models(self, img, T_C_B, Kd, dist, want, alpha):
+    def _draw_models(self, img, T_C_B, Kd, dist, want, alpha, stream=None):
         """The mandible and the face (those asked for) over the picture, camera from model T_C_B, at opacity alpha
-        (the setting times the fade): ({model: pixels covered}, {model: silhouette at the display size})."""
+        (the setting times the fade): ({model: pixels covered}, {model: silhouette at the display size}). A model
+        that fails to draw is left out of this frame (see _render_failed); the others are drawn."""
         drawn, masks = {}, {}
         size = (img.shape[1], img.shape[0])
         for name in ("mandible", "face"):
@@ -1455,14 +1944,20 @@ class LiveAR:
                 continue
             st = STYLE[name]
             a = min(1.0, st["fill"] * float(alpha))      # a Python float: a NumPy one would make the weights float64
-            if hasattr(rend, "overlay"):       # OpenGL: coverage of each pixel and a light per vertex
-                light = 1.0 - st["shade"] * (1.0 - rend.facing(T_C_B)) ** SHADE_GAMMA if st["shade"] > 0 else None
-                r = rend.overlay(Kd, dist, T_C_B, size, light)
-                self._paint_veil(img, r, self.colors[name], a)
-            else:                               # NumPy: hard mask and a light per triangle
-                r = rend.render(Kd, dist, T_C_B, size)
-                shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
-                self._paint(img, r, self.colors[name], a, shade, SOFT["feather_px"], SOFT["smooth_px"])
+            try:
+                if hasattr(rend, "overlay"):       # OpenGL: coverage of each pixel and a light per vertex
+                    light = 1.0 - st["shade"] * (1.0 - rend.facing(T_C_B)) ** SHADE_GAMMA if st["shade"] > 0 else None
+                    r = rend.overlay(Kd, dist, T_C_B, size, light)
+                    self._paint_veil(img, r, self.colors[name], a)
+                else:                               # NumPy: hard mask and a light per triangle
+                    r = rend.render(Kd, dist, T_C_B, size)
+                    shade = self._shade(name, rend, T_C_B, st["shade"]) if st["shade"] > 0 else None
+                    self._paint(img, r, self.colors[name], a, shade, SOFT["feather_px"], SOFT["smooth_px"])
+            except Exception as e:  # noqa: BLE001  this model left out of this frame; the others drawn
+                self._failed(stream, f"render_{name}", e)
+                self._render_failed(name, rend, e)
+                continue
+            self._render_fails[name] = 0
             drawn[name] = int(cv2.countNonZero(r.mask))
             masks[name] = r.mask
         return drawn, masks
@@ -1528,20 +2023,32 @@ class LiveAR:
 # ── the frames for the page ──────────────────────────────────────────────────
 class MjpegServer:
     """The composed frames as MJPEG (multipart/x-mixed-replace) on 127.0.0.1, for an <img> of the page or a browser.
-    The path carries a random token, so only who was given the URL reads the camera."""
+    The path carries a random token (compared in constant time), so only who was given the URL reads the camera; at
+    most MJPEG_CLIENTS at once, each socket with a timeout. A client's stream ends when the live AR is shut down."""
 
     def __init__(self, ar, port=0):
         self.ar = ar
         self.token = secrets.token_hex(8)
+        self._slots = threading.BoundedSemaphore(MJPEG_CLIENTS)
         server = self
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = MJPEG_SOCKET_S
+
             def log_message(self, *a):
                 pass
 
             def do_GET(self):
-                path = self.path.split("?", 1)[0]
-                if path == f"/{server.token}.jpg":
+                if not server._slots.acquire(blocking=False):
+                    self.send_error(503)
+                    return
+                try:
+                    self._serve(self.path.split("?", 1)[0])
+                finally:
+                    server._slots.release()
+
+            def _serve(self, path):
+                if _same_path(path, f"/{server.token}.jpg"):
                     jpeg, _ = server.ar.next_jpeg(0, timeout=1.0)
                     if jpeg is None:
                         self.send_error(503)
@@ -1553,7 +2060,7 @@ class MjpegServer:
                     self.end_headers()
                     self.wfile.write(jpeg)
                     return
-                if path != f"/{server.token}.mjpg":
+                if not _same_path(path, f"/{server.token}.mjpg"):
                     self.send_error(404)
                     return
                 self.send_response(200)
@@ -1562,7 +2069,7 @@ class MjpegServer:
                 self.end_headers()
                 n = 0
                 try:
-                    while not server.closed:
+                    while not server.closed and not getattr(server.ar, "closed", False):
                         jpeg, n = server.ar.next_jpeg(n, timeout=1.0)
                         if jpeg is None:
                             continue
@@ -1590,9 +2097,16 @@ class MjpegServer:
         return f"http://127.0.0.1:{self.httpd.server_address[1]}/{self.token}.jpg"
 
     def close(self):
+        if self.closed:
+            return
         self.closed = True
         self.httpd.shutdown()
         self.httpd.server_close()
+        self.thread.join(timeout=JOIN_S)
+
+
+def _same_path(path, want):
+    return hmac.compare_digest(path.encode("utf-8", "replace"), want.encode("utf-8"))
 
 
 # ── measures ─────────────────────────────────────────────────────────────────
@@ -1816,12 +2330,16 @@ def clip_reference(clip, board, spec, K, dist, cache=True):
     """A reference pose for every frame of a recorded clip: the full ChArUco detection at full resolution, PnP, then
     smoothed without lag (forward and backward) over runs of frames with a pose: the board's centre at 6 Hz, the
     rotation at 3 Hz (a hand turns the phone slowly; a small board's rotation is its noisiest part). T_C_M per frame
-    (NaN where none), kept beside the clip (CLIP_reference_<board>.npz)."""
+    (NaN where none), kept beside the clip (CLIP_reference_<board>.npz), or in LIVE_REFERENCES for a clip inside the
+    project (its data folders are read-only)."""
     from scipy.signal import butter, filtfilt
     clip = Path(clip)
-    out = clip.with_name(clip.stem + f"_reference_{spec['name']}_{spec['squares'][0]}x{spec['squares'][1]}_v2.npz")
-    if cache and out.is_file():
-        return np.load(out)["T_C_M"]
+    name = clip.stem + f"_reference_{spec['name']}_{spec['squares'][0]}x{spec['squares'][1]}_v2.npz"
+    beside = clip.with_name(name)
+    out = LIVE_REFERENCES / name if ROOT in clip.resolve().parents else beside
+    for kept in (beside, out):
+        if cache and kept.is_file():
+            return np.load(kept)["T_C_M"]
     import av
     det = marker_pose.make_detector(board)
     codec = av.CodecContext.create("h264", "r")
@@ -1864,6 +2382,7 @@ def clip_reference(clip, board, spec, K, dist, cache=True):
                 ref[i, :3, :3] = R0 @ cv2.Rodrigues(w[i - k])[0]
                 ref[i, :3, 3] = c[i - k] - ref[i, :3, :3] @ centre
         k = j
+    out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, T_C_M=ref)
     return ref
 
@@ -1901,16 +2420,16 @@ def make_clip(out, board="sheet", square_mm=24.0, seconds=24.0, fps=30, exposure
               noise=2.0):
     """The synthetic session (bench_script) as the phone would send it: raw H.264 at the stream's bit rate (libx264,
     no B frames, a key frame every 10 s), OUT.h264, with OUT_times.npy (the time of each frame) and OUT_truth.npz (the
-    true T_C_M of each frame), so that any version of the live AR can be measured on the same frames."""
+    true T_C_M of each frame and the camera K it was rendered with, nominal and without distortion), so that any
+    version of the live AR can be measured on the same frames."""
     from fractions import Fraction
 
     import av
     out = Path(out).with_suffix("")
     out.parent.mkdir(parents=True, exist_ok=True)
     b, spec = make_board(board, square_mm)
-    K, _, _ = stream_intrinsics((1920, 1440))
+    K, _, _ = stream_intrinsics((1920, 1440), None)
     s = SyntheticStream(b, spec, K, script=bench_script(spec), exposure_s=exposure_s, noise=noise, seed=1)
-    s.close()
     enc = av.CodecContext.create("libx264", "w")
     enc.width, enc.height, enc.pix_fmt = 1920, 1440, "yuv420p"
     enc.time_base = Fraction(1, fps)
@@ -1930,7 +2449,7 @@ def make_clip(out, board="sheet", square_mm=24.0, seconds=24.0, fps=30, exposure
         for packet in enc.encode(None):
             fh.write(bytes(packet))
     np.save(str(out) + "_times.npy", np.arange(len(truth)) / fps)
-    np.savez_compressed(str(out) + "_truth.npz", T_C_M=np.array(truth))
+    np.savez_compressed(str(out) + "_truth.npz", T_C_M=np.array(truth), K=K)
     return Path(str(out) + ".h264")
 
 
@@ -1988,45 +2507,49 @@ def twin_check(ar, expect, out=None):
         return
     rows, images, labels = got
     saved = ar.replay, ar.replay_truth, ar.intrinsics_path, ar.settings(), dict(ar.tracking)
-    checks = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        intr, reg = Path(tmp) / "intrinsics_twin.json", Path(tmp) / "registration_twin.json"
-        r0 = rows[0]
-        intr.write_text(json.dumps({"image_size": r0["size"], "K": r0["K"], "dist": r0["dist"], "date": "twin",
-                                    "rms_px": 0.0}), encoding="utf-8")
-        reg.write_text(json.dumps({"T_M_B": r0["T_M_B"]}), encoding="utf-8")
-        ar.replay, ar.replay_truth, ar.intrinsics_path = images, list(zip(rows, labels)), intr
-        ar.set_registration(reg)
-        ar.configure(board="patient", mandible=False, face=True)
-        ar.set_tracking(smooth=False, acquire_frames=1, fade_in_s=0.0, views=True, wait_sure=False)
-        ar.start()
-        t0 = time.perf_counter()
-        while time.perf_counter() - t0 < 2.0 + 2.5 * len(images) / 10 and len(checks) < len(images):
-            time.sleep(0.02)
-            n, masks = ar.last_masks()
-            pn, T = ar.last_pose()
-            if n in checks or pn != n or "face" not in masks:
-                continue
-            meta, label = ar.stream().truth(n)
-            m = masks["face"] > 0
-            lab = cv2.resize(cv2.imread(str(label), cv2.IMREAD_GRAYSCALE), (m.shape[1], m.shape[0]),
-                             interpolation=cv2.INTER_NEAREST)
-            face = lab == 1
-            front = np.isin(lab, (1, 2, 3, 4, 7, 9))      # face, marker, drape, interface, pendulum, cap
-            e = marker_pose.pose_error(T, np.asarray(meta["T_C_M"]))
-            checks[n] = (meta["image"], (m & face).sum() / max(face.sum(), 1), (m & front).sum() / max(m.sum(), 1),
-                         e["rot_deg"], e["trans_mm"])
-            if out is not None and len(checks) == 1:
-                cv2.imwrite(str(out), ar.composed())
-        st = ar.status()
+    checks, st = {}, {"registration": {}, "intrinsics": {}}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            intr, reg = Path(tmp) / "intrinsics_twin.json", Path(tmp) / "registration_twin.json"
+            r0 = rows[0]
+            intr.write_text(json.dumps({"image_size": r0["size"], "K": r0["K"], "dist": r0["dist"], "date": "twin",
+                                        "rms_px": 0.0}), encoding="utf-8")
+            reg.write_text(json.dumps({"T_M_B": r0["T_M_B"]}), encoding="utf-8")
+            ar.replay, ar.replay_truth, ar.intrinsics_path = images, list(zip(rows, labels)), intr
+            ar.set_registration(reg)
+            ar.configure(board="patient", mandible=False, face=True)
+            ar.set_tracking(smooth=False, acquire_frames=1, fade_in_s=0.0, views=True, wait_sure=False)
+            ar.start()
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < 2.0 + 2.5 * len(images) / 10 and len(checks) < len(images):
+                time.sleep(0.02)
+                n, masks = ar.last_masks()
+                pn, T = ar.last_pose()
+                if n in checks or pn != n or "face" not in masks:
+                    continue
+                meta, label = ar.stream().truth(n)
+                m = masks["face"] > 0
+                lab = cv2.resize(cv2.imread(str(label), cv2.IMREAD_GRAYSCALE), (m.shape[1], m.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST)
+                face = lab == 1
+                front = np.isin(lab, (1, 2, 3, 4, 7, 9))      # face, marker, drape, interface, pendulum, cap
+                e = marker_pose.pose_error(T, np.asarray(meta["T_C_M"]))
+                checks[n] = (meta["image"], (m & face).sum() / max(face.sum(), 1),
+                             (m & front).sum() / max(m.sum(), 1), e["rot_deg"], e["trans_mm"])
+                if out is not None and len(checks) == 1:
+                    cv2.imwrite(str(out), ar.composed())
+            st = ar.status()
+            ar.stop()
+    finally:        # every setting as it was, whatever happened
         ar.stop()
-    ar.replay, ar.replay_truth, ar.intrinsics_path = saved[0], saved[1], saved[2]
-    ar.set_registration(saved[3]["registration"] or None)
-    ar.configure(board=saved[3]["board"], mandible=saved[3]["mandible"], face=saved[3]["face"])
-    ar.set_tracking(**saved[4])
+        ar.replay, ar.replay_truth, ar.intrinsics_path = saved[0], saved[1], saved[2]
+        ar.set_registration(saved[3]["registration"] or None)
+        ar.configure(**{k: saved[3][k] for k in ("board", "square_mm", "squares", "marker_mm", "face", "mandible",
+                                                 "axes", "opacity", "view_rotation", "hide_board")})
+        ar.set_tracking(**saved[4])
     c = np.array([v[1:] for v in checks.values()]).reshape(-1, 4)
     ok = len(c) >= min(4, len(images)) and c[:, 0].min() >= 0.95 and c[:, 1].min() >= 0.95
-    expect(ok and st["registration"]["source"] == "file" and st["intrinsics"]["source"] == "calibrated",
+    expect(ok and st["registration"].get("source") == "file" and st["intrinsics"].get("source") == "calibrated",
            f"digital twin, {len(c)} of {len(images)} frames ({TWIN.name}, patient board on the bench): face drawn "
            f"over the labelled face, recall min {c[:, 0].min() if len(c) else float('nan'):.3f}, precision min "
            f"{c[:, 1].min() if len(c) else float('nan'):.3f}; board pose against the truth max "
@@ -2037,7 +2560,9 @@ def run_test():
     """Pose filter; board tracker; synthetic stream through the whole pipeline: pose against the truth, overlay
     drawn, light, video at the stream rate, file registration, no board, a hand over the board, MJPEG; the frames of
     the digital twin with the true registration; the opacity; frames that turn upright and back; a stream that stalls
-    and then comes in a burst."""
+    and then comes in a burst; start, stop and a stream that dies; frames that fail; bad settings and calibration
+    files; two live ARs with their own OpenGL contexts and their shutdown. Everything on the nominal camera (or a
+    calibration file the check writes), whatever calibration is on this computer."""
     import tempfile
     import urllib.request
     fails = []
@@ -2051,6 +2576,44 @@ def run_test():
         fails.append("pose filter")
     if board_tracker.run_test():
         fails.append("board tracker")
+    expect(all(TRACKING[k] == v for k, v in pose_filter.DEFAULTS.items()),
+           f"the filter's settings in TRACKING are pose_filter.DEFAULTS ({len(pose_filter.DEFAULTS)} values, one "
+           f"source)")
+    # registration files: the bench frame's T_M_B read; an older ground_truth result (mandible frame), a result
+    # without a head frame, a reflection and a file that is not JSON refused with bad_registration
+    with tempfile.TemporaryDirectory(prefix="live_ar_reg_") as tmp:
+        T_ok = np.eye(4)
+        T_ok[:3, 3] = [1.0, 2.0, 3.0]
+        refl = np.diag([1.0, 1.0, -1.0, 1.0])
+        cases = {"new.json": ({"T_M_B": T_ok.tolist(), "T_M_mandible": T_ok.tolist(), "G": T_ok.tolist()}, True),
+                 "bare.json": (T_ok.tolist(), True),
+                 "older.json": ({"T_M_B": T_ok.tolist(), "G": T_ok.tolist(), "spheres": {}}, False),
+                 "no_frame.json": ({"T_M_B": None, "T_M_mandible": T_ok.tolist(), "G": T_ok.tolist()}, False),
+                 "reflection.json": ({"T_M_B": refl.tolist()}, False), "text.json": ("{not json", False)}
+        got = {}
+        for name, (content, _) in cases.items():
+            p = Path(tmp) / name
+            p.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+            try:
+                got[name] = np.allclose(load_registration(p), T_ok)
+            except LiveARError as e:
+                got[name] = "refused" if e.code == "bad_registration" else e.code
+        expect(all((got[n] is True) if ok else got[n] == "refused" for n, (_, ok) in cases.items()),
+               f"registration files: read in the bench frame or refused with bad_registration ({got})")
+    # a start that ends in a SystemExit of library code: failed, never starting for ever (every later start waits)
+    quitter = LiveAR("sheet", 24.0, synthetic=True, intrinsics=None, prepare=False)
+
+    def exits():
+        raise SystemExit("a library gave up")
+    quitter.prepare = exits
+    try:
+        quitter.start()
+    except SystemExit:
+        pass
+    st_q = quitter.status()
+    quitter.shutdown()
+    expect(st_q["stream_state"] == FAILED and st_q["error"] == "start_failed",
+           f"a start ended by SystemExit: failed ({st_q['stream_state']}, {st_q['error']}), not left starting")
 
     def run(ar, seconds):
         ar.start()
@@ -2071,14 +2634,15 @@ def run_test():
     expect("face" in models and len(models["face"][1]) <= 1.2 * LIVE_TRIANGLES["face"],
            f"face model found ({FACE_MESH}), {len(models.get('face', ((), ()))[1])} triangles for the live view; "
            f"mandible {len(models.get('mandible', ((), ()))[1])}")
-    ar = LiveAR("sheet", 24.0, synthetic=True, mandible=True, log=print)
+    ar = LiveAR("sheet", 24.0, synthetic=True, mandible=True, log=print, intrinsics=None)
     try:
         for board in ("sheet", "patient"):
             ar.configure(board=board)
             st, errs = run(ar, 4.0)
             ar.stop()
             tr = st.get("timings", {})
-            # bounds of a working pipeline, not of its accuracy (T5.4 measures that); the 45 mm board is the looser
+            # bounds of a working pipeline, not of its accuracy (eval_marker_pose.py measures that); the 45 mm board
+            # is the looser
             rot, trans = (0.3, 2.0) if board == "sheet" else (1.0, 3.0)
             expect(st.get("tracked") and len(errs) > 20 and errs[:, 0].max() < rot and errs[:, 1].max() < trans,
                    f"{board}: tracked, pose against the truth over {len(errs)} frames: rotation max "
@@ -2133,15 +2697,19 @@ def run_test():
     echo_check(expect)
     # no board in view: grey light
     board, spec = make_board("sheet", 24.0)
-    K, _, _ = stream_intrinsics((1920, 1440))
+    K, _, _ = stream_intrinsics((1920, 1440), None)
     empty = SyntheticStream(None, spec, K).wait_first()
-    ar2 = LiveAR("sheet", 24.0)
+    ar2 = LiveAR("sheet", 24.0, intrinsics=None)
     ar2.attach(empty)
     time.sleep(1.0)
     st = ar2.status()
     ar2.shutdown()
     expect(not st.get("tracked") and st.get("corners", -1) == 0 and st.get("fps_ar", 0) > 20,
            f"no board in view: not tracked, grey light, video still at {st.get('fps_ar')} fps")
+    lifecycle_check(expect)
+    failure_check(expect)
+    input_check(expect)
+    shutdown_check(expect)
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
     return 1 if fails else 0
 
@@ -2169,8 +2737,8 @@ def opacity_check(ar, expect):
 
 def settings_check(ar, expect):
     """The opacity slider moved and the layers switched while the board is tracked (a change every 150 ms, as the
-    page sends them): the tracking goes on, no frame loses its pose or its overlay (16/10: in the version before, each
-    change started the tracking again, and 3 frames in 4 lost the overlay)."""
+    page sends them): the tracking goes on, no frame loses its pose or its overlay (16/10/2026: in the version before,
+    each change started the tracking again, and 3 frames in 4 lost the overlay)."""
     ar.configure(board="sheet", mandible=False, axes=False, opacity=OPACITY)
     ar.trace = []
     ar.start()
@@ -2196,9 +2764,8 @@ def turn_check(ar, expect):
     """Frames that turn upright (1440 x 1920) and back, as a phone turned in the hand could send: no error, the
     video goes on at every size, the board is found again across."""
     board, spec = make_board("sheet", 24.0)
-    K, _, _ = stream_intrinsics((1920, 1440))
+    K, _, _ = stream_intrinsics((1920, 1440), ar.intrinsics_path)
     s = SyntheticStream(board, spec, K, exposure_s=0.0)
-    s.close()
     imgs = []
     for k in range(36):
         img, _ = s.render(0.2 * k, k)
@@ -2319,8 +2886,9 @@ class EchoStream(SyntheticStream):
         import screen_board
         board, spec = make_board("sheet", lay["square_mm"], lay["squares"], lay["marker_mm"])
         if K is None:
-            K = stream_intrinsics(size)[0]
-        self.ar, self.box = ar, box         # before the thread of SyntheticStream starts drawing
+            K = stream_intrinsics(size, None)[0]
+        super().__init__(None, spec, K, size, fps, seed=seed)      # its thread starts later (wait_first)
+        self.ar, self.box = ar, box
         mw, mh = monitor_px
         base = np.full((mh, mw), 22, np.uint8)
         cx, cy = canvas_px
@@ -2330,8 +2898,6 @@ class EchoStream(SyntheticStream):
         p = lay["pitch_mm"]
         ox, oy = cx + lay["origin_px"][0], cy + lay["origin_px"][1]
         # texture pixel (i, j) has its centre at ((i + 0.5 - ox) p, (j + 0.5 - oy) p) mm on the board
-        self._S = np.array([[p, 0, (0.5 - ox) * p], [0, p, (0.5 - oy) * p], [0, 0, 1.0]])
-        super().__init__(None, spec, K, size, fps, seed=seed)
         self._S = np.array([[p, 0, (0.5 - ox) * p], [0, p, (0.5 - oy) * p], [0, 0, 1.0]])
         self._dist = 340.0
 
@@ -2351,17 +2917,17 @@ class EchoStream(SyntheticStream):
         return img
 
 
-def echo_check(expect, seconds=10.0):
+def echo_check(expect, seconds=10.0, out=None):
     """The board on a monitor and the live view of it on the same monitor (one screen, as ImpactGuide shows them):
     the camera sees the board and, in the video box beside it, the picture of the live view, which shows the board
     again. With hide_board that second board is covered: the pose stays on the real one, with no jump; without it
-    the second board is there to be found (counted, not required)."""
+    the second board is there to be found (counted, not required). out: a folder for the pictures (None: none)."""
     import screen_board
     lay = screen_board.layout((1000, 760), 0.17921)
-    out = {}
+    res = {}
     for hide in (True, False):
         ar = LiveAR("sheet", lay["square_mm"], squares=lay["squares"], marker_mm=lay["marker_mm"], face=True,
-                    axes=True, hide_board=hide)
+                    axes=True, hide_board=hide, intrinsics=None)
         try:
             stream = EchoStream(ar, lay, (60, 160), (1090, 210, 800, 600))
             ar.attach(stream.wait_first())
@@ -2379,31 +2945,382 @@ def echo_check(expect, seconds=10.0):
                     errs.append((e["rot_deg"], e["trans_mm"]))
             st = ar.status()
             errs = np.array(errs).reshape(-1, 2)
-            out[hide] = {"poses": len(errs), "jumps": int(np.sum(errs[:, 1] > 5.0)) if len(errs) else -1,
+            res[hide] = {"poses": len(errs), "jumps": int(np.sum(errs[:, 1] > 5.0)) if len(errs) else -1,
                          "max_mm": float(errs[:, 1].max()) if len(errs) else float("nan"),
                          "max_deg": float(errs[:, 0].max()) if len(errs) else float("nan"),
                          "fps": st.get("fps_ar", 0), "tracked": st.get("tracked")}
-            if hide:
+            if hide and out is not None:
                 shot = ar.composed()
                 if shot is not None:
-                    WORK.joinpath("live_engine").mkdir(parents=True, exist_ok=True)
-                    cv2.imwrite(str(WORK / "live_engine" / "echo_hidden.jpg"), shot)
-                    cv2.imwrite(str(WORK / "live_engine" / "echo_camera.jpg"), stream.latest()[0])
+                    Path(out).mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(Path(out) / "echo_hidden.jpg"), shot)
+                    cv2.imwrite(str(Path(out) / "echo_camera.jpg"), stream.latest()[0])
         finally:
             ar.shutdown()
             stream.close()
-    h, o = out[True], out[False]
+    h, o = res[True], res[False]
+    without = (f"{o['poses']} poses, {o['jumps']} off by more than 5 mm, at most {o['max_mm']:.1f} mm" if o["poses"]
+               else "no pose")
     expect(h["poses"] > 100 and h["jumps"] == 0 and h["max_mm"] < 3.0 and h["max_deg"] < 0.5 and h["fps"] > 15,
            f"board and its live view on one screen, hide_board: {h['poses']} poses, {h['jumps']} off by more than "
            f"5 mm, at most {h['max_mm']:.2f} mm and {h['max_deg']:.2f} deg from the truth, {h['fps']} fps; without it "
-           f"{o['poses']} poses, {o['jumps']} off by more than 5 mm, at most {o['max_mm']:.1f} mm")
-    return out
+           f"{without}")
+    return res
+
+
+class _DyingStream(SyntheticStream):
+    """A stand-in that gives up after `frames` frames, as a phone stream whose restarts brought nothing back."""
+
+    THREAD = "dying_stream"
+
+    def __init__(self, board, spec, K, frames=20, **kw):
+        super().__init__(board, spec, K, **kw)
+        self.frames = frames
+
+    def _run(self):
+        for k in range(self.frames):
+            if self._stop.is_set():
+                return
+            img, T = self.render(k / self.fps, k)
+            n = self._put(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+            with self._lock:
+                self._truth[n] = T
+            _pause(self._stop, 1.0 / self.fps)
+        self._ended("the phone closed the stream", "stream_closed")
+
+
+def _wait(cond, timeout, step=0.02):
+    """cond() polled until true or the timeout passed (a check's helper); its last value."""
+    deadline = time.perf_counter() + timeout
+    while True:
+        value = cond()
+        if value or time.perf_counter() > deadline:
+            return value
+        time.sleep(step)
+
+
+def _drawn(ar, name="face"):
+    return ar.status().get("drawn_px", {}).get(name, 0)
+
+
+def lifecycle_check(expect):
+    """Start, stop and start again; stop() while start() opens the stream; two start() at once; attach() closing the
+    stream before; a stream that dies: not running, failed with its code, and start() opens a new one without stop()."""
+    ar = LiveAR("sheet", 24.0, synthetic=True, axes=False, intrinsics=None)
+    try:
+        setup = ar._setup
+        K = stream_intrinsics((1920, 1440), None)[0]
+        runs = []
+        for _ in range(2):
+            ar.start()
+            n0 = ar.next_jpeg(0, 3.0)[1]
+            flowing = _wait(lambda n0=n0: ar.next_jpeg(n0, 0.5)[1] > n0 + 5, 5.0)
+            runs.append((ar.running, ar.state, bool(flowing)))
+            ar.stop()
+            runs.append((ar.running, ar.state))
+        expect(runs == [(True, RUNNING, True), (False, IDLE)] * 2,
+               f"start, stop, start, stop: running, state and frames {runs}")
+
+        made, opened, gate = [], [], threading.Event()
+        real_open, real_make = ar._open, ar._synthetic_stream
+
+        def make():
+            made.append(real_make())
+            return made[-1]
+
+        def slow_open(gen):
+            opened.append(gen)
+            gate.wait(5.0)
+            return real_open(gen)
+        ar._open, ar._synthetic_stream = slow_open, make
+        th = threading.Thread(target=ar.start, name="start_check")
+        th.start()
+        _wait(lambda: opened, 3.0)
+        ar.stop()               # while start() opens the stream
+        gate.set()
+        th.join(10.0)
+        cancelled = (not th.is_alive() and not ar.running and ar.state == IDLE and ar.stream() is None
+                     and len(made) == 1 and not made[0].alive)
+        opened.clear()
+        gate.clear()
+        starters = [threading.Thread(target=ar.start, name=f"start_check_{k}") for k in range(2)]
+        for th in starters:
+            th.start()
+        _wait(lambda: opened, 3.0)
+        time.sleep(0.2)
+        gate.set()
+        for th in starters:
+            th.join(10.0)
+        once = len(opened) == 1 and ar.running and len(made) == 2
+        ar._open, ar._synthetic_stream = real_open, real_make
+        ar.stop()
+        expect(cancelled and once, f"stop() during start(): cancelled, the stream it opened closed ({cancelled}); two "
+                                   f"start() at once: {len(opened)} stream opened, running")
+
+        s1 = SyntheticStream(setup["board"], setup["spec"], K).wait_first()
+        s2 = SyntheticStream(setup["board"], setup["spec"], K).wait_first()
+        ar.attach(s1)
+        ar.attach(s2)
+        replaced = s1._stop.is_set() and not s1.alive and s2.alive and ar.stream() is s2
+        ar.stop()
+        dying = _DyingStream(setup["board"], setup["spec"], K, frames=15).wait_first()
+        ar.attach(dying)
+        died = _wait(lambda: not ar.running, 5.0)
+        st = ar.status()
+        ar.start()              # no stop() first: the dead stream closed, a new one opened
+        back = _wait(lambda: ar.status().get("fps_ar", 0) > 5, 5.0)
+        st2 = ar.status()
+        expect(replaced and died and st["stream_state"] == FAILED and st["error"] == "stream_closed"
+               and not st["running"] and back and st2["running"] and st2["error"] == "" and dying._stop.is_set(),
+               f"attach() closes the stream before ({replaced}); a stream that dies: running {st['running']}, "
+               f"{st['stream_state']}, error {st['error']!r}; start() without stop(): running {st2['running']}, "
+               f"{st2.get('fps_ar')} fps")
+    finally:
+        ar.shutdown()
+
+
+def failure_check(expect):
+    """One frame whose drawing fails: the picture goes on and no error is shown; drawing failing for 2.5 s: the last
+    good frame stays, then frames_failing, cleared by the next good frame; a frame whose tracking fails is still
+    shown (or a newer one); a model without a renderer is left out and the rest drawn; the NumPy renderer with the
+    model outside the picture."""
+    ar = LiveAR("sheet", 24.0, synthetic=True, mandible=False, axes=False, intrinsics=None)
+    try:
+        ar.start()
+        _wait(lambda: ar.status().get("tracked") and _drawn(ar) > 1000, 5.0)
+        real_draw = ar._draw_models
+        fault = {"left": 0, "until": 0.0}
+
+        def flaky(*a, **kw):
+            if fault["left"] > 0 or time.perf_counter() < fault["until"]:
+                fault["left"] -= 1
+                raise RuntimeError("drawing failed (injected)")
+            return real_draw(*a, **kw)
+        ar._draw_models = flaky
+        n0 = ar.next_jpeg(0, 2.0)[1]
+        fault["left"] = 1
+        errors, t0 = [], time.perf_counter()
+        while time.perf_counter() - t0 < 1.0:
+            errors.append(ar.status()["error"])
+            time.sleep(0.05)
+        n1 = ar.next_jpeg(n0, 1.0)[1]
+        st = ar.status()
+        last = st["last_frame_error"] or {}
+        expect(st["frame_errors"] == 1 and not any(errors) and n1 - n0 > 15 and last.get("where") == "compose",
+               f"one frame whose drawing fails: {st['frame_errors']} counted ({last.get('where')}), no error shown, "
+               f"{n1 - n0} frames composed in the second after it")
+
+        fault["until"] = time.perf_counter() + 2.5
+        time.sleep(0.4)
+        b1 = ar.composed()
+        time.sleep(0.6)
+        b2 = ar.composed()
+        shown = _wait(lambda: ar.status()["error"] == "frames_failing", 2.5)
+        during = ar.status()
+        stale = during["error"] != "frames_failing" or (during["fps_ar"] == 0 and not during["tracked"])
+        _wait(lambda: time.perf_counter() > fault["until"], 3.0)
+        cleared = _wait(lambda: ar.status()["error"] == "", 1.5)
+        n2 = ar.next_jpeg(0, 1.0)[1]
+        time.sleep(0.5)
+        n3 = ar.next_jpeg(n2, 1.0)[1]
+        expect(b1 is not None and b1 is b2 and shown and stale and cleared and n3 > n2,
+               f"drawing failing for 2.5 s: the last good frame kept ({b1 is not None and b1 is b2}), frames_failing "
+               f"said ({bool(shown)}) with no rate and no light of the frame of before ({stale}), cleared by the next "
+               f"good frame ({bool(cleared)}), frames again ({n3 - n2})")
+        ar._draw_models = real_draw
+
+        real_track, bad = ar._track, {}
+
+        def track_once(stream, item):
+            if not bad:
+                bad["n"] = item.n
+                raise ValueError("tracking failed (injected)")
+            return real_track(stream, item)
+        ar.trace = []
+        ar._track = track_once
+        _wait(lambda: bad, 2.0)
+        time.sleep(0.5)
+        rows, ar.trace = ar.trace, None
+        ar._track = real_track
+        shown = [r for r in rows if r["what"] == "shown"]
+        plain = [r for r in shown if r["n"] == bad.get("n")]
+        st = ar.status()
+        expect(bad and (plain and plain[0]["kind"] == "none" or any(r["n"] > bad["n"] for r in shown))
+               and st["error"] == "" and len(shown) > 10,
+               f"a frame whose tracking fails: shown without a pose ({bool(plain)}), {len(shown)} frames in 0.5 s, "
+               f"no error shown")
+    finally:
+        ar.shutdown()
+
+    ar = LiveAR("sheet", 24.0, synthetic=True, mandible=True, axes=False, intrinsics=None)
+    try:
+        v, f = ar._models["mandible"]
+        bad_f = f.copy()
+        bad_f[::2] = bad_f[::2, ::-1]           # every other triangle turned: the winding is broken
+        ar._models = {**ar._models, "mandible": (v, bad_f)}
+        ar.start()
+        ok = _wait(lambda: _drawn(ar) > 1000, 5.0)
+        st = ar.status()
+        expect(ok and st["models"]["face"] and not st["models"]["mandible"] and st["error"] == ""
+               and "mandible" not in st.get("drawn_px", {}),
+               f"a model without a renderer (mandible, broken winding): left out ({st['models']}), the face drawn "
+               f"({st.get('drawn_px')}), no error shown")
+    finally:
+        ar.shutdown()
+
+    ar = LiveAR("sheet", 24.0, mandible=False, intrinsics=None)       # no thread: drawn here with NumPy
+    ar._gl_failed = True
+    img = np.zeros((960, 1280, 3), np.uint8)
+    Kd = scale_K(stream_intrinsics((1920, 1440), None)[0], 1280 / 1920, 960 / 1440)
+    drawn, centre = {}, ar._models["face"][0].mean(0)
+    for where, x in (("in view", 0.0), ("outside the picture", -5000.0)):
+        T = np.eye(4)
+        T[:3, :3] = np.diag([1.0, -1.0, -1.0])         # the face towards the camera
+        T[:3, 3] = np.array([x, 0.0, 600.0]) - T[:3, :3] @ centre
+        drawn[where] = ar._draw_models(img, T, Kd, None, ar.settings(), 0.3)[0].get("face", -1)
+    expect(ar.renderer == "numpy" and drawn["in view"] > 0 and drawn["outside the picture"] == 0
+           and ar.status()["frame_errors"] == 0,
+           f"NumPy renderer: face in view {drawn['in view']} px, outside the picture {drawn['outside the picture']} "
+           f"px, no error")
+    ar.shutdown()
+
+
+def input_check(expect):
+    """Calibration files that cannot be used (not JSON, no K, another frame shape): the nominal camera, coded
+    intrinsics_bad, status() unharmed; a calibration turned upright still used; the synthetic stream tracked without
+    the distortion of the calibration (its frames have none); settings that cannot make a board refused with nothing
+    changed; set_tracking reaching the detectors."""
+    import tempfile
+    K0 = stream_intrinsics((1920, 1440), None)[0]
+    with tempfile.TemporaryDirectory() as folder:
+        tmp = Path(folder)
+        files = {"garbled": "{", "no_K": json.dumps({"image_size": [1920, 1440]}),
+                 "wide": json.dumps({"image_size": [1920, 1080], "K": scale_K(K0, 1.0, 0.75).tolist(),
+                                     "dist": [0.0] * 5}),
+                 "nan": json.dumps({"image_size": [1920, 1440], "K": [[float("nan"), 0, 960], [0, 1, 720], [0, 0, 1]]})}
+        got = {}
+        for name, text in files.items():
+            path = tmp / f"{name}.json"
+            path.write_text(text, encoding="utf-8")
+            got[name] = stream_intrinsics((1920, 1440), path)[2]
+        ar = LiveAR("sheet", 24.0, intrinsics=tmp / "garbled.json", prepare=False)
+        st = ar.status()
+        upright = tmp / "upright.json"
+        Ku = np.array([[K0[1, 1], 0, K0[1, 2]], [0, K0[0, 0], K0[0, 2]], [0, 0, 1.0]])
+        upright.write_text(json.dumps({"image_size": [1440, 1920], "K": Ku.tolist(), "dist": [0.0] * 5}),
+                           encoding="utf-8")
+        turned = stream_intrinsics((1920, 1440), upright)[2]
+        expect(all(g["source"] == "nominal" and g.get("error") == "intrinsics_bad" for g in got.values())
+               and st["intrinsics"].get("error") == "intrinsics_bad" and turned["source"] == "calibrated"
+               and turned["turned"],
+               "calibration files that cannot be used (" + ", ".join(got) + "): the nominal camera, intrinsics_bad, "
+               "status() unharmed; one made upright still used, turned")
+
+        distorted = tmp / "distorted.json"
+        distorted.write_text(json.dumps({"image_size": [1920, 1440], "K": K0.tolist(),
+                                         "dist": [-0.25, 0.12, 0.001, -0.001, 0.0]}), encoding="utf-8")
+        ar = LiveAR("sheet", 24.0, synthetic=True, axes=False, intrinsics=distorted)
+        try:
+            ar.start()
+            errs, t0 = [], time.perf_counter()
+            while time.perf_counter() - t0 < 2.5:
+                time.sleep(0.05)
+                n, T = ar.last_pose()
+                Tt = ar.stream().truth(n) if T is not None else None
+                if Tt is not None:
+                    e = marker_pose.pose_error(T, Tt)
+                    errs.append((e["rot_deg"], e["trans_mm"]))
+            st = ar.status()
+        finally:
+            ar.shutdown()
+        errs = np.array(errs).reshape(-1, 2)
+        expect(len(errs) > 20 and errs[:, 0].max() < 0.3 and errs[:, 1].max() < 2.0
+               and st["intrinsics"]["source"] == "calibrated" and st["intrinsics"].get("distortion"),
+               f"synthetic frames with a distorted calibration on file: tracked without the distortion, "
+               f"{len(errs)} poses within {errs[:, 0].max() if len(errs) else float('nan'):.3f} deg and "
+               f"{errs[:, 1].max() if len(errs) else float('nan'):.2f} mm of the truth")
+
+    ar = LiveAR("sheet", 24.0, prepare=False, intrinsics=None)
+    before = ar.settings()
+    codes = []
+    for kw in ({"squares": [5, 5], "square_mm": 20.0, "marker_mm": 30.0}, {"squares": [1, 6]},
+               {"square_mm": float("nan")}, {"opacity": "dim"}, {"board": "round"}, {"view_rotation": 45}):
+        try:
+            ar.configure(**kw)
+            codes.append("taken")
+        except LiveARError as e:
+            codes.append(e.code)
+    ar.set_tracking(marker_px=41.0, min_scale=0.5)
+    detectors = (ar._setup["detector"], ar._setup["detector_track"])
+    reached = all(d.s["marker_px"] == 41.0 and d.s["min_scale"] == 0.5 for d in detectors)
+    expect(codes == ["bad_board"] * 3 + ["bad_value"] * 3 and ar.settings() == before and reached,
+           f"settings that cannot make a board refused, nothing changed ({', '.join(codes)}); set_tracking reaches "
+           f"both detectors ({reached})")
+    ar.shutdown()
+
+
+def shutdown_check(expect):
+    """Two live ARs at once, each with its own OpenGL context, gl_overlay's shared one untouched; a wrong MJPEG
+    token refused; after shutdown the threads are gone, the contexts released, an MJPEG client's stream ends, and
+    next_jpeg waits its timeout instead of answering at once (no client spins on it)."""
+    import urllib.error
+    import urllib.request
+
+    import gl_overlay
+    shared = gl_overlay._CTX
+    ars = [LiveAR("sheet", 24.0, synthetic=True, axes=False, intrinsics=None) for _ in range(2)]
+    server = None
+    try:
+        for ar in ars:
+            ar.start()
+        drawn = [bool(_wait(lambda ar=ar: _drawn(ar) > 1000, 5.0)) for ar in ars]
+        kinds = [ar.renderer for ar in ars]
+        server = MjpegServer(ars[0])
+        ended = {}
+
+        def client():
+            try:
+                with urllib.request.urlopen(server.url, timeout=10) as r:
+                    while r.read(1 << 16):
+                        pass
+                ended["eof"] = time.perf_counter()
+            except OSError as e:
+                ended["error"] = repr(e)
+        reader = threading.Thread(target=client, name="mjpeg_check")
+        reader.start()
+        time.sleep(0.5)
+        try:
+            urllib.request.urlopen(server.url.replace(server.token, "0" * len(server.token)), timeout=5)
+            wrong = 200
+        except urllib.error.HTTPError as e:
+            wrong = e.code
+    finally:
+        t0 = time.perf_counter()
+        for ar in ars:
+            ar.shutdown()
+    reader.join(5.0)
+    t_end = ended.get("eof", np.inf) - t0
+    t1 = time.perf_counter()
+    jpeg, _ = ars[0].next_jpeg(0, 0.3)
+    waited = time.perf_counter() - t1
+    if server is not None:
+        server.close()
+    gone = not any(th.is_alive() for ar in ars for th in ar._threads)
+    released = all(ar._gl is None and not ar._renderers for ar in ars)
+    gl = not any(ar._gl_failed for ar in ars)
+    expect(all(drawn) and (kinds == ["opengl"] * 2 or not gl) and gone and released and gl_overlay._CTX is shared,
+           f"two live ARs at once ({', '.join(kinds)}), each with its own OpenGL context; after shutdown threads gone "
+           f"({gone}), contexts released ({released}), the shared context untouched")
+    expect(wrong == 404 and t_end < 3.0 and jpeg is None and waited >= 0.25 and ars[0].closed,
+           f"MJPEG: wrong token {wrong}; a client's stream ends {t_end:.2f} s after shutdown; next_jpeg after it waits "
+           f"{waited:.2f} s of 0.3 s and gives nothing")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=["view", "test", "bench", "clip", "echo"])
-    ap.add_argument("out", nargs="?", help="clip: the file to write (OUT.h264, OUT_times.npy, OUT_truth.npz)")
+    ap.add_argument("out", nargs="?", help="clip: the file to write (OUT.h264, OUT_times.npy, OUT_truth.npz); "
+                                           "echo: a folder for its pictures")
     ap.add_argument("--board", choices=BOARDS, default="sheet")
     ap.add_argument("--square", type=float, default=None, help="square of the calibration board, mm (the A4 "
                                                                "sheet's as measured, or the one on a monitor)")
@@ -2430,7 +3347,7 @@ def main():
     if a.command == "echo":
         fails = []
         echo_check(lambda ok, what: (print(("ok    " if ok else "FAIL  ") + what, flush=True),
-                                     None if ok else fails.append(what)))
+                                     None if ok else fails.append(what)), out=a.out)
         sys.exit(1 if fails else 0)
     if a.command == "clip":
         if not a.out:

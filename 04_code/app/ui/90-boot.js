@@ -1,12 +1,33 @@
 // ImpactGuide · start up. Loads last: every part is defined by now.
+'use strict';
 
+// The work of the page (workOn keys) that each job of the backend ends, for an `error` event naming its job; a job
+// without work of the page here ends none, an event without a job ends all.
+const JOB_WORK = { phone: ['cal_photo', 'trial_file'], photo_check: ['cal_photo'], calibration: ['calib'],
+                   live: ['live', 'cal_stream'], import_file: ['trial_file'] };
+
+// The backend's events, to every part that follows them; what concerns no part in particular is said here.
 function onEvent(raw) {
   let e = null;
-  try { e = JSON.parse(raw); } catch (err) { return; }
-  if (!e) return;
-  if (e.type === 'phone') { PHONE = e; showPhone(); LINK.onEvent(e); return; }
-  if (e.type === 'acquire_failed') toast(sayError(e.error, e.message), 5000);
-  if (e.type === 'error') toast(sayError('generic', e.message), 6000);
+  try { e = JSON.parse(raw); } catch (err) { console.warn('an event that is not JSON', raw); return; }
+  if (!e || typeof e !== 'object') return;
+  if (e.type === 'phone') {
+    const left = LINK.leftOnPhone();
+    PHONE = e;
+    LINK.sayLeft(left);
+    showPhone();
+    LINK.onEvent(e);
+    return;
+  }
+  if (e.type === 'acquire_failed') toast(errorText(e), TOAST_LONG_MS);
+  if (e.type === 'error') {
+    // something failed in the backend without the event of its own work: that work is over, the page reads again
+    toast(errorText({ error: e.error || 'internal', args: e.args, message: e.message }), TOAST_LONG_MS);
+    if (!e.job) workClear();
+    else if (Object.prototype.hasOwnProperty.call(JOB_WORK, e.job)) JOB_WORK[e.job].forEach(function (k) { workOff(k); });
+    if (page === 'calibration') CAL.refresh();
+    else if (page === 'trials' && trialsView === 'guide') TRIALS.refresh();
+  }
   CAL.onEvent(e);
   TRIALS.onEvent(e);
   LIVE.onEvent(e);
@@ -31,13 +52,19 @@ function boot() {
     TRIALS.wire();
     LIVE.wire();
     LINK.wire();
-    showPhone();
+    showWork();         // the pill: what the app is doing, or the phone, in the new language
   };
-  beJson('app_info', function (info) {
+  askQuiet('app_info', function (info, bad) {
+    if (!info) {             // no answer to the first call: the page still opens, in English, and says so
+      speak('en');
+      go('home');
+      failed(bad);
+      return;
+    }
     speak(info.lang);
-    // SlantUI's picker with flags, on the home page as in UniGuide: flag and tag on the button; flag,
-    // tag and the name in the language itself in the list, at most 300 px and then it scrolls. The
-    // list comes from the host (impactguide_app.py, LANGUAGES), the flags from ui/flags/ (flag-icons, MIT).
+    // SlantUI's picker with flags, on the home page: flag and tag on the button; flag, tag and the name in the
+    // language itself in the list, at most 300 px and then it scrolls. The list comes from the host
+    // (impactguide_app.py, LANGUAGES), the flags from ui/flags/ (flag-icons, MIT).
     setPicker($('lang'), info.langs.map(function (l) {
       return { code: l.code, tag: l.code.toUpperCase(), label: l.native, flag: 'ui/flags/' + l.flag + '.svg' };
     }), info.lang, { maxHeight: 300 });

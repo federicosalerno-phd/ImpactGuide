@@ -1,10 +1,10 @@
-"""Refinement network of module 7 of ai_design.md (T14.4): a multi-view render-and-compare network that initialises the
-correction of correct.py.
+"""Refinement network: a multi-view render-and-compare network that initialises the correction of correct.py.
 
 Inputs per view: a 256 x 256 crop of fixed scale (CROP_MM, about 0.8 mm per pixel) centred on the projection of the
 face centroid at the current estimate of the registration, with 6 channels: RGB, observed face mask (SAM 2), face
 mask and edges rendered at the estimate (undeformed face, gl_overlay.py); view geometry: pose of the camera with
-respect to the estimated head frame B (rotation in the 6D representation, translation / 300 mm), not T_C_M.
+respect to the estimated head frame B (coordinates of the bench scene; rotation in the 6D representation, translation
+/ 300 mm), not T_C_M.
 Network: ImageNet ResNet-18 shared by the views, first layer widened to 6 channels (RGB weights copied, the other
 channels initialised to their mean), 512 image features plus 64 from the geometry branch, a per-view layer, fusion by
 mean and maximum over the views (any number), a trunk and two heads: A1 (3 parameters, rotation about the ball
@@ -17,7 +17,7 @@ Inference: ITERS iterations with a new render at each (Refiner.refine), then the
 the output (optimize: one start, no multi-start), or uses the output with its predicted variance as a Gaussian prior
 (optimize(..., sigma)).
 
-Data: the digital twin of T13.2 (C:\\work\\marker-impact\\synth, split by session 180/48/72 samples). Observed masks:
+Data: the digital twin of synth_twin.py (SYNTH, split by session 180/48/72 samples). Observed masks:
 SAM 2.1 tiny in fp32 (sam2_segment.py), prompted once per image with the box of the visible face (the face mesh
 without the part under the surgical cap) rendered at the registration the system has before the correction (T_M_B0),
 plus a 10% margin; the pixels of the known covers and occluders (marker, A1 or B1 parts, splint, cap, drape, pendulum,
@@ -50,7 +50,6 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
@@ -58,11 +57,12 @@ import correct as co          # noqa: E402
 import synth_data as sd       # noqa: E402
 
 ROOT = SRC.parents[1]
-SYNTH = Path(r"C:\work\marker-impact\synth")
-SAM_DIR = Path(r"C:\work\marker-impact\synth_sam")
-WORK = Path(r"C:\work\marker-impact\refiner")
-MODELS = Path(r"C:\work\marker-impact\models\refiner")
-os.environ.setdefault("TORCH_HOME", r"C:\work\marker-impact\models\torch")     # ImageNet weights of ResNet-18
+WORK_ROOT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
+SYNTH = WORK_ROOT / "synth"
+SAM_DIR = WORK_ROOT / "synth_sam"
+WORK = WORK_ROOT / "refiner"
+MODELS = WORK_ROOT / "models" / "refiner"
+os.environ.setdefault("TORCH_HOME", str(WORK_ROOT / "models" / "torch"))     # ImageNet weights of ResNet-18
 RESULTS = ROOT / "05_results"
 TARGETS_CSV = ROOT / "03_data" / "processed" / "targets" / "mandible_targets.csv"
 
@@ -94,7 +94,7 @@ class Face:
     f: np.ndarray
     o: np.ndarray            # centroid of the decimated vertices: centre of the general update (as correct.py)
     c: np.ndarray            # A1 ball centre (frame B)
-    targets: np.ndarray      # the 7 clinical targets of T1.3 (frame B)
+    targets: np.ndarray      # the clinical targets of role "proposed" (frame B, columns x_B, y_B, z_B)
     visible: np.ndarray      # faces not under the surgical cap (prompt box of SAM)
 
 
@@ -398,6 +398,8 @@ def cmd_prepare(a):
     WORK.mkdir(parents=True, exist_ok=True)
     t_start = time.perf_counter()
     jobs = [(s, fr) for s in sd.sessions(SYNTH) if lo <= int(s.name[1:]) < hi for fr in sd.frames(s)]
+    if not jobs:
+        raise SystemExit(f"prepare: no rendered images in sessions {a.sessions} of {SYNTH}")
     splits = {}
     for s, fr in jobs:
         splits.setdefault(fr["split"], []).append(f"{s.name}/{fr['image']}")
@@ -548,12 +550,18 @@ class TrainStream(torch.utils.data.IterableDataset):
         face = load_face()
         ren = gl_overlay.GLMeshRenderer(face.v, face.f)
         cache = Cache(self.split)
+        # states with at least V images, for each number of views V (all of them when every state has its photos)
+        keys = {V: [k for k in cache.keys if len(cache.states[k]) >= V] for V in VIEWS}
+        if not any(keys.values()):
+            raise ValueError(f"training split {self.split}: no state with {min(VIEWS)} or more images")
         while True:
             mode = "a1" if rng.random() < 0.5 else "rigid"
             V = int(rng.choice(VIEWS))
+            if not keys[V]:
+                continue
             n = CROPS // V
             xs, gs, th = [], [], []
-            for key in rng.choice(cache.keys, n, replace=True):
+            for key in rng.choice(keys[V], n, replace=True):
                 idx = rng.choice(cache.states[key], V, replace=False)
                 T_M_B = cache.meta["T_M_B"][idx[0]]
                 P = perturbation(mode, rng, face.c, face.o)
@@ -587,6 +595,8 @@ class ValSet:
         self.cases = []
         for k, key in enumerate(self.cache.keys):
             ph = self.cache.photos(key)
+            if not ph:           # a state without photos has no validation case (the seeds follow k, not the cases)
+                continue
             for mode in ("a1", "rigid"):
                 rng = np.random.default_rng([seed, k, 0 if mode == "a1" else 1, 7])
                 P = ecs.perturbation(mode, rng, face.c, face.o)[0]

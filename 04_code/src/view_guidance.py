@@ -1,4 +1,4 @@
-"""View guidance: which views of the anatomy to take for the correction (T14.3, module 6 of ai_design.md).
+"""View guidance: which views of the anatomy to take for the correction.
 
 Object agnostic, like correct.py: any mesh with a renderer with the interface of mesh_overlay.MeshRenderer, any set of
 candidate views (offline: the video frames with their T_C_M; live: hypothetical positions of the arm, only rendered).
@@ -30,7 +30,7 @@ import numpy as np
 import correct as co
 
 SIGMA_MM = 0.3       # outline noise of the observed masks (mm on the object plane)
-KAPPA = 5.0          # inflation for correlated residuals (T14.2: 5-7 for 95% coverage); calibrated in T15.3
+KAPPA = 5.0          # inflation for correlated residuals (5-7 for 95% coverage on the synthetic views)
 MAX_DEG, MAX_MM = 5.0, 5.0    # largest displacements of the impact: prior Sigma0
 MIN_CORNERS = 8      # ChArUco corners in the image for the board pose
 MIN_POINTS = 30      # outline points of the anatomy
@@ -202,7 +202,13 @@ class Arc:
         return np.linalg.inv(self.T_B_C(arm_deg))
 
     def arm_of(self, azimuth_deg):
-        """Arm angle for a camera azimuth: linear interpolation of the pairs, linear extrapolation beyond them."""
+        """Arm angle for a camera azimuth: linear interpolation of the pairs, linear extrapolation beyond them.
+
+        Raises:
+            ValueError: the arc has fewer than two (azimuth, arm angle) pairs.
+        """
+        if self.pairs is None or len(self.pairs) < 2:
+            raise ValueError("arm_of needs at least two (azimuth, arm angle) pairs")
         az, arm = self.pairs[:, 0], self.pairs[:, 1]
         x = float(azimuth_deg)
         if x < az[0]:

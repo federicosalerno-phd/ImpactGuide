@@ -1,4 +1,4 @@
-"""ImpactGuide test: complete trials simulated with stand-in files (T20.1), and the calibration (T5.1, T20.3).
+"""ImpactGuide test: complete trials simulated with stand-in files, and the calibration.
 
 backend   the slots the page calls, without a window: a trial from the first
           step to the log row, a cap shift over the threshold and the
@@ -24,7 +24,17 @@ backend   the slots the page calls, without a window: a trial from the first
           way; the plan's least and most; a board changed after the photos);
           the calibration with its errors per photo and over the board, a photo
           left out by hand and the calibration again, saved; the session check;
-          the streaming mode on frames of the live stream.
+          the streaming mode on frames of the live stream. Then what must
+          never come back: an exception out of a Qt callback that closes the
+          app, a library's SystemExit, a traceback or a raw error text sent to
+          the page, preferences or checks lost to a half-written file, the
+          page folder of an app still open, the phone's view on the network
+          before it is asked for, a path the page sends opened whatever it is,
+          a photo filed under a trial voided meanwhile, close notes refused
+          after notes typed at the start, a staged file dropped by a confirm,
+          a stream event without its purpose, a calibration judged by today's
+          plan, a series cut at midnight, a photo left unchecked, a scan staged
+          before it is whole, the ruler check at another page scale.
 --ui DIR  the same through the real window: the app opens at home (no rail),
           the page's own buttons are pressed, one trial is run to its log
           row, the mark on the band leads home and a choice of home to its
@@ -49,7 +59,10 @@ backend   the slots the page calls, without a window: a trial from the first
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
 Exit code 1 on failure. Everything is written under --work (default: a folder
-in the system temp), never in the project's data.
+in the system temp), never in the project's data; the app's errors.log of the
+run is DIR/backend/logs (DIR/ui/logs with --ui). --work is emptied at the
+start only when it is new, empty, or a work folder of this test (it carries
+the file .impactguide-test): any other folder is refused, never deleted.
 """
 import argparse
 import hashlib
@@ -58,6 +71,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -70,6 +84,9 @@ import screen_board  # noqa: E402
 import trials  # noqa: E402
 
 FAILS = []
+TEST_MARKER = ".impactguide-test"       # a work folder of this test carries this file
+# what a work folder of earlier versions of this test holds (they wrote no marker yet)
+TEST_ENTRIES = {"backend", "ui", "scale_1.25", "scale_1.5", TEST_MARKER}
 
 
 def expect(ok, what):
@@ -80,6 +97,29 @@ def expect(ok, what):
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def prepare_work(folder):
+    """The work folder emptied and marked as this test's own; False, and nothing touched, when it is a folder of
+    something else (not empty and neither marked nor laid out as this test's work folder)."""
+    folder = Path(folder)
+    if folder.exists():
+        entries = {p.name for p in folder.iterdir()}
+        if entries and TEST_MARKER not in entries and not entries <= TEST_ENTRIES:
+            return False
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True)
+    (folder / TEST_MARKER).write_text("work folder of test_app.py: emptied at each run\n", encoding="utf-8")
+    return True
+
+
+def fresh(folder):
+    """A folder of this test's own inside its work folder, made empty (a run on a reused work folder, or a check
+    called again, finds the one of before)."""
+    folder = Path(folder)
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    return folder
 
 
 # ── the backend, without a window ────────────────────────────────────────────
@@ -155,12 +195,254 @@ class Driver:
                 return trial, done
 
 
+class Opened:
+    """Stands in for ig.open_externally: records what the app would have opened, opens nothing."""
+
+    def __init__(self):
+        self.paths = []
+
+    def __call__(self, path):
+        self.paths.append(Path(path))
+
+    def __enter__(self):
+        self.real, ig.open_externally = ig.open_externally, self
+        return self
+
+    def __exit__(self, *_):
+        ig.open_externally = self.real
+
+
+def test_robust(d, work):
+    """What the app must survive or refuse, without a trial: an exception out of a Qt callback or out of a job's
+    result, a library's SystemExit, a path from the page that is not a data folder, broken or half-written files, a
+    second start while the page folder of the first is held, a calibration log kept off stdout, a scan file
+    still being written; errors said with a code only, their details in the run's own errors.log."""
+    from slantui.shell.qt import QTimer
+    b = d.backend
+    # answers: strict JSON, a code, no traceback, no exception text
+    a = d.call("step_confirm", "photo_az40", "{}")
+    expect(ig.to_json({"a": float("nan"), "b": [float("inf"), 1.5]}) == '{"a": null, "b": [null, 1.5]}'
+           and a.get("error") == "no_trial" and "trace" not in a and a.get("message") == "" and a.get("args") == {},
+           f"answers: NaN sent as null, a refusal said by its code with no trace or exception text ({a})")
+    calls = {}
+
+    def exits(*_):
+        calls["n"] = calls.get("n", 0) + 1
+        sys.exit("library code that ends the process")
+    a = b._answer(exits)
+    expect(json.loads(a).get("error") == "failed" and calls["n"] == 1,
+           f"a SystemExit inside a slot is an answer, the app goes on ({a})")
+
+    class Coded(Exception):
+        """A coded error of the modules: its code and the values of its sentence."""
+
+        def __init__(self):
+            super().__init__("trial_log.csv is open in another program")
+            self.code, self.params = "log_locked", {"file": Path("trial_log.csv"), "tries": 20}
+
+    def locked():
+        raise Coded()
+    c = json.loads(b._answer(locked))
+    expect(c == {"error": "log_locked", "args": {"file": "trial_log.csv", "tries": 20}, "message": ""},
+           f"a coded error of the modules: its code and its values to the page, never its text ({c})")
+    # open_path: only folders of the data; a program or a folder elsewhere is refused and never opened
+    with Opened() as opened:
+        exe = d.call("open_path", sys.executable)
+        home = d.call("open_path", str(Path.home()))
+        b.run().folder.mkdir(parents=True, exist_ok=True)
+        ok = d.call("open_path", str(b.run().folder))
+        bad_trial = d.call("trial_open_folder", "..\\..")
+    expect(exe.get("error") == "not_found" and home.get("error") == "bad_value" and ok.get("ok")
+           and bad_trial.get("error") == "bad_value" and opened.paths == [b.run().folder.resolve()],
+           "open_path: a program and a folder outside the data refused and not opened, a data folder opened")
+    # an exception out of a Qt callback, and out of a job's done(): logged in this run's errors.log, the app goes on
+    ig.install_excepthooks()
+    QTimer.singleShot(0, lambda: (_ for _ in ()).throw(RuntimeError("callback failure B01")))
+    d.wait(lambda: False, 0.3)
+    n = len(d.events)
+    b._jobs.put(("probe", lambda r, e: 1 / 0, None, None))
+    got = d.wait(lambda: any(x["type"] == "error" for x in d.events[n:]), 5)
+    err = next((x for x in d.events[n:] if x["type"] == "error"), {})
+    logged = b.roots.log.read_text(encoding="utf-8") if b.roots.log.exists() else ""
+    expect(got and err.get("error") == "internal" and err.get("job") == "probe" and err.get("message") == ""
+           and "callback failure B01" in logged
+           and "ZeroDivisionError" in logged and b.roots.log.parent == work / "logs",
+           f"an exception in a Qt callback and in a job's result: logged with its trace in {b.roots.log.parent}, "
+           f"the page told in a code, the app still running")
+    expect(ig.Roots().board == ig.LOCAL / "boards" and ig.Roots().log == ig.LOCAL / "errors.log",
+           "the printable sheet and the log in the app's own folder, not in a developer's path")
+    # preferences: a broken file kept aside, the defaults used; saving atomic; a camera folder that is no path refused
+    prefs_dir = work / "prefs_check"
+    fresh(prefs_dir)
+    pp = prefs_dir / "preferences.json"
+    pp.write_text('{"lang": "it", "phone": {', encoding="utf-8")
+    p = ig.Prefs(pp)
+    kept_aside = (prefs_dir / "preferences.bad.json").read_text(encoding="utf-8")
+    p.set("lang", "de")
+    p2 = ig.Prefs(pp)
+    pp.write_text(json.dumps({"phone": {"camera_dir": "/sdcard/DCIM'; reboot; '"}}), encoding="utf-8")
+    p3 = ig.Prefs(pp)
+    leftovers = [x.name for x in prefs_dir.iterdir() if x.suffix == ".tmp"]
+    expect(p["lang"] == "de" and kept_aside.startswith('{"lang"') and p2["lang"] == "de" and not leftovers
+           and p3["phone"]["camera_dir"] == ig.acquisition.CAMERA_DIR,
+           "preferences: a broken file kept as preferences.bad.json and the defaults used, saved whole, a camera "
+           "folder with shell characters refused")
+    # the other files the app writes: atomic JSON, CSV rows added at the end
+    target = prefs_dir / "checks.json"
+    ig.write_json_atomic(target, {"a": 1})
+    ig.write_json_atomic(target, {"a": 2})
+    csv_path = prefs_dir / "rows.csv"
+    ig.append_csv_row(csv_path, {"time": "1", "mode": "photo"}, ("time", "mode"))
+    ig.append_csv_row(csv_path, {"time": "2", "mode": "stream"}, ("time", "mode"))
+    rows = trials.read_csv(csv_path)
+    expect(json.loads(target.read_text(encoding="utf-8")) == {"a": 2} and [r["time"] for r in rows] == ["1", "2"]
+           and not [x for x in prefs_dir.iterdir() if x.suffix == ".tmp"],
+           "files: JSON replaced whole, no temporary file left; CSV rows added after the header, once")
+    # a second start while the first app's page folder is held: a folder per process, stale ones removed
+    pages = fresh(work / "pages")
+    (pages / "page" / "ui").mkdir(parents=True)
+    (pages / "page-99999999").mkdir()
+    first = ig.prepare_page(pages)
+    with open(first.parent / "ui" / "00-strings.js", "rb"):     # held, as the window of a running app holds it
+        second = ig.prepare_page(pages)
+    expect(first == second and second.is_file() and second.parent.name == f"page-{os.getpid()}"
+           and not (pages / "page").exists() and not (pages / "page-99999999").exists(),
+           "page folder: one per running app, the folders of apps gone removed, a held file no obstacle")
+    # what a calibration says: through its log argument, never by taking over stdout (which every thread shares)
+    stdout = sys.stdout
+
+    def with_log(log=None):
+        log("one line")
+        log("another")
+        return 3
+    expect(ig.captured(with_log) == (3, "one line\nanother\n") and sys.stdout is stdout,
+           "calibration log: the lines it logs, kept for the log file; stdout left alone")
+
+    def failing(log=None):
+        log("before the failure")
+        raise ValueError("stopped")
+    sink = []
+    try:
+        ig.captured(failing, sink=sink)
+    except ValueError:
+        pass
+    expect(ig.log_text(sink) == "before the failure\n", "calibration log: what it said before failing is kept")
+    expect(ig.plain_args({"got": (4080, 3072), "files": ["a.jpg", Path("b.jpg")], "path": Path("x"), "n": 3})
+           == {"got": [4080, 3072], "files": ["a.jpg", "b.jpg"], "path": "x", "n": 3},
+           "error values: a size and a list of names go as lists, a path as its text")
+    expect(ig.CAMERA_DIR_RE.fullmatch("/storage/emulated/0/DCIM/Camera")
+           and not any(ig.CAMERA_DIR_RE.fullmatch(x) for x in ("/sdcard/DCIM\n", "//sdcard", "/a/../b", "/a b", "a/b",
+                                                                "/a'b", "/a/")),
+           "camera folder of the phone: a plain absolute folder only")
+    # a scan still being written: staged only once unchanged for acquisition.SCAN_SETTLE_S
+    scans = work / "scan_check"
+    fresh(scans)
+    watch = ig.ScanWatch("t000", "scan_az40", scans)
+    (scans / "export.ply").write_bytes(b"ply\n" + b"0" * 1000)
+    settle = ig.acquisition.SCAN_SETTLE_S
+    t0, found = time.monotonic(), None
+    while found is None and time.monotonic() - t0 < settle + 6:
+        found = watch.poll()
+        took = time.monotonic() - t0
+        time.sleep(0.25)
+    expect(found == scans / "export.ply" and took >= settle - 0.05,
+           f"scanner folder: a new scan taken only after {settle:g} s without change ({took:.1f} s)")
+    # the test never deletes a folder that is not its own
+    foreign = work / "foreign"
+    fresh(foreign)
+    (foreign / "data.csv").write_text("x\n", encoding="utf-8")
+    expect(not prepare_work(foreign) and (foreign / "data.csv").is_file(),
+           "--work: a folder that is not this test's is refused and left as it is")
+
+
+def test_trial_fixes(d, work):
+    """A photo that arrives after its trial was voided is not filed under the next one; notes typed at the start and
+    at the close are both kept, the trial closed; a staged file is never dropped by confirming a step done before;
+    a staged file carries its problems as codes."""
+    b = d.backend
+    run = b.run()
+    # a photo on its way while the trial is voided: dropped, said, nothing staged
+    s = d.call("trial_start", json.dumps({"swing_mass_g": "137.2"}))
+    trial = s["trial"]["trial"]
+    key = next(st["key"] for st in s["steps"] if st["kind"] == "photo")
+    phone = b.phone()
+    gate = threading.Event()
+    real_shoot = phone.shoot
+    phone.shoot = lambda out: (gate.wait(10), real_shoot(out))[1]
+    try:
+        a = d.call("step_shoot", key)
+        d.call("trial_void", trial, "voided while a photo was on its way")
+        n = len(d.events)
+        gate.set()
+        e = d.wait_event("acquire_failed", timeout=20)
+    finally:
+        del phone.shoot
+    left = list((work / "staging" / trial).glob("*.*")) if (work / "staging" / trial).is_dir() else []
+    expect(a.get("ok") and e is not None and e.get("error") == "trial_changed" and e.get("trial") == trial
+           and e.get("args") == {"trial": trial} and not d.staged(key) and not left
+           and not any(x["type"] == "staged" for x in d.events[n:]),
+           f"{trial}: a photo arriving after its trial was voided is dropped and said ({e and e.get('error')}), "
+           f"never staged for another trial")
+    # notes typed at the start, more at the close: both kept, the trial closed
+    s = d.call("trial_start", json.dumps({"swing_mass_g": "137.2", "notes": "start note"}))
+    trial = s["trial"]["trial"]
+    photo = next(st for st in s["steps"] if st["kind"] == "photo")
+    d.run_trial(stop_after=photo["key"])
+    # the photo step done, then a new photo staged for it: confirming again never drops it, nor replaces the filed one
+    i = next(i for i, st in enumerate(d.call("trials_state")["steps"]) if st["key"] == photo["key"])
+    d.call("step_go", i)
+    # the new photo chosen by hand (Import): copied by a worker, then staged
+    chosen = work / "chosen_photo.jpg"
+    shutil.copy2(run.find(trial, photo["files"][0])[0], chosen)
+
+    class Dialog:
+        @staticmethod
+        def getOpenFileName(*_):
+            return str(chosen), ""
+    real_dialog, ig.QFileDialog = ig.QFileDialog, Dialog
+    try:
+        imported = d.call("step_import", photo["key"])
+    finally:
+        ig.QFileDialog = real_dialog
+    d.wait(lambda: d.staged(photo["key"]))
+    staged = dict(b.cur["staged"][photo["key"]]) if d.staged(photo["key"]) else {"path": str(work / "none")}
+    again = d.call("step_confirm", photo["key"], "{}")
+    still = d.staged(photo["key"]) and Path(staged["path"]).is_file()
+    d.call("step_discard", photo["key"])
+    expect(imported.get("trial") and again.get("error") == "exists" and still and not Path(staged["path"]).exists()
+           and isinstance(staged.get("problem_codes"), list) and len(run.find(trial, photo["files"][0])) == 1,
+           f"{trial}: a photo imported by hand (copied in the background, then staged); the step confirmed again "
+           f"with it staged is refused (exists), the staged photo kept until discarded, the filed one untouched")
+    d.call("step_go", i + 1)
+    d.run_trial(close={"second_hit": "0", "cap_replaced": "0", "notes": "close note"})
+    row = run.log.row(trial)
+    expect(row["status"] == "ok" and row["notes"] == "start note; close note",
+           f"{trial}: notes of the start and of the close both kept ({row['notes']!r}), the trial closed")
+    # a photo for a trial the app still takes for open, though it is not (voided by an edit of the log): dropped,
+    # said, never staged for the trial that is open now (if any)
+    stray = fresh(work / "staging" / "Z999") / "photo.jpg"
+    stray.write_bytes(b"not a photo")
+    kept_cur = b.cur
+    b.cur = {"trial": "Z999", "step": 0, "staged": {}, "recording": "", "resumed": False}
+    n = len(d.events)
+    try:
+        b._staged("Z999", photo["key"], stray, temp=True)
+    finally:
+        b.cur = kept_cur
+    e = next((x for x in d.events[n:] if x["type"] == "acquire_failed"), None)
+    expect(e is not None and e.get("error") in ("no_trial", "trial_changed") and not stray.exists()
+           and not any(x["type"] == "staged" for x in d.events[n:]),
+           f"a photo for a trial voided behind the app's back: dropped and said ({e and e.get('error')})")
+
+
 def test_backend(app, work, calibration=True):
     d = Driver(app, work)
     run = lambda: d.backend.run()  # noqa: E731
     s = d.call("trials_state")
     expect(s["trial"]["trial"] == "t001" and s["totals"]["slots"] == 128 and not s["trial"]["open"],
            "first plan: t001, 128 slots, not started")
+    expect("warning_codes" in s["trial"], "the plan carries its warnings as codes too")
+    test_robust(d, work)
     a = d.call("trial_start", json.dumps({}))
     expect(a.get("error") == "swing_mass", "no trial without the swinging mass")
 
@@ -183,7 +465,11 @@ def test_backend(app, work, calibration=True):
            and s["trial"]["swing_mass_g"] == "137.2",
            f"{s['trial']['trial']}: reposition with the jig first ({s['trial']['reference']}), mass carried over")
     t2, _ = d.run_trial(stop_after="photo_az55")
-    d.backend.shutdown()
+    old = d.backend
+    had = len(old._connections)
+    old.shutdown()
+    expect(had >= 2 and not old._connections and not old._pump.isActive() and not old._scan_timer.isActive(),
+           f"app closed: its {had} connections to Qt undone and its timers stopped (a backend made after it is alone)")
     d.open_backend()
     s = d.call("trials_state")
     step = s["steps"][s["step"]]
@@ -250,8 +536,9 @@ def test_backend(app, work, calibration=True):
     # 8. completeness of the phase
     R = d.call("check_phase", True)
     problems = {t["trial"]: t["problems"] for t in R["trials"] if t["problems"]}
-    expect(not problems and not R["orphans"] and R["extra"] == [t4],
+    expect(not problems and not R["orphans"] and R["extra"] == [t4] and R["duplicates"] == [] and R["open"] == [],
            f"completeness: no problems, no stray folders, outside the matrix {R['extra']}")
+    test_trial_fixes(d, work)
 
     # 9. live AR on the synthetic stream: on, board tracked, the other board, a photo stops it first
     s = d.call("live_state")
@@ -261,15 +548,15 @@ def test_backend(app, work, calibration=True):
     e = d.wait_event("live", timeout=30)
     tracked = d.wait(lambda: (lambda x: x.get("tracked") and x.get("fps_ar", 0) > 0)(d.call("live_state")), 15)
     s = d.call("live_state")
-    expect(e is not None and e["action"] == "started" and tracked and s["fps_ar"] > 0
+    expect(e is not None and e["action"] == "started" and e.get("purpose") == "live" and tracked and s["fps_ar"] > 0
            and s["corners"] == s["board"]["corners"] and s["drawn_px"].get("face", 0) > 0,
-           f"live view: started, sheet tracked ({s.get('corners')} corners, RMS {s.get('rms_px')} px), "
-           f"face drawn, {s.get('fps_ar')} fps")
+           f"live view: started (an event of the live view's own), sheet tracked ({s.get('corners')} corners, RMS "
+           f"{s.get('rms_px')} px), face drawn, {s.get('fps_ar')} fps")
     d.call("live_settings", json.dumps({"board": "patient", "mandible": True}))
     tracked = d.wait(lambda: (lambda x: x.get("tracked") and x["board"]["name"] == "patient")(d.call("live_state")), 15)
     s = d.call("live_state")
     expect(tracked and s["registration"]["demo"] == "design" and s["layers"]["mandible"],
-           f"live view: patient board tracked after the switch, bench design registration, mandible on")
+           "live view: patient board tracked after the switch, bench design registration, mandible on")
     s = d.call("live_settings", json.dumps({"opacity": 0.55}))
     bad = d.call("live_settings", json.dumps({"opacity": 7}))
     expect(abs(s.get("opacity", -1) - 0.55) < 1e-9 and bad.get("opacity") == 1.0
@@ -281,9 +568,21 @@ def test_backend(app, work, calibration=True):
     d.call("calib_shoot", folder)
     stopped = d.wait(lambda: any(x["type"] == "live" and x.get("action") == "stopped" for x in d.events[n:]), 10)
     got = d.wait_event("calib_photo", timeout=20)
-    expect(stopped and got is not None and not d.call("live_state")["running"],
+    said = next((x for x in d.events[n:] if x["type"] == "live" and x.get("action") == "stopped"), {})
+    expect(stopped and got is not None and not d.call("live_state")["running"] and said.get("purpose") == "live",
            "live view: a photo from the phone stops it first, then the photo is taken")
     d.call("live_settings", json.dumps({"board": "sheet", "mandible": False}))
+    # a stream that failed: its code reaches the page as live_error, never as the answer's own error (which the
+    # page takes for a failed call: no picture, no reason, Start never offered again)
+    ar = d.backend._live
+    real_status = ar.status
+    ar.status = lambda: {**real_status(), "error": "stream_closed", "stream_state": "failed"}
+    try:
+        answers = [d.call("live_state"), d.call("live_settings", json.dumps({"opacity": 0.3}))]
+    finally:
+        del ar.status
+    expect(all("error" not in x and x.get("live_error") == "stream_closed" and "running" in x for x in answers),
+           "live view: a failed stream said by its state (live_error), the answer itself not a failure")
 
     # 10. the link to the phone: cable or Wi-Fi, pairing, a drop and its return, the phone's own screen
     test_link(d)
@@ -292,7 +591,37 @@ def test_backend(app, work, calibration=True):
     test_board(d)
     if calibration:
         test_series(d)
+    test_midnight(d)
     d.backend.shutdown()
+    t0 = time.monotonic()
+    frame = d.backend._frames.next_frame(0, 5.0)
+    expect(frame[0] is None and time.monotonic() - t0 < 0.5,
+           "app closed: the phone's page waiting for a frame is answered at once")
+
+
+def test_midnight(d):
+    """A series of photos under way at midnight goes on the next day; one left hours ago is a series of its own."""
+    from datetime import date, timedelta
+    b = d.backend
+    d.call("calib_set", json.dumps({"mode": "photo", "kind": "calibration"}))
+    tag = b._series_tag()
+    today = f"{date.today():%Y%m%d}"
+    for x in list(b.roots.calib_raw.iterdir()) if b.roots.calib_raw.is_dir() else []:
+        if x.name.startswith(today) and x.name.split("_", 1)[-1] == tag:
+            expect(False, f"no series of today before this check ({x.name})")
+            return
+    yesterday = b.roots.calib_raw / f"{date.today() - timedelta(days=1):%Y%m%d}_{tag}"
+    fresh(yesterday)
+    photo = yesterday / "IMG_0001.jpg"
+    photo.write_bytes(b"\xff\xd8\xff")
+    goes_on = (b._series() or {}).get("name")
+    old = time.time() - ig.SERIES_KEEP_S - 60
+    os.utime(photo, (old, old))
+    left = b._series()
+    shutil.rmtree(yesterday)
+    expect(goes_on == yesterday.name and left is None,
+           f"a series under way at midnight goes on ({goes_on}); left {ig.SERIES_KEEP_S // 3600} h ago, a new one "
+           f"starts")
 
 
 def png_image(data_url):
@@ -362,6 +691,47 @@ def test_board(d):
            f"kept for this monitor and the board laid out again with it; 9 % off refused")
     f = d.call("board_set", json.dumps({"forget": True}))
     expect(f["mon"]["source"] == mon["source"], "ruler check forgotten")
+    # the ruler check with the page at another scale than the screen (125 %): the monitor's own pitch is kept, so
+    # the next layout is right; a window with no client area (minimised) lays the board out without failing
+    b = d.backend
+    b._page_scale = lambda c: (1.25, True)
+    try:
+        scaled = d.call("board_area", area(1500, 820))
+        lay_s = b._lay
+        read = round(lay_s["width_mm"] * 1.004, 1)
+        r_s = d.call("board_set", json.dumps({"ruler_mm": read}))
+        kept_s = ig.Prefs(b.roots.prefs)["monitors"].get(mon["key"], {})
+        page_pitch = read / (lay_s["squares"][0] * lay_s["square_px"])
+        scale_ok = (not scaled["exact"] and abs(kept_s.get("pitch_mm", 0) - page_pitch / 1.25) < 1e-12
+                    and abs(r_s["layout"]["pitch_mm"] - kept_s["pitch_mm"] * 1.25) < 1e-12)
+        d.call("board_set", json.dumps({"forget": True}))
+        b._page_scale = lambda c: (0.0, True)
+        zero = d.call("board_area", area(1500, 820))
+    finally:
+        del b._page_scale
+    d.call("board_area", area(1500, 820))
+    expect(scale_ok and "error" not in zero and zero["exact"] and zero["state"]["layout"] is not None,
+           f"ruler check with the page at 125 %: the monitor's pitch kept per screen pixel "
+           f"({kept_s.get('pitch_mm', 0):.5f} mm), the board laid out again right; no client area: laid out at 1")
+    # caliper readings that are not lengths (a preferences file edited by hand): refused, the nominal board used
+    kept_board = dict(b.prefs["board"])
+    b.prefs.set("board", {**kept_board, "sheet": {"long": [float("nan"), 264.2, 264.4]}})
+    odd = d.call("board_state")
+    b.prefs.set("board", kept_board)
+    try:
+        b._sheet_reading([float("inf")])
+        refused = False
+    except ValueError:
+        refused = True
+    expect("error" not in odd and odd["physical"]["sheet"]["long"] is None and not odd["physical"]["sheet"]["spec"]
+           ["measured"] and refused,
+           "A4 sheet: readings that are not finite refused, the nominal board used, the board state still answers")
+    loose = d.work / "loose_photos"
+    fresh(loose)
+    (loose / "imported.jpg").write_bytes(b"\xff\xd8\xff")
+    b._folder_board(loose)
+    expect(not (loose / calibrate_charuco.BOARD_FILE).exists(),
+           "photos imported into a folder without board.json: no board made up for them")
     # the 3D-printed plate: three readings, the mean and the spread, the square from them
     p = d.call("board_set", json.dumps({"kind": "plate", "plate_long": [220.05, 220.02, 220.08]}))
     info, a_ = p["physical"]["plate"], p["active"]
@@ -420,6 +790,26 @@ def test_series(d):
            and s["next"]["n"] == 1 and (raw / first["name"] / ig.PHOTO_CHECKS).is_file(),
            f"first photo: checked as it came and kept ({e and e['check']['corners']} corners, blur "
            f"{e and e['check']['blur_px']} px), in {first['name']}; the guide moves to the second pose")
+    # two photos arriving while a check runs: both checked, one after the other (none left unchecked)
+    q = d.work / "queue_check"
+    fresh(q)
+    shutil.copy2(raw / first["name"] / calibrate_charuco.BOARD_FILE, q / calibrate_charuco.BOARD_FILE)
+    src = next(p for p in (raw / first["name"]).iterdir() if p.suffix.lower() in ig.IMAGE_SUFFIXES)
+    for name in ("one", "two"):
+        shutil.copy2(src, q / f"{name}{src.suffix}")
+    b._arrived(q, q / f"one{src.suffix}")
+    b._arrived(q, q / f"two{src.suffix}")
+    queued = b._checking() and len(b._check_queue) == 1
+    both = d.wait(lambda: {f"one{src.suffix}", f"two{src.suffix}"} <= set(b._photo_checks(q)), 60)
+    checks = b._photo_checks(q)
+    expect(queued and both and all(c["ok"] for c in checks.values()) and not b._checking(),
+           "two photos at once: the second waits for the first's check, then is checked too")
+    n = len(d.events)
+    b._queue_checks(q, [q / f"gone{src.suffix}"])
+    gone = next((x for x in d.events[n:] if x["type"] == "acquire_failed"), None)
+    expect(gone is not None and gone.get("key") == "calibration" and gone.get("error") == "not_found"
+           and not b._checking() and not b._check_queue,
+           "a photo gone before its check: said, so the page ends the work it started; the queue goes on")
     # photos that fail: blurred, without the board, the phone held the other way
     for why, scene in (("blur", lambda: cv2.cvtColor(cv2.GaussianBlur(calib_guide.photo(
             "quick", 1, b._board()["active"], "screen", "photo", b._lay, size=(2040, 1536)), (0, 0), 4), cv2.COLOR_GRAY2BGR)),
@@ -457,12 +847,28 @@ def test_series(d):
     s = d.call("calib_state")
     r = s["result"]
     expect(e and e["ok"] and r and not r["saved"] and r["verdict"] == "good" and r["n_views"] >= 14 and len(r["photos"]) == 15
-           and r["residuals"]["corners"] and r["grid"] and abs(r["plain"]["fx"] / (3071.4 * 2040 / 4080) - 1) < 0.003,
+           and r["residuals"]["corners"] and r["grid"] and abs(r["plain"]["fx"] / (3071.4 * 2040 / 4080) - 1) < 0.003
+           and r["focal_ok"],
            f"calibration: {r and r['verdict']}, RMS {r and r['rms_px']} px on {r and r['n_views']} of 15 photos, "
-           f"focal {r and round(r['plain']['fx'], 1)} px (true {3071.4 * 2040 / 4080:.1f}), field of view "
+           f"focal {r and round(r['plain']['fx'], 1)} px (true {3071.4 * 2040 / 4080:.1f}, +/- "
+           f"{r and r['plain']['f_std'] is not None and round(r['plain']['f_std'], 2)} px), field of view "
            f"{r and round(r['plain']['fov_x'], 1)} deg, lens bend {r and round(r['plain']['bend_px'], 1)} px, "
            f"{r and len(r['residuals']['corners'])} corners over the board")
-    worst = max(r["photos"], key=lambda p: p["err"])["name"]
+    # a calibration whose focal uncertainty is not known (std NaN or missing): judged, never good, the state answers
+    pending = b._pending_cal["photo"]
+    unknown = []
+    for std in ({"fx": float("nan"), "fy": 1.0}, None):
+        b._pending_cal["photo"] = {**pending, "std": std}
+        u = d.call("calib_state").get("result")
+        unknown.append(bool(u) and u["focal_ok"] is False and u["verdict"] != "good" and u["plain"]["f_std"] is None)
+    b._pending_cal["photo"] = pending
+    expect(all(unknown), f"a calibration without its focal uncertainty: answered, focal not ok, not good ({unknown})")
+    acc = d.call("calib_set", json.dumps({"plan": "accurate"}))["result"]
+    d.call("calib_set", json.dumps({"plan": "quick"}))
+    expect(acc and acc["verdict"] == "good" and not acc["few"],
+           f"the accurate plan chosen after calibrating: the verdict stays that of the quick plan the photos were "
+           f"taken with ({acc and acc['verdict']})")
+    worst = max(r["photos"], key=lambda p: p["err"] or 0)["name"]
     d.call("calib_run", json.dumps([worst]))
     d.wait_event("calib", timeout=600)
     r2 = d.call("calib_state")["result"]
@@ -491,8 +897,11 @@ def test_series(d):
     # the streaming mode: frames of the live stream (synthetic here), checked like photos
     d.call("calib_set", json.dumps({"mode": "stream"}))
     refused = d.call("calib_take")
+    n0 = len(d.events)
     d.call("calib_stream", True)
     up = d.wait(lambda: (lambda x: x["live"] and x["live"]["running"])(d.call("calib_state")), 30)
+    d.wait(lambda: any(x["type"] == "live" and x.get("action") == "started" for x in d.events[n0:]), 10)
+    began = next((x for x in d.events[n0:] if x["type"] == "live" and x.get("action") == "started"), {})
     d.wait(lambda: d.call("live_state").get("tracked"), 15)
     a, e = take()
     s = d.call("calib_state")
@@ -500,8 +909,10 @@ def test_series(d):
     shape = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE).shape if frame else None
     live = d.call("live_state")
     expect(refused.get("error") == "stream_off" and up and e and e["check"]["ok"] and s["series"]["name"].endswith("_stream")
-           and shape == (1440, 1920) and not live["layers"]["face"] and live["hide_board"],
-           f"streaming mode: refused until the live video runs, then a frame of the stream kept "
+           and shape == (1440, 1920) and not live["layers"]["face"] and live["hide_board"]
+           and began.get("purpose") == "calibration",
+           f"streaming mode: refused until the live video runs (its events those of the calibration), then a frame "
+           f"of the stream kept "
            f"({e and e['check']['corners']} corners), saved whole as PNG {shape}, the picture plain (no face) with the "
            f"board on this monitor hidden in it")
     d.call("calib_stream", False)
@@ -523,8 +934,8 @@ def test_link(d):
     a Wi-Fi drop and the reconnection, plain words for every failure, the live view sent to the phone's browser and
     its added latency."""
     import re
-    import threading
     import live
+    import live_ar
     import phone_link
     import phone_view
     b = d.backend
@@ -545,6 +956,11 @@ def test_link(d):
     expect(ok and s["mode"] == "auto" and s["via"] == "usb" and not s["paired"]
            and b.link.serial() == sim.phone_id == live.pick_serial(),
            "link found by itself: the simulated phone on the cable, nothing asked; the stream asks the same link")
+    v0 = s["view"]
+    expect(b._view is None and v0["url_lan"] == "" and v0["qr"] == "" and v0["url_phone"] == "" and not v0["lan"]
+           and v0["viewers"] == 0 and s["latency_ms"] == live_ar.STREAM_LATENCY_MS["usb"],
+           "Phone panel open: the phone's view neither made nor on the network until asked for; the delay of the "
+           "cable's stream said")
 
     # no phone at all, never paired: said plainly, a photo refused; the cable again, found again
     folder = d.call("calib_folder_new", "check_photo")["folder"]
@@ -622,6 +1038,31 @@ def test_link(d):
            f"the phone's page on the live AR (a client in its place): {v['fps']} fps, added latency median "
            f"{v['added_ms']} ms (95th {v['added_p95_ms']} ms), {v['kb']} kB per frame, {v['mbit_s']} Mbit/s")
     d.call("live_stop")
+
+    # another screen of the network: its address and code only while asked for (in simulation still this PC alone)
+    token = b.view().token
+    on = d.call("view_lan", True)["view"]
+    off = d.call("view_lan", False)["view"]
+    reopened = d.wait(lambda: sim.opened[-1:] == [b.view().url_phone], 10)
+    expect(on["lan"] and on["url_lan"].startswith("http://") and on["qr"].startswith("<svg") and not off["lan"]
+           and off["url_lan"] == "" and off["qr"] == "" and b._view_bound == "127.0.0.1" and b.view().token != token
+           and reopened,
+           "another screen: the address and its code shown only while asked for, a new address once it ends (the "
+           "phone's own page opened again at it); the tests stay on this PC")
+    # the cable out while the phone's view is open: its tunnel laid again on Wi-Fi
+    sim.reversed.clear()
+    n = len(d.events)
+    sim.usb = False
+    relaid = d.wait(lambda: f"tcp:{port}" in sim.reversed, 20)
+    sim.usb = True
+    back = (d.wait(lambda: any(x["type"] == "link" and x.get("action") == "via" and x.get("via") == "usb"
+                               for x in d.events[n:]), 15)
+            and d.wait(lambda: d.call("link_state")["state"] == "ready", 15))
+    phones = [x for x in d.events if x["type"] == "phone"]
+    expect(relaid and back and phones and all("detail" not in x and isinstance(x.get("left_on_phone"), list)
+                                              for x in phones),
+           "the phone's view: its tunnel laid again when the phone goes from the cable to Wi-Fi; the cable again; no "
+           "adb text in any phone event, the files left on the phone in each")
 
     # the words: every cause in the six languages, every language with every key and the same placeholders
     strings = {c: json.loads((ig.APP / "ui" / "strings" / f"{c}.json").read_text(encoding="utf-8")) for c in ig.LANGS}
@@ -831,7 +1272,8 @@ def grab_composed(win):
     g.DeleteDC.argtypes = [ctypes.c_void_p]
 
     class BIH(ctypes.Structure):
-        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+        # ctypes reads the class attribute: a mutable list is what it expects
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),  # noqa: RUF012
                     ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
                     ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
                     ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
@@ -1330,17 +1772,22 @@ def test_scales(work, shots):
     import subprocess
     for scale in ("1.25", "1.5"):
         env = dict(os.environ, QT_SCALE_FACTOR=scale)
-        for attempt in range(2):        # once more if the screen was not the app's (the computer in use meanwhile)
+        runs = 0
+        while runs < 2:         # once more if the screen was not the app's (the computer in use meanwhile)
+            runs += 1
             r = subprocess.run([sys.executable, str(Path(__file__)), "--scale-check", scale, "--work",
                                 str(work / f"scale_{scale}"), "--ui", str(shots)], capture_output=True, text=True,
-                               env=env, timeout=180)
-            line = next((x for x in r.stdout.splitlines() if x.startswith("{")), "{}")
+                               env=env, timeout=180, check=False)
+            line = next((x for x in r.stdout.splitlines() if x.startswith("{")), "")
+            if not line:        # no answer: what the check said instead, to see why
+                said = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [""])[-1]
+                line = json.dumps({"exit": r.returncode, "said": said[-300:]})
             d = json.loads(line)
             if d.get("identical") and d.get("corners_found") == d.get("corners"):
                 break
         expect(d.get("identical") and d.get("corners_found") == d.get("corners") and d.get("dpr") == float(scale),
                f"window at {int(float(scale) * 100)} % display scaling: the board on the screen as the page drew it, "
-               f"pixel for pixel, every corner found ({line}{', second run' if attempt else ''})")
+               f"pixel for pixel, every corner found ({line}{', second run' if runs > 1 else ''})")
 
 
 def main():
@@ -1350,12 +1797,12 @@ def main():
     p.add_argument("--no-calibration", action="store_true")
     p.add_argument("--scale-check", help=argparse.SUPPRESS)
     args = p.parse_args()
+    if not prepare_work(args.work):
+        print(f"{args.work} is not empty and is not a work folder of this test: nothing deleted. Choose another "
+              f"--work, or empty it by hand.", flush=True)
+        return 2
     if args.scale_check:
-        if args.work.exists():
-            shutil.rmtree(args.work)
         return scale_check(args.work, args.scale_check, args.ui or args.work)
-    if args.work.exists():
-        shutil.rmtree(args.work)
     if args.ui:
         test_ui(args.work / "ui", args.ui)
         test_scales(args.work, args.ui)

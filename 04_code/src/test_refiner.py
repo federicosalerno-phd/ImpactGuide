@@ -1,4 +1,4 @@
-"""Quick checks of refiner.py (T14.4): update parametrisation and kinematic layer, crop geometry, network shapes and
+"""Quick checks of refiner.py: update parametrisation and kinematic layer, crop geometry, network shapes and
 view invariance, losses, masks, and the crop of a twin view when the twin dataset is there. CPU, about 10 s.
 
     python 04_code/src/test_refiner.py

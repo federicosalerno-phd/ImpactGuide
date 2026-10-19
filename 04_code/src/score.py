@@ -1,5 +1,5 @@
 """Misalignment score: how far the outline of the observed anatomy is from the outline rendered at the current
-registration (T14.1, module 4 of ai_design.md).
+registration.
 
 Object agnostic: it compares two binary masks of one view, the observed one (SAM) and the one rendered at the current
 registration, whatever the object (face, mandible). For each outline pixel of one mask, the distance to the nearest

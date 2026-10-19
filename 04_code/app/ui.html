@@ -148,7 +148,6 @@
               <div class="card col"><div class="sec-lbl" data-t="cal.res.photos"></div><div class="fig" id="crBars"></div><div class="fig-note" id="crBarsNote"></div></div>
               <div class="card col"><div class="sec-lbl" data-t="cal.res.board"></div><div class="fig" id="crMap"></div><div class="fig-note" id="crMapNote"></div></div>
             </div>
-            <div class="log tall hidden" id="calLog"></div>
           </div>
         </div>
 
@@ -281,7 +280,7 @@
 
     <!-- ══ the panel down the right: one page per step, the current one
          carries .show. The common case in plain view; what is rarely needed
-         under Advanced, closed until asked for (ui/01-shell.js, wireAdvanced).
+         under Advanced, closed until asked for (SlantUI's folds).
          The Phone panel takes its place while it is open, at home too: part
          of the window, never laid over the page. -->
     <div class="rp">
@@ -323,10 +322,12 @@
             <div class="sec-lbl" data-t="link.connect.sec"></div>
             <input class="input" type="text" id="lkAddr" data-t-ph="link.connect.ph" data-t-title="link.connect.note"/>
             <button class="btn btn-2 btn-wide" id="lkConnect"><span class="btn-label" data-t="link.connect.action"></span></button>
-            <!-- another screen on the same network: the code to scan -->
-            <div class="sec-lbl" data-t="view.other.sec"></div>
+            <!-- another screen on the same network: off until asked for (the view then listens on the network), then
+                 the code to scan -->
+            <div class="sec-lbl" id="vwOtherSec" data-t="view.other.sec"></div>
+            <label class="toggle" data-t-title="view.other.hint"><input type="checkbox" id="vwLan"/><span data-t="view.other.on"></span></label>
             <div class="lk-qr" id="vwQr" data-t-title="view.firewall"></div>
-            <div class="note" data-t="view.qr.note"></div>
+            <div class="note" id="vwQrNote" data-t="view.qr.note"></div>
             <div class="note note-path" id="vwUrl"></div>
             <div id="vwMore"></div>
           </div></div></div>
@@ -441,7 +442,7 @@
           <div class="fold" id="calResAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <div class="sec-lbl" data-t="cal.stored.sec"></div>
             <div id="calStored"></div>
-            <label class="toggle" data-t-title="cal.log.hint"><input type="checkbox" id="calShowLog"/><span data-t="cal.log.show"></span></label>
+            <button class="btn btn-2 btn-wide hidden" id="calLogOpen" data-t-title="cal.log.open.hint"><span data-icon="open"></span><span class="btn-label" data-t="cal.log.open"></span></button>
           </div></div></div>
         </div>
         <div class="rp-foot">
@@ -720,6 +721,7 @@
 <script src="ui/libs/three.min.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script src="ui/slantui.js"></script>
+<script src="ui/00-core.js"></script>
 <script src="ui/00-strings.js"></script>
 <script src="ui/01-shell.js"></script>
 <script src="ui/05-home.js"></script>

@@ -1,22 +1,23 @@
-// ImpactGuide · home: the start, as UniGuide's entry. Four large choices, one
-// per module, each with one short line, and the state of the bench under them
-// in three cells (SlantUI's .choices and .stcells): the phone, the calibration,
-// the next trial. The language is chosen here (ui/90-boot.js fills the picker).
-// No rail, no toolbar, no panel: only the Phone panel, from the phone cell.
+// ImpactGuide · home: the start. Four large choices, one per module, each with
+// one short line, and the state of the bench under them in three cells
+// (SlantUI's .choices and .stcells): the phone, the calibration, the next trial.
+// The language is chosen here (ui/90-boot.js fills the picker). No rail, no
+// toolbar, no panel: only the Phone panel, from the phone cell.
+'use strict';
 
+/** Home: its choices and the three cells of the bench's state. */
 const HOME = {
   enter: function () {
     HOME.phone();
-    ask('calib_state', function (s) { if (s && page === 'home') HOME.cal(s); });
-    ask('trials_state', function (s) { if (s && page === 'home') HOME.trial(s); });
+    askQuiet('calib_state', function (s) { if (s && page === 'home') HOME.cal(s); });
+    askQuiet('trials_state', function (s) { if (s && page === 'home') HOME.trial(s); });
     be('phone_refresh');
   },
 
   // how the phone is linked, found by itself: cable, Wi-Fi, or no phone
   phone: function () {
     setStcell($('hsPhone'), PHONE.ok ? 'ok' : PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
-              PHONE.ok ? T(PHONE.link === 'wifi' ? 'link.on.wifi' : 'link.on.usb')
-              : T('link.state.' + (PHONE.state && hasT('link.state.' + PHONE.state) ? PHONE.state : 'none')));
+              PHONE.ok ? T(PHONE.link === 'wifi' ? 'link.on.wifi' : 'link.on.usb') : Tcode('link.state.', PHONE.state, 'none'));
   },
 
   // the intrinsics stored for the two camera modes
@@ -39,7 +40,7 @@ const HOME = {
       b.onclick = function () {
         if (b.disabled) return;
         const m = b.dataset.go;
-        go(m, MODULES[m].start);      // a module opens at its first step, as in UniGuide
+        go(m, MODULES[m].start);      // a module opens at its first step
       };
     });
     $('hsPhone').onclick = function () { if (!LINK.open) LINK.show(); };

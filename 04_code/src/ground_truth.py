@@ -1,26 +1,36 @@
-"""Ground truth from the scanner: sphere centres, rig poses, true registration and impact displacement (T7.1).
+"""Ground truth from the scanner: sphere centres, rig poses, true registration and impact displacement.
 
 Six white matte spheres D 15 (gt_sphere.SLDPRT) on two scalene rigs, so that the distances inside a rig label its
 spheres: three on the marker holder (S_M, 62 / 82 / 114 mm) and three on the mandible frame (S_B, 78.4 / 67.2 / 68.2 mm).
-Centres from the bench scripts (bench_0810/fixture.py, 13/10).
+The rig templates RIGS are the design centres of the sphere seats; calibrate_rigs() gives measured ones.
 
-Notation as 04_code/src/ai_design.md. Poses are 4 x 4 matrices T_a_b (frame a from frame b) in mm. M is the ChArUco
-board as in marker_pose.py (origin at the outer corner of the first square, x along the printed columns, y along the
-rows, z into the board); B is the mandible model (origin on the axis of the two M5 of the hinge, x to the left).
-The rig templates are given in M and B, so the nominal X = T_M_SM and Y = T_SB_B are the identity; the calibrated
+Frames. Poses are 4 x 4 matrices T_a_b (frame a from frame b) in mm. M is the ChArUco board as in marker_pose.py
+(origin at the outer corner of the first square, x along the printed columns, y along the rows, z into the board).
+Two frames of the head, both rigid with it:
+    mandible  the local frame of the mandible model (origin on the hinge axis of the two M5 screws, x to the patient's
+              left, y down, z backwards): the frame of the head rig template and of the target columns x, y, z of
+              03_data/processed/targets/mandible_targets.csv;
+    B         the head frame of the rest of the pipeline and of the AR (coordinates of the bench scene): the frame of
+              the face and mandible meshes drawn by the AR and of the target columns x_B, y_B, z_B.
+T_B_mandible (03_data/processed/targets/mandible_frame.json, tools/build_targets.py) links them. The rig templates are
+given in M and in the mandible frame, so the nominal X = T_M_SM and Y = T_SB_mandible are the identity; the calibrated
 ones replace them. For scan k:
 
-    G_k = T_SM_SB = T_scan_SM^-1 T_scan_SB,   T_M_B,k = X G_k Y,   dT_k = T_M_B,k-1^-1 T_M_B,k  (in B)
+    G_k = T_SM_SB = T_scan_SM^-1 T_scan_SB,   T_M_mandible,k = X G_k Y,   T_M_B,k = T_M_mandible,k T_B_mandible^-1
+    dT_k = T_M_mandible,k-1^-1 T_M_mandible,k  (in the mandible frame; T_B_mandible dT_k T_B_mandible^-1 in B)
 
-and the TRE of the registration left at k-1 on a target p of B is |p - dT_k p|.
+and the TRE of the registration left at k-1 on a target p (mandible frame) is |p - dT_k p|, the same in either frame.
+A result file holds both registrations, "T_M_mandible" and "T_M_B" (the one the AR reads); files written before the
+two names existed hold the mandible frame under "T_M_B", and load_result() reads them as such.
 
-One call per scan for ImpactGuide (Scans page, T20.2): measure(cloud, reference) returns centres, residuals and the
-displacement from the reference scan. synthetic_scan() simulates an EinScan-SP scan of the two rigs.
+One call per scan for the app: measure(cloud, reference) returns centres, residuals and the displacement from the
+reference scan. synthetic_scan() simulates an EinScan-SP scan of the two rigs.
 
 Usage:
     python ground_truth.py measure scan.ply [scan2.ply] [--reference ref.json] [--out result.json]
     python ground_truth.py selftest [--trials 200] [--noise 0.05] [--fixed-radius] [--separate] [--dense]
     python ground_truth.py synth OUTDIR [--impacts 3]
+    python ground_truth.py test
 """
 import argparse
 import csv
@@ -39,13 +49,16 @@ SPHERE_D = 15.0
 RIGS = {
     # marker holder, spheres 1-3 beyond the corners (-h, -h), (h, -h), (h, h) of the bench marker frame, here in M
     "marker": np.array([[-22.409903, 67.409903, 2.15], [58.924621, 58.924621, 2.15], [68.0, -2.5, 2.15]]),
-    # mandible frame, spheres 1-3 (GT_MANDIBLE), in B
+    # head rig on the mandible frame, spheres 1-3, in the mandible frame (not B)
     "mandible": np.array([[20.1133, 109.7106, -89.4445], [59.6831, 131.6459, -25.4048], [78.5302, 82.5621, -67.2088]]),
 }
-# Clinical targets in B from T1.3 (04_code/tools/build_targets.py: columns id, x, y, z in the mandible frame, proposed);
-# until that file exists, placeholders: extreme points of Federico's mandible (Skull.gltf) as on the bench
-TARGETS_CSV = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "targets" / "mandible_targets.csv"
-TARGETS_B = {
+# Clinical targets in the mandible frame (tools/build_targets.py: columns id, role, x, y, z); until that table exists,
+# placeholders: extreme points of the bench mandible model
+TARGETS_DIR = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "targets"
+TARGETS_CSV = TARGETS_DIR / "mandible_targets.csv"
+FRAME_JSON = TARGETS_DIR / "mandible_frame.json"       # T_B_mandible
+TARGET_ROLES = ("proposed",)                           # the targets of the TRE; the table also has optional ones
+TARGETS_MANDIBLE = {
     "menton": (0.0, 94.0, -80.7),
     "infradentale": (0.6, 53.2, -90.5),
     "gonion_l": (45.9, 69.9, -3.9),
@@ -55,16 +68,45 @@ TARGETS_B = {
 }
 
 
+def load_targets(path=TARGETS_CSV, roles=TARGET_ROLES):
+    """Clinical targets in the mandible frame, {id: (x, y, z)}, from the columns x, y, z of the targets table.
 
-
-def load_targets(path=TARGETS_CSV):
-    """Targets in B, {id: (x, y, z)}: the proposed ones of T1.3 if the table exists, else the placeholders."""
+    Args:
+        path: the table of tools/build_targets.py.
+        roles: the roles to keep (column "role": proposed, optional, alternative); None keeps every row. A table of
+            the older format, with a 0/1 column "proposed" instead of "role", keeps its rows marked 1 when "proposed"
+            is among the roles.
+    Returns:
+        The targets of the table, or the placeholders TARGETS_MANDIBLE when the table does not exist.
+    Raises:
+        ValueError: no row of the table has one of the roles.
+    """
     if not Path(path).exists():
-        return dict(TARGETS_B)
+        return dict(TARGETS_MANDIBLE)
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
-    keep = [r for r in rows if r.get("proposed", "1") == "1"] or rows
-    return {r["id"]: (float(r["x"]), float(r["y"]), float(r["z"])) for r in keep}
+    if roles is not None and rows:
+        roles = {roles} if isinstance(roles, str) else set(roles)
+        if "role" in rows[0]:
+            rows = [r for r in rows if r["role"] in roles]
+        elif "proposed" in rows[0]:
+            rows = [r for r in rows if r["proposed"] == "1"] if "proposed" in roles else []
+        if not rows:
+            raise ValueError(f"{Path(path).name}: no target with role {sorted(roles)}")
+    return {r["id"]: (float(r["x"]), float(r["y"]), float(r["z"])) for r in rows}
+
+
+def load_frame(path=FRAME_JSON):
+    """T_B_mandible (4 x 4, mm): the head frame B from the mandible frame, or None when the file does not exist. The
+    file holds the single-precision matrix of the scene; its rotation is made orthonormal (a change below 1e-6)."""
+    if not Path(path).exists():
+        return None
+    T = np.asarray(json.loads(Path(path).read_text(encoding="utf-8"))["T_B_mandible"], np.float64)
+    if T.shape != (4, 4):
+        raise ValueError(f"{Path(path).name}: T_B_mandible is not 4 x 4")
+    U, _, Vt = np.linalg.svd(T[:3, :3])
+    T[:3, :3] = U @ np.diag([1.0, 1.0, np.linalg.det(U @ Vt)]) @ Vt
+    return T
 
 
 # ---------------------------------------------------------------- transforms
@@ -100,8 +142,9 @@ def kabsch(A, B, w=None):
 
 
 def displacement(T_prev, T_next, targets=None):
-    """Impact displacement dT = T_prev^-1 T_next (in B): rotation (deg, axis), translation (mm) and the TRE (mm) that
-    the registration left at T_prev puts on each target of B (load_targets() if None)."""
+    """Impact displacement dT = T_prev^-1 T_next from two registrations T_M_mandible (so dT is in the mandible
+    frame): rotation (deg, axis), translation (mm) and the TRE (mm) that the registration left at T_prev puts on each
+    target (mandible frame; load_targets() if None)."""
     dT = inverse(T_prev) @ T_next
     targets = load_targets() if targets is None else targets
     rv = Rotation.from_matrix(dT[:3, :3]).as_rotvec()
@@ -395,21 +438,23 @@ def labelled_spheres(cloud, rigs=RIGS, radius=SPHERE_D / 2, tol=0.6, radii=None,
 
 
 def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, targets=None, radius=SPHERE_D / 2,
-            tol=0.6, **find):
+            tol=0.6, T_B_mandible=None, **find):
     """True registration from one scan and, with a reference, the displacement since then.
 
     scans: a cloud (N x 3), a path, or a list of them (views of the same scene, merged or in their own frames: each
-    view is aligned to the first on the six centres). reference: a previous result, its JSON path, or T_M_B.
-    X, Y: calibrated T_M_SM and T_SB_B (identity if None). rigs, radii: calibrated templates and sphere radii
-    (calibrate_rigs); design templates and free radii if not given.
-    Returns centres in the frame of the first view, residuals (sphere fits, rig fits, spread between views), G, T_M_B
-    and, with a reference, the displacement (see displacement), plus warnings.
+    view is aligned to the first used view on the six centres). reference: a previous result, its JSON path, or its
+    T_M_mandible (4 x 4). X, Y: calibrated T_M_SM and T_SB_mandible (identity if None). rigs, radii: calibrated
+    templates and sphere radii (calibrate_rigs); design templates and free radii if not given. T_B_mandible: the head
+    frame B from the mandible frame (load_frame() if None).
+    Returns centres in the frame of the first used view (views_used: the indices of the views that were identified),
+    residuals (sphere fits, rig fits, spread between views), G, T_M_mandible, T_M_B (None, with a warning, when
+    T_B_mandible is unknown) and, with a reference, the displacement (see displacement; dT_B: dT in B), plus warnings.
     """
     t0 = time.perf_counter()
     if isinstance(scans, (str, Path)) or (isinstance(scans, np.ndarray) and scans.ndim == 2):
         scans = [scans]
     clouds = [load_cloud(s) if isinstance(s, (str, Path)) else np.asarray(s, np.float64) for s in scans]
-    views, info, warnings = [], [], []
+    views, used, info, warnings = [], [], [], []
     for v, cloud in enumerate(clouds):
         lab, inf = labelled_spheres(cloud, rigs, radius, tol, radii, **find)
         info.append(inf)
@@ -419,6 +464,7 @@ def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, target
             warnings.append(f"view {v}: rigs not identified (worst distance error {inf['id_error_mm']:.2f} mm)")
         else:
             views.append(lab)
+            used.append(v)
     if not views:
         raise ValueError("; ".join(warnings))
     names = list(views[0])
@@ -445,7 +491,11 @@ def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, target
         poses[name] = {"T_scan_S": T, "residuals_mm": np.linalg.norm(transform(T, tpl) - meas, axis=1)}
     rig_m, rig_b = list(rigs)[:2]
     G = inverse(poses[rig_m]["T_scan_S"]) @ poses[rig_b]["T_scan_S"]
-    T_M_B = (np.eye(4) if X is None else X) @ G @ (np.eye(4) if Y is None else Y)
+    T_M_mandible = (np.eye(4) if X is None else X) @ G @ (np.eye(4) if Y is None else Y)
+    T_B_mandible = load_frame() if T_B_mandible is None else np.asarray(T_B_mandible, np.float64)
+    if T_B_mandible is None:
+        warnings.append(f"{FRAME_JSON.name} not found: T_M_B (head frame B, read by the AR) not written")
+    T_M_B = None if T_B_mandible is None else T_M_mandible @ inverse(T_B_mandible)
     for n, s in spheres.items():
         r_ref = radius if radii is None else (radii[n] if isinstance(radii, dict) else radii)
         if abs(s["radius"] - r_ref) > 0.05:
@@ -455,23 +505,37 @@ def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, target
     for name, p in poses.items():
         if p["residuals_mm"].max() > 0.1:
             warnings.append(f"rig {name}: residual {p['residuals_mm'].max():.3f} mm (sphere moved in its seat?)")
-    margin = min(i["id_margin_mm"] for i in info if np.isfinite(i["id_error_mm"]))
+    margin = min(info[v]["id_margin_mm"] for v in used)          # of the views used, not of the dropped ones
     if margin < 0.3:
         warnings.append(f"labelling margin {margin:.2f} mm: check the sphere labels")
-    out = {"spheres": spheres, "rigs": poses, "G": G, "T_M_B": T_M_B, "views": info, "n_views_used": len(views),
+    out = {"spheres": spheres, "rigs": poses, "G": G, "T_M_mandible": T_M_mandible, "T_M_B": T_M_B,
+           "T_B_mandible": T_B_mandible, "views": info, "n_views_used": len(views), "views_used": used,
            "warnings": warnings}
     if reference is not None:
         if isinstance(reference, (str, Path)):
             reference = load_result(reference)
-        T_prev = np.asarray(reference["T_M_B"] if isinstance(reference, dict) else reference, np.float64)
-        out["displacement"] = displacement(T_prev, T_M_B, targets)
+        T_prev = np.asarray(registration_of(reference) if isinstance(reference, dict) else reference, np.float64)
+        out["displacement"] = d = displacement(T_prev, T_M_mandible, targets)
+        if T_B_mandible is not None:
+            d["dT_B"] = T_B_mandible @ d["dT"] @ inverse(T_B_mandible)
     out["time_s"] = time.perf_counter() - t0
     return out
 
 
+def registration_of(result):
+    """T_M_mandible of a result dict of measure(); a result written before the two names existed holds it under
+    "T_M_B", and is told apart from a registration in the bench frame B ({"T_M_B": ...}, as live_ar reads it) by its
+    "G". Raises ValueError for a dict that is neither."""
+    if "T_M_mandible" in result:
+        return result["T_M_mandible"]
+    if "G" in result:
+        return result["T_M_B"]
+    raise ValueError("not a result of measure: a registration in the bench frame B, not in the mandible frame")
+
+
 def calibrate_rigs(results, rigs=RIGS):
     """Rig templates (mean shape, in the frame of the design template) and sphere radii (mean free fit) from repeated
-    scans without impact (T7.2), to pass to measure as rigs and radii."""
+    scans without impact, to pass to measure as rigs and radii."""
     templates = {name: mean_rig([np.array([r["spheres"][f"{name}_{s + 1}"]["centre"] for s in range(3)])
                                  for r in results], tpl) for name, tpl in rigs.items()}
     radii = {n: float(np.mean([r["spheres"][n]["radius"] for r in results])) for n in results[0]["spheres"]}
@@ -479,25 +543,41 @@ def calibrate_rigs(results, rigs=RIGS):
 
 
 def jsonable(x):
+    """x with numpy types turned into Python ones and non-finite floats into None (strict JSON has no Infinity)."""
     if isinstance(x, dict):
         return {k: jsonable(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
         return [jsonable(v) for v in x]
     if isinstance(x, np.ndarray):
-        return x.tolist()
+        return jsonable(x.tolist())
     if isinstance(x, np.generic):
-        return x.item()
+        x = x.item()
+    if isinstance(x, float) and not np.isfinite(x):
+        return None
     return x
 
 
 def save_result(result, path):
-    Path(path).write_text(json.dumps(jsonable(result), indent=1))
+    """Write a result of measure() as strict JSON (non-finite values as null)."""
+    Path(path).write_text(json.dumps(jsonable(result), indent=1, allow_nan=False), encoding="utf-8")
 
 
 def load_result(path):
-    r = json.loads(Path(path).read_text())
-    r["T_M_B"] = np.array(r["T_M_B"])
-    r["G"] = np.array(r["G"])
+    """A result written by save_result(), with T_M_mandible, T_M_B (None when unknown) and G as arrays. A file
+    written before the two names existed holds T_M_mandible under "T_M_B": it is read as such, and T_M_B is then
+    derived from its T_B_mandible or from load_frame(). Raises ValueError for a file that is not a result of
+    measure(), such as a registration in the bench frame B (no T_M_mandible and no G)."""
+    r = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(r, dict) or ("T_M_mandible" not in r and "G" not in r):
+        raise ValueError(f"{Path(path).name}: not a result of measure (a registration in the bench frame B?)")
+    if "T_M_mandible" not in r:
+        r["T_M_mandible"] = r["T_M_B"]
+        T = r.get("T_B_mandible") or load_frame()
+        r["T_B_mandible"] = T
+        r["T_M_B"] = None if T is None else (np.array(r["T_M_mandible"]) @ inverse(np.asarray(T, np.float64))).tolist()
+    for k in ("T_M_mandible", "T_M_B", "T_B_mandible", "G"):
+        if r.get(k) is not None:
+            r[k] = np.array(r[k], np.float64)
     return r
 
 
@@ -522,23 +602,23 @@ def unit(v):
 
 # Bench-like scene in W, a world-oriented frame on the hinge (x left, -y forward, z up): the mandible open 2 deg as on
 # the bench; the board 57 mm in front of the incisors facing the phone (left, front, up), the A1 ball behind it.
-SCENE = {"R_W_B": rot_x(-92.3745), "board_W": (15.0, -150.0, -35.0), "board_out": (0.5, -0.8, 0.35),
+SCENE = {"R_W_mandible": rot_x(-92.3745), "board_W": (15.0, -150.0, -35.0), "board_out": (0.5, -0.8, 0.35),
          "ball_M": (22.5, 50.0, 35.0), "face": ((0.0, -55.0, -45.0), 60.0),
          "views_deg": (40.0, 55.0), "elevation_deg": 5.0, "range_mm": 320.0, "baseline_mm": 100.0,
          "posts": {"marker": (1.8, [(0.7071, -0.7071, 0.0), (-0.7071, -0.7071, 0.0), (-1.0, 0.0, 0.0)]),
                    "mandible": (3.0, None)}}            # post radius and direction from the sphere (None: to the hub)
-HUB_B = (46.0, 107.1597, -54.9717)
+HUB_MANDIBLE = (46.0, 107.1597, -54.9717)               # hub of the head rig posts, mandible frame
 
 
 def scene_poses():
-    """T_W_B and T_W_M of the nominal scene."""
+    """T_W_mandible and T_W_M of the nominal scene."""
     n_out = unit(SCENE["board_out"])
     z = -n_out
     x = unit(np.cross([0.0, 0.0, 1.0], n_out))
     y = np.cross(z, x)
     R = np.column_stack([x, y, z])
     o = np.asarray(SCENE["board_W"]) - R @ np.array([22.5, 22.5, 0.0])
-    return pose(SCENE["R_W_B"], np.zeros(3)), pose(R, o)
+    return pose(SCENE["R_W_mandible"], np.zeros(3)), pose(R, o)
 
 
 def scanner_poses(centroid, jitter=None):
@@ -615,9 +695,10 @@ def sample_sphere(c, j, centres, O, cams, rng, radius, spacing, noise, post, the
     return np.vstack(pts)
 
 
-def synthetic_scan(T_W_M, T_W_B, rng, noise=0.05, spacing=0.17, merged=True, clutter=True, dense=False,
+def synthetic_scan(T_W_M, T_W_mandible, rng, noise=0.05, spacing=0.17, merged=True, clutter=True, dense=False,
                    jitter=True, rigs=RIGS, radius=SPHERE_D / 2):
-    """Simulated EinScan-SP scan (one shot per arm position, 40 and 55 deg) of the two rigs placed by T_W_M and T_W_B.
+    """Simulated EinScan-SP scan (one shot per arm position, 40 and 55 deg) of the two rigs placed by T_W_M and
+    T_W_mandible.
 
     Model: projector on the optical axis, cameras 100 mm to each side, 320 mm from the sphere centroid; a point is
     measured if the projector and one camera see it under 75 deg at most and no other sphere hides it; depth noise
@@ -625,9 +706,9 @@ def synthetic_scan(T_W_M, T_W_B, rng, noise=0.05, spacing=0.17, merged=True, clu
     spikes; posts. Clutter: the printed board, a face-like surface, flying points. Returns the clouds (one merged in
     the frame of the first view, or one per view in its own frame) and the truth: T_scan_W per view, centres.
     """
-    T_W = {"marker": T_W_M, "mandible": T_W_B}
+    T_W = {"marker": T_W_M, "mandible": T_W_mandible}
     centres, posts = [], []
-    hub = transform(T_W_B, [HUB_B])[0]
+    hub = transform(T_W_mandible, [HUB_MANDIBLE])[0]
     for name, tpl in rigs.items():
         cw = transform(T_W[name], tpl)
         r_post, dirs = SCENE["posts"][name]
@@ -650,7 +731,8 @@ def synthetic_scan(T_W_M, T_W_B, rng, noise=0.05, spacing=0.17, merged=True, clu
             pts.append(clutter_points(T_W_M, O, centres, rng, noise, spacing * (1.0 if dense else 2.5), radius))
         P = np.vstack(pts)
         clouds.append(transform(inverse(T_W_scan[0] if merged else T), P))
-    truth = {"T_scan_W": [inverse(T) for T in T_W_scan], "centres_W": centres, "T_W_M": T_W_M, "T_W_B": T_W_B}
+    truth = {"T_scan_W": [inverse(T) for T in T_W_scan], "centres_W": centres, "T_W_M": T_W_M,
+             "T_W_mandible": T_W_mandible}
     return ([np.vstack(clouds)] if merged else clouds), truth
 
 
@@ -674,9 +756,9 @@ def clutter_points(T_W_M, O, centres, rng, noise, spacing, radius):
     return P[~near]
 
 
-def random_impact(T_W_M, T_W_B, rng, max_deg=5.0, max_mm=2.0):
+def random_impact(T_W_M, T_W_mandible, rng, max_deg=5.0, max_mm=2.0):
     """Marker moved on the bone: rotation up to max_deg about the A1 ball centre plus a translation up to max_mm.
-    Returns the new T_W_M."""
+    Returns the new T_W_M (T_W_mandible, the head, does not move)."""
     axis = unit(rng.normal(size=3))
     R = Rotation.from_rotvec(axis * np.radians(rng.uniform(0.5, max_deg))).as_matrix()
     c = transform(T_W_M, [SCENE["ball_M"]])[0]
@@ -687,24 +769,26 @@ def random_impact(T_W_M, T_W_B, rng, max_deg=5.0, max_mm=2.0):
 
 # ---------------------------------------------------------------- self test
 
-def selftest(trials=200, noise=0.05, seed=0, merged=True, dense=False, radii=None, verbose=True):
+def selftest(trials=200, noise=0.05, seed=0, merged=True, dense=False, radii=None, verbose=True, targets=None):
     """Monte Carlo on synthetic scans: for each trial a reference scan, a random impact, a second scan; errors of the
-    centres, of T_M_B on the targets and of the displacement (dT on the targets, TRE). radii: fixed sphere radius,
-    as after calibrate_rigs. Pass (PLAN.md, T7.1): 95th percentile of the sphere centre error under 0.01 mm, every rig
-    identified. The errors on the targets are reported: they grow with the distance of the targets from the rigs."""
+    centres, of T_M_mandible on the targets and of the displacement (dT on the targets, TRE). radii: fixed sphere
+    radius, as after calibrate_rigs. targets: {id: point of the mandible frame} (load_targets() if None). Pass: 95th
+    percentile of the sphere centre error under 0.01 mm, every rig identified. The errors on the targets are
+    reported: they grow with the distance of the targets from the rigs."""
     rng = np.random.default_rng(seed)
-    T_W_B, T_W_M0 = scene_poses()
-    targets = load_targets()
+    T_W_mandible, T_W_M0 = scene_poses()
+    targets = load_targets() if targets is None else targets
     tg = np.array(list(targets.values()))
+    frame = load_frame()
     rows, fails, times = [], 0, []
     for _ in range(trials):
-        T_W_M = random_impact(T_W_M0, T_W_B, rng, 3.0, 3.0)       # a different start every trial
-        T_W_M1 = random_impact(T_W_M, T_W_B, rng)
+        T_W_M = random_impact(T_W_M0, T_W_mandible, rng, 3.0, 3.0)       # a different start every trial
+        T_W_M1 = random_impact(T_W_M, T_W_mandible, rng)
         res, tru = [], []
         for TM in (T_W_M, T_W_M1):
-            clouds, truth = synthetic_scan(TM, T_W_B, rng, noise=noise, merged=merged, dense=dense)
+            clouds, truth = synthetic_scan(TM, T_W_mandible, rng, noise=noise, merged=merged, dense=dense)
             try:
-                r = measure(clouds, radii=radii)
+                r = measure(clouds, radii=radii, T_B_mandible=frame)
             except ValueError:
                 fails += 1
                 break
@@ -716,38 +800,123 @@ def selftest(trials=200, noise=0.05, seed=0, merged=True, dense=False, radii=Non
         row = {}
         e_c = []
         for r, t in zip(res, tru):
-            C_true = transform(t["T_scan_W"][0], t["centres_W"])
+            # centres are in the frame of the first view used (separate views: view 0 may have been dropped)
+            C_true = transform(t["T_scan_W"][r["views_used"][0]], t["centres_W"])
             C_est = np.array([r["spheres"][n]["centre"] for n in r["spheres"]])
             e_c.append(np.linalg.norm(C_est - C_true, axis=1).max())
         row["centre"] = max(e_c)
         row["radius"] = max(abs(s["radius"] - SPHERE_D / 2) for r in res for s in r["spheres"].values())
-        T_true = [inverse(t["T_W_M"]) @ t["T_W_B"] for t in tru]
-        row["T_M_B"] = max(np.linalg.norm(transform(r["T_M_B"], tg) - transform(T, tg), axis=1).max()
-                           for r, T in zip(res, T_true))
-        d_est = displacement(res[0]["T_M_B"], res[1]["T_M_B"], targets)
+        T_true = [inverse(t["T_W_M"]) @ t["T_W_mandible"] for t in tru]
+        row["T_M_mandible"] = max(np.linalg.norm(transform(r["T_M_mandible"], tg) - transform(T, tg), axis=1).max()
+                                  for r, T in zip(res, T_true))
+        d_est = displacement(res[0]["T_M_mandible"], res[1]["T_M_mandible"], targets)
         d_true = displacement(T_true[0], T_true[1], targets)
         row["dT"] = np.linalg.norm(transform(d_est["dT"], tg) - transform(d_true["dT"], tg), axis=1).max()
         row["tre"] = max(abs(d_est["tre_mm"][k] - d_true["tre_mm"][k]) for k in targets)
         row["rot_deg"] = abs(d_est["rot_deg"] - d_true["rot_deg"])
         row["tre_true"] = d_true["tre_max_mm"]
         rows.append(row)
-    keys = ["centre", "radius", "T_M_B", "dT", "tre", "rot_deg"]
-    stats = {k: {"median": float(np.median([r[k] for r in rows])), "p95": float(np.percentile([r[k] for r in rows], 95)),
-                 "max": float(np.max([r[k] for r in rows]))} for k in keys}
-    ok = fails == 0 and stats["centre"]["p95"] < 0.01
+    keys = ["centre", "radius", "T_M_mandible", "dT", "tre", "rot_deg"]
+    nan = float("nan")
+    stats = {k: {"median": float(np.median([r[k] for r in rows])) if rows else nan,
+                 "p95": float(np.percentile([r[k] for r in rows], 95)) if rows else nan,
+                 "max": float(np.max([r[k] for r in rows])) if rows else nan} for k in keys}
+    ok = fails == 0 and bool(rows) and stats["centre"]["p95"] < 0.01
     if verbose:
+        tre_true = f"{np.median([r['tre_true'] for r in rows]):.2f} mm median" if rows else "none"
+        timing = f"{np.median(times):.2f} s median, {np.max(times):.2f} s max" if times else "none"
         print(f"{len(rows)} trials, noise {noise} mm, {'merged' if merged else 'separate'} views"
               f"{', dense clutter' if dense else ''}, {'free' if radii is None else 'fixed'} radius; "
-              f"identification failures {fails}; "
-              f"true TRE max per trial {np.median([r['tre_true'] for r in rows]):.2f} mm median; "
-              f"time per scan {np.median(times):.2f} s median, {np.max(times):.2f} s max")
+              f"identification failures {fails}; true TRE max per trial {tre_true}; time per scan {timing}")
         print(f"{'error (mm, deg)':<28}{'median':>10}{'p95':>10}{'max':>10}")
-        label = {"centre": "sphere centre (worst of 6)", "radius": "sphere radius", "T_M_B": "T_M_B on targets",
-                 "dT": "dT on targets", "tre": "TRE of the impact", "rot_deg": "impact rotation (deg)"}
+        label = {"centre": "sphere centre (worst of 6)", "radius": "sphere radius",
+                 "T_M_mandible": "T_M_mandible on targets", "dT": "dT on targets", "tre": "TRE of the impact",
+                 "rot_deg": "impact rotation (deg)"}
         for k in keys:
             print(f"{label[k]:<28}{stats[k]['median']:>10.4f}{stats[k]['p95']:>10.4f}{stats[k]['max']:>10.4f}")
         print("PASS" if ok else "FAIL", "(p95 of the sphere centre error under 0.01 mm, no identification failure)")
     return ok, stats, fails
+
+
+def quick_test():
+    """Checks of the targets table, of the two head frames and of the result files, a few seconds. Returns the list
+    of the failed checks."""
+    import tempfile
+    fails = []
+
+    def check(ok, what):
+        print(("ok    " if ok else "FAIL  ") + what, flush=True)
+        if not ok:
+            fails.append(what)
+
+    rows = []
+    if TARGETS_CSV.exists():
+        with open(TARGETS_CSV, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        proposed = [r["id"] for r in rows if r["role"] == "proposed"]
+        targets = load_targets()
+        check(list(targets) == proposed and len(proposed) < len(rows),
+              f"load_targets: the {len(proposed)} proposed targets of {len(rows)} ({', '.join(targets)})")
+        check(len(load_targets(roles=None)) == len(rows), "load_targets(roles=None): every row")
+    else:
+        check(load_targets() == TARGETS_MANDIBLE, f"no {TARGETS_CSV.name}: the placeholders")
+    T_B_mandible = load_frame()
+    if T_B_mandible is not None and rows:
+        P = np.array([[float(r[k]) for k in ("x", "y", "z")] for r in rows])
+        Q = np.array([[float(r[k]) for k in ("x_B", "y_B", "z_B")] for r in rows])
+        err = float(np.abs(transform(T_B_mandible, P) - Q).max())
+        check(err < 2e-3, f"T_B_mandible maps the columns x, y, z onto x_B, y_B, z_B ({err:.4f} mm)")
+    frame = pose(rot_x(-92.3745), [0.0, 96.364, 16.66]) if T_B_mandible is None else T_B_mandible
+    check(jsonable({"a": [float("inf"), np.float64("nan"), 1.0]}) == {"a": [None, None, 1.0]},
+          "jsonable: non-finite values become null")
+    T_W_mandible, T_W_M = scene_poses()
+    clouds, _ = synthetic_scan(T_W_M, T_W_mandible, np.random.default_rng(0))
+    r = measure(clouds, T_B_mandible=frame)
+    true = inverse(T_W_M) @ T_W_mandible
+    tg = np.array(list(load_targets().values()))
+    err = float(np.linalg.norm(transform(r["T_M_mandible"], tg) - transform(true, tg), axis=1).max())
+    check(err < 0.05, f"measure: T_M_mandible on the targets within 0.05 mm of the truth ({err:.4f} mm)")
+    check(np.allclose(r["T_M_B"] @ frame, r["T_M_mandible"], atol=1e-9), "measure: T_M_B = T_M_mandible T_B_mandible^-1")
+    with tempfile.TemporaryDirectory(prefix="ground_truth_test_") as tmp:
+        path = Path(tmp) / "result.json"
+        save_result(r, path)
+        text = path.read_text(encoding="utf-8")
+
+        def strict(token):
+            raise ValueError(token)
+        try:
+            json.loads(text, parse_constant=strict)
+            check(True, "result file: strict JSON")
+        except ValueError as e:
+            check(False, f"result file: strict JSON ({e})")
+        back = load_result(path)
+        check(np.allclose(back["T_M_mandible"], r["T_M_mandible"]) and np.allclose(back["T_M_B"], r["T_M_B"]),
+              "result file: T_M_mandible and T_M_B read back")
+        old = json.loads(text)
+        old["T_M_B"] = old.pop("T_M_mandible")             # a file of the older format
+        old.pop("T_B_mandible")
+        legacy = Path(tmp) / "legacy.json"
+        legacy.write_text(json.dumps(old), encoding="utf-8")
+        back = load_result(legacy)
+        derived = T_B_mandible is None or np.allclose(back["T_M_B"] @ T_B_mandible, r["T_M_mandible"])
+        check(np.allclose(back["T_M_mandible"], r["T_M_mandible"]) and derived,
+              "older result file: its T_M_B read as T_M_mandible, T_M_B derived")
+        d = measure(clouds, reference=legacy, T_B_mandible=frame)["displacement"]
+        check(d["rot_deg"] < 1e-6 and np.abs(d["trans_mm"]).max() < 1e-6 and np.allclose(d["dT_B"], np.eye(4)),
+              "measure against an older reference file: no displacement on the same scan")
+        bench = Path(tmp) / "bench.json"                    # a registration in B, as live_ar reads it
+        bench.write_text(json.dumps({"T_M_B": np.eye(4).tolist()}), encoding="utf-8")
+        refused = []
+        for attempt in (lambda: load_result(bench), lambda: registration_of({"T_M_B": np.eye(4)})):
+            try:
+                attempt()
+            except ValueError:
+                refused.append(True)
+        check(len(refused) == 2, "a registration in the bench frame is never taken as a result in the mandible frame")
+    ok, stats, n_fail = selftest(trials=1, noise=5.0, verbose=False)
+    check(not ok and n_fail == 1 and np.isnan(stats["centre"]["p95"]), "selftest: every trial failed gives FAIL, no crash")
+    print(f"{len(fails)} failed" if fails else "all passed")
+    return fails
 
 
 # ---------------------------------------------------------------- command line
@@ -787,6 +956,7 @@ def main(argv=None):
     y.add_argument("outdir")
     y.add_argument("--impacts", type=int, default=3)
     y.add_argument("--seed", type=int, default=0)
+    sub.add_parser("test", help="quick checks of the targets, the two head frames and the result files")
     a = ap.parse_args(argv)
     if a.cmd == "measure":
         r = measure(a.scans, reference=a.reference)
@@ -797,20 +967,22 @@ def main(argv=None):
         ok = selftest(a.trials, a.noise, a.seed, merged=not a.separate, dense=a.dense,
                       radii=SPHERE_D / 2 if a.fixed_radius else None)[0]
         sys.exit(0 if ok else 1)
+    elif a.cmd == "test":
+        sys.exit(1 if quick_test() else 0)
     else:
         rng = np.random.default_rng(a.seed)
         out = Path(a.outdir)
         out.mkdir(parents=True, exist_ok=True)
-        T_W_B, T_W_M = scene_poses()
+        T_W_mandible, T_W_M = scene_poses()
         truth = {}
         for k in range(a.impacts + 1):
             if k:
-                T_W_M = random_impact(T_W_M, T_W_B, rng)
-            clouds, t = synthetic_scan(T_W_M, T_W_B, rng)
+                T_W_M = random_impact(T_W_M, T_W_mandible, rng)
+            clouds, t = synthetic_scan(T_W_M, T_W_mandible, rng)
             write_ply(out / f"scan_{k:02d}.ply", clouds[0])
-            truth[f"scan_{k:02d}"] = {"T_M_B": inverse(T_W_M) @ T_W_B,
+            truth[f"scan_{k:02d}"] = {"T_M_mandible": inverse(T_W_M) @ T_W_mandible,
                                       "centres_scan": transform(t["T_scan_W"][0], t["centres_W"])}
-        (out / "truth.json").write_text(json.dumps(jsonable(truth), indent=1))
+        (out / "truth.json").write_text(json.dumps(jsonable(truth), indent=1, allow_nan=False), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Marker pose from one image: ChArUco corners and PnP (T5.4).
+"""Marker pose from one image: ChArUco corners and PnP.
 
 The marker is a 5 x 5 ChArUco board (9 mm squares, 6 mm 4x4 markers, DICT_4X4_50) printed on a 50 mm aluminium plate,
 as P["charuco"] in 04_code/tools/build_test_bench.py. Board frame as cv2.aruco.CharucoBoard: origin at the outer corner
@@ -49,21 +49,26 @@ def matrix(rvec, tvec):
 def estimate_pose(board, corners, ids, K, dist=None, min_corners=6):
     """Camera from board by PnP on the ChArUco corners: IPPE (planar), then Levenberg-Marquardt.
 
-    Returns None with fewer than min_corners, else a dict with T (4 x 4), rms_px, n (corners used) and ambiguity (ratio
-    of the reprojection errors of the two IPPE solutions; near 1 the mirrored pose is almost as good).
+    Returns None with fewer than min_corners or when the solver finds no pose (degenerate corners), else a dict with T
+    (4 x 4), rms_px, n (corners used) and ambiguity (ratio of the reprojection errors of the two IPPE solutions; near 1
+    the mirrored pose is almost as good).
     """
-    if len(ids) < min_corners:
+    if len(ids) < max(min_corners, 4):
         return None
     K = np.asarray(K, np.float64)
     dist = np.zeros(5) if dist is None else np.asarray(dist, np.float64)
     obj = board.getChessboardCorners()[ids].astype(np.float64)
     img = np.asarray(corners, np.float64)
     _, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, img, K, dist, flags=cv2.SOLVEPNP_IPPE)
-    errs = np.ravel(errs)
+    errs = np.ravel(errs) if errs is not None else np.empty(0)
+    if not len(rvecs) or len(errs) != len(rvecs):
+        return None
     best = int(np.argmin(errs))
     rvec, tvec = cv2.solvePnPRefineLM(obj, img, K, dist, rvecs[best].copy(), tvecs[best].copy())
     proj = cv2.projectPoints(obj, rvec, tvec, K, dist)[0].reshape(-1, 2)
     rms = float(np.sqrt(np.mean(np.sum((proj - img) ** 2, axis=1))))
+    if not np.isfinite(rms) or not np.all(np.isfinite(rvec)) or not np.all(np.isfinite(tvec)):
+        return None
     ambiguity = float(errs[1 - best] / max(errs[best], 1e-12)) if len(errs) > 1 else float("inf")
     return {"T": matrix(rvec, tvec), "rms_px": rms, "n": len(ids), "ambiguity": ambiguity}
 

@@ -1,4 +1,4 @@
-"""The calibration board shown on a monitor at a known size (T5.1, T20.3).
+"""The calibration board shown on a monitor at a known size.
 
 Instead of a printed sheet, ImpactGuide shows the ChArUco calibration board on a monitor, inside its own window: in
 the work area of the page, laid out for the pixels of that area. Every square is a whole number of the monitor's own
@@ -33,14 +33,25 @@ Usage:
     python screen_board.py info [--png DIR]   the monitors of this computer, their pitch and the board each shows
     python screen_board.py test [--work DIR]  pitch on fake screens (100, 125, 150 %, portrait, scaled mode, bad
                                               EDID), layouts, the board image found by the calibration and live code,
-                                              a calibration on synthetic photos of it; exit code 1 on failure
+                                              a calibration on synthetic photos of it; exit code 1 on failure. DIR
+                                              must be empty, missing, or a folder of an earlier test (it is emptied)
+
+Each monitor has a key (what its ruler check is kept under): its EDID id and serial number and its pixels; when the
+EDID gives no serial (WMI, many panels) the serial text, else where Windows says it is plugged in, so that two
+identical monitors keep their own checks; a check kept under the older key of a monitor still applies while that
+key names one monitor only.
 """
+from __future__ import annotations
+
 import argparse
 import base64
 import json
+import logging
 import math
+import os
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import cv2
@@ -48,7 +59,10 @@ import numpy as np
 
 import calibrate_charuco
 
-WORK = Path(r"C:\work\marker-impact\screen_board")
+_LOGGER = logging.getLogger("screen_board")
+
+WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "screen_board"
+WMI_TIMEOUT_S = 10.0                                    # PowerShell's WMI query, at most
 DICTIONARY = calibrate_charuco.BOARD["dictionary"]
 MARKER_RATIO = calibrate_charuco.BOARD["marker"] / calibrate_charuco.BOARD["square"]    # 0.75, as the A4 board
 TARGET_MM = calibrate_charuco.BOARD["square"]           # 24 mm: of two boards about as large, the nearer
@@ -84,17 +98,19 @@ def parse_edid(data):
     make = "".join(chr(64 + ((m >> s) & 31)) for s in (10, 5, 0))
     product = f"{b[10] | (b[11] << 8):04X}"
     out = {"make": make, "product": product, "id": make + product, "serial": int.from_bytes(b[12:16], "little"),
-           "name": "", "texts": [], "cm": (b[21], b[22]), "mm": None, "native": None}
+           "serial_text": "", "name": "", "texts": [], "cm": (b[21], b[22]), "mm": None, "native": None}
     for o in (54, 72, 90, 108):
         d = b[o:o + 18]
         if d[0] or d[1]:
             if out["native"] is None:
                 out["native"] = (d[2] | ((d[4] & 0xF0) << 4), d[5] | ((d[7] & 0xF0) << 4))
                 out["mm"] = (d[12] | ((d[14] & 0xF0) << 4), d[13] | ((d[14] & 0x0F) << 8))
-        elif d[3] in (0xFC, 0xFE):
+        elif d[3] in (0xFC, 0xFE, 0xFF):
             text = d[5:18].split(b"\n")[0].decode("cp437", "replace").strip()
             if d[3] == 0xFC:
                 out["name"] = out["name"] or text
+            elif d[3] == 0xFF:
+                out["serial_text"] = out["serial_text"] or text
             elif text:
                 out["texts"].append(text)
     return out
@@ -108,6 +124,7 @@ def windows_monitors():
     try:
         out = _windows_monitors()
     except Exception:      # noqa: BLE001  a monitor that cannot be read is sized by Qt alone
+        _LOGGER.exception("the monitors could not be read from Windows; Qt alone sizes them")
         return {}
     if any(not m["edid"] for m in out.values()):
         wmi = wmi_edid()
@@ -141,7 +158,7 @@ def _windows_monitors():
                     ("dmReserved1", wintypes.DWORD), ("dmReserved2", wintypes.DWORD),
                     ("dmPanningWidth", wintypes.DWORD), ("dmPanningHeight", wintypes.DWORD)]
 
-    user32 = ctypes.windll.user32
+    user32 = ctypes.WinDLL("user32", use_last_error=True)     # a private copy: its function types stay ours
     out = {}
     i = 0
     while True:
@@ -190,21 +207,45 @@ WMI_SCRIPT = (
     "cm=$b[$_.InstanceName]; id=$n[$_.InstanceName]} }) | ConvertTo-Json -Compress -Depth 4")
 
 
-def wmi_edid(timeout=10.0):
+def wmi_edid(timeout=WMI_TIMEOUT_S):
     """{WMI instance name: the fields of parse_edid} from WMI's monitor classes, when the registry has no EDID."""
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", WMI_SCRIPT],
-                           capture_output=True, text=True, timeout=timeout,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
         rows = json.loads(r.stdout or "[]")
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        _LOGGER.warning("WMI gave no monitor sizes: %s", e)
         return {}
+    return wmi_rows(rows)
+
+
+def _pair(v):
+    """(a, b) of two positive whole numbers, or None."""
+    try:
+        a, b = (int(x) for x in v)
+    except (TypeError, ValueError):
+        return None
+    return (a, b) if a > 0 and b > 0 else None
+
+
+def wmi_rows(rows):
+    """The monitors of WMI's answer (a list of rows, or one row) as parse_edid fields; a row without its instance or
+    pixels is left out (and said in the log). A size that is not given or not positive (a TV or a projector) is None,
+    as parse_edid has it: the monitor keeps its identity, and its pitch comes from elsewhere."""
     out = {}
     for row in rows if isinstance(rows, list) else [rows]:
-        make, product, name = (list(row.get("id") or []) + ["", "", ""])[:3]
-        out[row["i"]] = {"make": make, "product": product, "id": make + product, "serial": 0, "name": name,
-                         "texts": [], "cm": tuple(row.get("cm") or (0, 0)), "mm": tuple(row["mm"]),
-                         "native": tuple(row["px"])}
+        try:
+            ident = (list(row.get("id") or []) + ["", "", ""])[:3]
+            make, product, name = (str(x or "") for x in ident)
+            px, mm = _pair(row.get("px")), _pair(row.get("mm"))
+            if not row.get("i") or px is None:
+                raise ValueError(f"instance {row.get('i')}, pixels {row.get('px')}")
+            out[str(row["i"])] = {"make": make, "product": product, "id": make + product, "serial": 0,
+                                  "serial_text": "", "name": name, "texts": [], "cm": _pair(row.get("cm")) or (0, 0),
+                                  "mm": mm, "native": px}
+        except (AttributeError, TypeError, ValueError) as e:
+            _LOGGER.warning("a monitor row of WMI left out: %s", e)
     return out
 
 
@@ -230,7 +271,7 @@ def window_area(hwnd):
         _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
                     ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
 
-    u = ctypes.windll.user32
+    u = ctypes.WinDLL("user32", use_last_error=True)          # a private copy: the argument types set here stay here
     u.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     u.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
     u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
@@ -264,7 +305,10 @@ def fit_pitch(px, mm, offset=0.0):
 
 
 def plausible(px, mm, tol):
-    if not mm or min(mm) <= 0 or min(px) <= 0:
+    try:
+        if not mm or len(mm) != 2 or min(mm) <= 0 or min(px) <= 0:
+            return False
+    except TypeError:                   # a size with an empty part
         return False
     if abs((mm[0] / mm[1]) / (px[0] / px[1]) - 1) > tol:
         return False
@@ -310,14 +354,24 @@ def estimate(qt, win=None):
                                                             + (mm[1] + offsets[source][0]) * base[1])
     fine = [sources[k] for k in ("edid", "qt") if k in sources]
     spread = max(fine) / min(fine) - 1 if len(fine) > 1 else 0.0
+    legacy = None
     if edid.get("id"):
-        key = f"{edid['id']}-{edid.get('serial', 0):08X}"
+        key = legacy = f"{edid['id']}-{int(edid.get('serial') or 0):08X}"
+        if not edid.get("serial"):      # no serial number: the serial text, else where it is plugged in
+            text = str(edid.get("serial_text") or qt.get("serial") or "").strip()
+            where = str(win.get("instance") or "")
+            if text:
+                key = f"{edid['id']}-{text}"
+            elif where:
+                key = f"{edid['id']}-{zlib.crc32(where.encode('utf-8')):08X}"
     else:
         key = "-".join(str(v) for v in (qt.get("manufacturer"), qt.get("model"), qt.get("serial")) if v) or qt["device"]
     label = (edid.get("name") or (edid.get("texts") or [""])[-1] or f"{edid.get('make', '')} {edid.get('product', '')}"
              .strip() or " ".join(v for v in (qt.get("manufacturer"), qt.get("model")) if v) or qt["device"])
     size_mm = [px[0] * pitch, px[1] * pitch] if pitch else None
-    return {"device": qt["device"], "key": f"{key}-{px[0]}x{px[1]}", "label": label, "primary": bool(qt.get("primary")),
+    return {"device": qt["device"], "key": f"{key}-{px[0]}x{px[1]}",
+            "legacy_key": f"{legacy}-{px[0]}x{px[1]}" if legacy and legacy != key else None,
+            "label": label, "primary": bool(qt.get("primary")),
             "geometry": list(qt["geometry"]), "dpr": float(qt.get("dpr") or 1.0), "px": list(px), "px_from": px_from,
             "native": list(native) if native else None, "is_native": bool(is_native), "pitch_mm": pitch,
             "pitch_data_mm": pitch, "rel_u": rel_u, "source": source or "none",
@@ -341,10 +395,25 @@ def with_ruler(mon, correction):
 
 
 def monitors(qt_screens, win=None, corrections=None):
-    """estimate() of every screen, with the ruler checks applied."""
+    """estimate() of every screen, with the ruler checks applied. A monitor without a serial number whose check is
+    not under its key, while no other monitor of its model and size is connected, keeps the one check of its model and
+    size: the one under its older key (one that two identical monitors would share), or the one kept when it was
+    plugged in elsewhere (its key follows where it is plugged in)."""
     win = win or {}
+    corrections = corrections or {}
     out = [estimate(q, win.get(q["device"])) for q in qt_screens]
-    return [with_ruler(m, (corrections or {}).get(m["key"])) for m in out]
+    olds = [m.get("legacy_key") for m in out]
+    for m in out:
+        old = m.get("legacy_key")
+        if not old or m["key"] in corrections or olds.count(old) != 1:
+            continue
+        model, size = old.split("-")[0], old.rsplit("-", 1)[-1]
+        same = [k for k in corrections if k.split("-")[0] == model and k.rsplit("-", 1)[-1] == size]
+        if old in corrections:
+            m["key"] = old
+        elif len(same) == 1:
+            m["key"] = same[0]
+    return [with_ruler(m, corrections.get(m["key"])) for m in out]
 
 
 def default_monitor(mons):
@@ -379,6 +448,18 @@ def fit_markers(nx, ny):
         if x * y // 2 <= MAX_MARKERS and x * y > best[0] * best[1]:
             best = (x, y)
     return best
+
+
+def _check_area(px, pitch_mm):
+    """(w, h, pitch) checked: whole positive pixels and a finite pitch above 0, else ValueError."""
+    try:
+        w, h = (int(v) for v in px)
+        p = float(pitch_mm)
+    except (TypeError, ValueError):
+        raise ValueError(f"not an area and a pitch: {px}, {pitch_mm}") from None
+    if w <= 0 or h <= 0 or not math.isfinite(p) or p <= 0:
+        raise ValueError(f"no board fits {w} x {h} px at a pitch of {p} mm")
+    return w, h, p
 
 
 def _margins(w, h, p):
@@ -420,11 +501,10 @@ def layout(px, pitch_mm, hold=None):
     board already in use, see place) that board is kept, centred, as long as it fits and the pitch is the same: an
     area moved or resized a little does not change a board that photos have been taken of. Raises ValueError if no
     board fits."""
+    w, h, p = _check_area(px, pitch_mm)
     kept = place(px, pitch_mm, hold) if hold else None
     if kept:
         return kept
-    w, h = (int(v) for v in px)
-    p = float(pitch_mm)
     margin, top, aw, ah = _margins(w, h, p)
     found = []
     for s in range(max(16, math.ceil(SQUARE_MM[0] / p)), math.floor(SQUARE_MM[1] / p) + 1):
@@ -446,7 +526,7 @@ def layout(px, pitch_mm, hold=None):
 def min_px(pitch_mm):
     """The smallest area (w, h) in physical pixels that holds a board at this pitch: MIN_SQUARES of the smallest
     square, with the margins. An area smaller than this shows no board."""
-    p = float(pitch_mm)
+    _, _, p = _check_area((1, 1), pitch_mm)
     s = max(16, math.ceil(SQUARE_MM[0] / p))
     margin = max(MIN_MARGIN_PX, math.ceil(MARGIN_MM / p))
     top = max(MIN_TOP_PX, math.ceil(TOP_MM / p))
@@ -777,15 +857,13 @@ def test_image(work):
 
 def test_calibration(work):
     """A calibration on synthetic photos of the board of the laptop panel, with the board's own layout."""
-    import contextlib
-    import io
     m = estimate(*FAKES[0][1])
     lay = layout(m["px"], m["pitch_mm"])
     out = work / "synth"
-    with contextlib.redirect_stdout(io.StringIO()):
-        calibrate_charuco.synth(out, 14, seed=5, board=make_board(lay))
-        cal = calibrate_charuco.run_calibrate(out, None, out / "truth.json", lay["square_mm"], lay["squares"],
-                                              lay["marker_mm"])
+    quiet = lambda line: None   # noqa: E731
+    calibrate_charuco.synth(out, 14, seed=5, board=make_board(lay), log=quiet)
+    cal = calibrate_charuco.run_calibrate(out, None, out / "truth.json", lay["square_mm"], lay["squares"],
+                                          lay["marker_mm"], log=quiet)
     e = cal["error"]
     expect(cal["rms_px"] < calibrate_charuco.MAX_RMS and abs(e["fx_rel"]) < calibrate_charuco.MAX_FOCAL_ERROR
            and abs(e["fy_rel"]) < calibrate_charuco.MAX_FOCAL_ERROR and e["model_max_px"] < 1.0
@@ -800,11 +878,71 @@ def test_calibration(work):
            and abs(marker - lay["marker_mm"]) < 1e-12, "board.json of a photo folder read back")
 
 
+def test_monitors():
+    """What Windows says, read with care: WMI rows with parts missing, two identical monitors without a serial
+    number, a ruler check kept under the older key, an area or pitch that cannot hold a board."""
+    rows = [{"i": "DISPLAY\\AAA0001\\1_0", "px": [1920, 1080], "mm": [344, 193], "cm": [34, 19], "id": ["AAA", "0001",
+                                                                                                          "Panel"]},
+            {"i": "DISPLAY\\AAA0001\\2_0", "px": [1920, 1080], "mm": None, "id": ["AAA", "0001", ""]},
+            {"i": "DISPLAY\\AAA0001\\3_0", "px": [None, 1080], "mm": [344, 193]},
+            {"px": [1920, 1080], "mm": [344, 193]}, "not a row",
+            {"i": "DISPLAY\\TV00001\\4_0", "px": [3840, 2160], "mm": [0, 0], "id": ["TV0", "0001", "TV"]}]
+    got = wmi_rows(rows)
+    expect(list(got) == ["DISPLAY\\AAA0001\\1_0", "DISPLAY\\AAA0001\\2_0", "DISPLAY\\TV00001\\4_0"]
+           and got["DISPLAY\\AAA0001\\1_0"]["mm"] == (344, 193) and got["DISPLAY\\AAA0001\\2_0"]["mm"] is None
+           and got["DISPLAY\\TV00001\\4_0"]["mm"] is None and got["DISPLAY\\TV00001\\4_0"]["id"] == "TV00001"
+           and not plausible((1920, 1080), (None, None), 0.03) and not plausible((3840, 2160), None, 0.03),
+           "WMI rows: without pixels or instance left out; without a size (a TV) kept with no size, as an EDID "
+           "without one; never a crash of every board slot")
+    edid = {"make": "AAA", "product": "0001", "id": "AAA0001", "serial": 0, "serial_text": "", "name": "Panel",
+            "texts": [], "cm": (34, 19), "mm": (344, 193), "native": (1920, 1080)}
+    twins = []
+    for k in (1, 2):
+        qt, _ = fake((1920 * (k - 1), 0, 1920, 1080), 1.0, (344, 193), name=f"\\\\.\\DISPLAY{k}")
+        twins.append((qt, {"mode": (1920, 1080), "instance": f"DISPLAY\\AAA0001\\{k}_0", "edid": edid}))
+    qts = [q for q, _ in twins]
+    win = {q["device"]: w for q, w in twins}
+    plain = monitors(qts, win)
+    old = "AAA0001-00000000-1920x1080"
+    kept = monitors(qts[:1], {qts[0]["device"]: twins[0][1]}, {old: {"pitch_mm": 0.18, "measured_mm": 300}})
+    shared = monitors(qts, win, {old: {"pitch_mm": 0.18, "measured_mm": 300}})
+    expect(plain[0]["key"] != plain[1]["key"] and plain[0]["legacy_key"] == old
+           and kept[0]["key"] == old and kept[0]["source"] == "ruler"
+           and all(m["key"] != old and m["source"] != "ruler" for m in shared),
+           "two identical monitors without a serial keep their own ruler checks; a check under the older key still "
+           "applies to a monitor that is alone with it")
+    # the monitor plugged in elsewhere: its key changes with the port; alone of its model, it keeps its check
+    moved = (dict(twins[0][1], instance="DISPLAY\\AAA0001\\7_0"))
+    check1 = {plain[0]["key"]: {"pitch_mm": 0.18, "measured_mm": 300}}
+    alone = monitors(qts[:1], {qts[0]["device"]: moved}, check1)
+    both = monitors(qts, win, {**check1, plain[1]["key"]: {"pitch_mm": 0.181, "measured_mm": 300}})
+    moved_both = monitors(qts[:1], {qts[0]["device"]: moved}, {**check1, plain[1]["key"]: {"pitch_mm": 0.181,
+                                                                                            "measured_mm": 300}})
+    expect(alone[0]["key"] == plain[0]["key"] and alone[0]["source"] == "ruler"
+           and [m["ruler"]["pitch_mm"] for m in both] == [0.18, 0.181] and moved_both[0]["source"] != "ruler",
+           "a monitor without a serial plugged in elsewhere keeps its ruler check while it is the only one of its "
+           "model; with two checks of that model, neither is guessed")
+    bad = []
+    for px, p in (((1920, 1080), 0.0), ((1920, 1080), float("nan")), ((0, 1080), 0.18), ((1920, 1080), -1)):
+        try:
+            layout(px, p)
+            bad.append((px, p))
+        except ValueError:
+            pass
+    expect(not bad, f"an area or a pitch that cannot hold a board: ValueError, never a division by zero {bad or ''}")
+
+
 def cmd_test(args):
+    try:
+        work = calibrate_charuco.test_folder(args.work)
+    except ValueError as e:
+        expect(False, str(e))
+        return 1
     test_pitch()
     test_layouts()
-    test_image(args.work)
-    test_calibration(args.work)
+    test_monitors()
+    test_image(work)
+    test_calibration(work)
     print(f"\n{len(FAILS)} failures" if FAILS else "\nall checks passed", flush=True)
     return 1 if FAILS else 0
 
@@ -815,7 +953,7 @@ def main():
     a = sub.add_parser("info")
     a.add_argument("--png", type=Path, help="also write the board of each monitor here")
     a = sub.add_parser("test")
-    a.add_argument("--work", type=Path, default=WORK)
+    a.add_argument("--work", type=Path, default=WORK / "selftest")     # a folder of the test's own
     args = ap.parse_args()
     if args.cmd == "info":
         cmd_info(args)

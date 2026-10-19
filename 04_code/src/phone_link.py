@@ -1,4 +1,4 @@
-"""The link to the phone, by cable (USB) or by Wi-Fi (Android 11+ wireless debugging), found by itself (T20.3).
+"""The link to the phone, by cable (USB) or by Wi-Fi (Android 11+ wireless debugging), found by itself.
 
 The one place that knows which device serial to use. Everything that talks to the phone asks here: live.py (the
 camera stream), acquisition.py (photos and videos), live_ar.py (closing the camera app), the app (the choice, the
@@ -12,8 +12,15 @@ pairing, the state of the link). One adb for all of them: the one shipped with s
     payload = link.qr_start(); link.qr_poll()        # a QR code the phone scans: "waiting" until it is paired
     link.connect("192.168.1.23:41235")               # or found by itself over mDNS
     link.watch(listener)                             # checks the link every WATCH_S; brings Wi-Fi back when it drops
+    link.unwatch(listener)                           # that listener hears no more
     link.status()                                    # mode, state, cause, serial, model, address, round trip, drops
     link.open_url(url, port)                         # the phone's browser on a page of this PC, through adb
+    link.close()                                     # the watch stopped and joined, the tunnels of adb reverse removed
+
+Threads. One check of the link at a time: a caller that comes while another check runs gets its result. Listeners
+hear every change in the order it happened, from one notifier thread, each with the status as it was at that change.
+Every adb call has a timeout and an argument list; what goes to the phone's own shell is quoted; pairing codes and
+passwords never reach the log.
 
 Wi-Fi, once per PC: on the phone Developer options > Wireless debugging, then "Pair device with pairing code" (a
 6-digit code and an address: adb pair ADDRESS CODE) or "Pair device with QR code" (the app shows
@@ -35,11 +42,16 @@ text, which only goes to the log.
     python phone_link.py test                   selection, pairing and reconnection on a simulated phone; exit 1 on
                                                 failure
 """
+from __future__ import annotations
+
 import argparse
 import glob
+import logging
 import os
+import queue
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import string
@@ -48,7 +60,10 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Sequence
 from pathlib import Path
+
+_LOGGER = logging.getLogger("phone_link")
 
 USB, WIFI, AUTO = "usb", "wifi", "auto"
 MODES = (AUTO, USB, WIFI)           # AUTO: the cable when the phone is on it, else Wi-Fi if it was ever paired
@@ -60,8 +75,26 @@ LOST_AFTER_S = 20.0             # without the phone this long the link is "lost"
 QR_TIMEOUT_S = 180.0            # a QR code waits this long for the phone to scan it
 PAIR_TIMEOUT_S = 30.0
 CONNECT_AFTER_PAIR_S = 12.0     # after pairing, the phone's connection service is waited for this long
+ADB_TIMEOUT_S = 20.0            # any adb call without a timeout of its own
+DEVICES_TIMEOUT_S = 15.0        # adb devices (it may start the adb server)
+MDNS_TIMEOUT_S = 10.0
+SHELL_TIMEOUT_S = 8.0           # a short command in the phone's shell
+CONNECT_TIMEOUT_S = 10.0        # adb connect, adb disconnect
+REVERSE_TIMEOUT_S = 10.0        # adb reverse
+UNREVERSE_TIMEOUT_S = 3.0       # adb reverse --remove, at close: never holds the app's exit for long
+OPEN_URL_TIMEOUT_S = 15.0
+PING_TIMEOUT_S = 3.0
+CONNECT_WAIT_S = 5.0            # after adb connect, the phone is waited for this long
+POLL_S = 0.5                    # between two looks while waiting for the phone
+CHECK_WAIT_S = 30.0             # a check that comes while another one runs waits this long for its result
+WAIT_SLICE_S = 1.0              # wait_ready waits at most this long on another check before it looks at its stop
+JOIN_S = 2.0                    # the watch and the notifier are waited for this long at close
+NOTIFY_IDLE_S = 5.0             # the notifier thread ends after this long without news (it starts again on the next)
+ADB_PORT = 5037                 # the adb server's port unless ANDROID_ADB_SERVER_PORT says otherwise
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0    # CREATE_NO_WINDOW: no console flash under pythonw
 ADDRESS_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:]+\]):(\d{1,5})")
+HOST_PORT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*:\d{1,5}")    # a TCP transport by name: localhost:5555
+VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)")
 STATES = ("device", "offline", "unauthorized", "authorizing", "connecting", "recovery", "sideload", "bootloader",
           "host", "rescue", "unknown")
 # The causes the interface names (strings link.cause.<cause> in ui/strings).
@@ -71,24 +104,43 @@ CAUSES = ("no_adb", "no_device", "unauthorized", "many_devices", "offline", "tim
 
 
 class LinkError(RuntimeError):
-    """A failure of the link with a cause the interface can name (CAUSES); detail is adb's text, for the log."""
+    """A failure of the link with a cause the interface can name (CAUSES); detail is a short plain detail (an
+    address, a command name) for the log, never a secret.
 
-    def __init__(self, cause, detail=""):
+    Attributes:
+        cause: one of CAUSES.
+        code: the same as cause.
+        detail: for the log.
+    """
+
+    def __init__(self, cause: str, detail: str = "") -> None:
         super().__init__(f"{cause}: {detail}" if detail else cause)
-        self.cause, self.detail = cause, detail
+        self.cause = self.code = cause
+        self.detail = detail
+
+
+def shell_line(*words: object) -> str:
+    """A command for the phone's own shell, every word quoted (adb passes the line to the phone's sh as it is)."""
+    return " ".join(shlex.quote(str(w)) for w in words)
+
+
+def _version(path: str) -> tuple[int, ...]:
+    """The version in a scrcpy folder's name as numbers (scrcpy-win64-v3.10 -> (3, 10)), () when none."""
+    m = VERSION_RE.search(Path(path).name.rsplit("-", 1)[-1])
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
 
 
 # ── adb ──────────────────────────────────────────────────────────────────────
-def scrcpy_dir():
-    """Folder holding scrcpy-server and adb.exe (IMPACTGUIDE_SCRCPY, scrcpy on the PATH, the WinGet packages), or
-    None."""
+def scrcpy_dir() -> Path | None:
+    """Folder holding scrcpy-server and adb.exe (IMPACTGUIDE_SCRCPY, scrcpy on the PATH, the WinGet packages, the
+    newest version first), or None."""
     cands = [os.environ.get("IMPACTGUIDE_SCRCPY")]
     exe = shutil.which("scrcpy")
     if exe:
         cands.append(str(Path(exe).resolve().parent))
     local = os.environ.get("LOCALAPPDATA", "")
     cands += sorted(glob.glob(os.path.join(local, "Microsoft", "WinGet", "Packages", "Genymobile.scrcpy*",
-                                           "scrcpy-win64-*")), reverse=True)
+                                           "scrcpy-win64-*")), key=_version, reverse=True)
     adb = "adb.exe" if os.name == "nt" else "adb"
     for c in cands:
         if c and (Path(c) / "scrcpy-server").is_file() and (Path(c) / adb).is_file():
@@ -96,9 +148,25 @@ def scrcpy_dir():
     return None
 
 
-def find_adb():
+_ADB_FOUND: dict[tuple, str] = {}
+_ADB_ENV = ("IMPACTGUIDE_ADB", "IMPACTGUIDE_SCRCPY", "PATH", "LOCALAPPDATA", "ANDROID_HOME")
+
+
+def find_adb() -> str | None:
     """The adb of the whole app: IMPACTGUIDE_ADB, the one shipped with scrcpy (the stream needs its server, and two
-    adb versions stop each other's server), the PATH, the one bundled with adbutils, the Android SDK. None if none."""
+    adb versions stop each other's server), the PATH, the one bundled with adbutils, the Android SDK. None if none.
+    The answer is kept while the environment is the same and the file is there."""
+    key = tuple(os.environ.get(k, "") for k in _ADB_ENV)
+    hit = _ADB_FOUND.get(key)
+    if hit and Path(hit).is_file():
+        return hit
+    found = _find_adb()
+    if found:
+        _ADB_FOUND[key] = found
+    return found
+
+
+def _find_adb() -> str | None:
     name = "adb.exe" if os.name == "nt" else "adb"
     cands = [os.environ.get("IMPACTGUIDE_ADB")]
     d = scrcpy_dir()
@@ -115,30 +183,40 @@ def find_adb():
     return next((c for c in cands if c and Path(c).is_file()), None)
 
 
-class AdbRunner:
-    """Runs adb: (exit code, stdout and stderr together). LinkError("no_adb") without adb, ("timeout") on timeout."""
+def adb_port() -> int:
+    """The adb server's port: ANDROID_ADB_SERVER_PORT, else ADB_PORT."""
+    try:
+        return int(os.environ.get("ANDROID_ADB_SERVER_PORT", ADB_PORT))
+    except ValueError:
+        return ADB_PORT
 
-    def __init__(self, exe=None):
+
+class AdbRunner:
+    """Runs adb: (exit code, stdout and stderr together). LinkError("no_adb") without adb, ("timeout") on timeout
+    (its detail the command's name only: the arguments may hold a pairing code)."""
+
+    def __init__(self, exe: str | None = None) -> None:
         self.exe = exe or find_adb()
 
-    def __call__(self, args, serial=None, timeout=20.0):
+    def __call__(self, args: Sequence[object], serial: str | None = None,
+                 timeout: float = ADB_TIMEOUT_S) -> tuple[int, str]:
         if not self.exe:
             raise LinkError("no_adb")
         cmd = [self.exe] + (["-s", serial] if serial else []) + [str(a) for a in args]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=timeout, creationflags=NO_WINDOW)
+                               timeout=timeout, creationflags=NO_WINDOW, check=False)
         except subprocess.TimeoutExpired:
-            raise LinkError("timeout", " ".join(str(a) for a in args))
+            raise LinkError("timeout", str(args[0]) if args else "") from None
         except OSError as e:
-            raise LinkError("no_adb", str(e))
+            raise LinkError("no_adb", str(e)) from e
         return r.returncode, (r.stdout or "") + (r.stderr or "")
 
-    def ping(self, serial, port=5037, timeout=3.0):
+    def ping(self, serial: str, port: int | None = None, timeout: float = PING_TIMEOUT_S) -> float:
         """Round trip to the phone in ms: a shell `echo` through the adb server's socket (no process started here,
         so the time is the link's and adbd's)."""
         t0 = time.perf_counter()
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+        with socket.create_connection(("127.0.0.1", port or adb_port()), timeout=timeout) as s:
             s.settimeout(timeout)
             for req in (f"host:transport:{serial}", "shell:echo 1"):
                 data = req.encode()
@@ -156,11 +234,11 @@ class AdbRunner:
         return (time.perf_counter() - t0) * 1e3
 
 
-def transport_of(serial):
-    """wifi (IP:PORT, or the name adb gives a phone it found over mDNS), usb, or other (an emulator)."""
+def transport_of(serial: str) -> str:
+    """wifi (IP:PORT, HOST:PORT, or the name adb gives a phone it found over mDNS), usb, or other (an emulator)."""
     if serial.startswith("emulator-"):
         return "other"
-    if MDNS_CONNECT in serial or ADDRESS_RE.fullmatch(serial):
+    if MDNS_CONNECT in serial or ADDRESS_RE.fullmatch(serial) or HOST_PORT_RE.fullmatch(serial):
         return WIFI
     return USB
 
@@ -233,17 +311,25 @@ def phone_id_of(serial):
 
 # ── the link ─────────────────────────────────────────────────────────────────
 class Link:
-    """The chosen link and what is known of it. Thread-safe; the watch runs on its own thread."""
+    """The chosen link and what is known of it. Thread-safe; the watch runs on its own thread, the listeners hear
+    from one notifier thread, in order."""
 
-    def __init__(self, mode=AUTO, address="", phone_id="", runner=None, clock=time.monotonic, sleep=time.sleep,
-                 log=None):
+    def __init__(self, mode: str = AUTO, address: str = "", phone_id: str = "", runner: Callable | None = None,
+                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+                 log: Callable[[str], None] | None = None) -> None:
         self.run = runner or AdbRunner()
         self.clock, self.sleep = clock, sleep
-        self.log = log or (lambda msg: None)
-        self._lock = threading.RLock()
-        self._attempting = threading.Lock()
+        self.log = log or _LOGGER.debug
+        self._lock = threading.RLock()          # the state below
+        self._attempting = threading.Lock()     # one reconnection attempt at a time
+        self._check_cond = threading.Condition()    # one check at a time; the others wait for its result
+        self._checking, self._check_gen = False, 0
+        self._watch_lock = threading.Lock()     # the watch thread and the listeners
         self._listeners = []
         self._watch, self._stop = None, threading.Event()
+        self._news = queue.Queue()              # status snapshots for the listeners, in the order of the changes
+        self._notifier = None
+        self._reversed = {}                     # port -> serial: tunnels of adb reverse laid by this link
         self.mode = mode if mode in MODES else AUTO
         self.via = WIFI if self.mode == WIFI else USB   # the link in use now: the mode, or what AUTO found
         self._told = None                   # (state, cause, via) the listeners last heard
@@ -289,40 +375,53 @@ class Link:
                 "wifi_paired": self._paired()}
 
     # -- what adb sees
-    def _adb(self, args, serial=None, timeout=20.0, cause=None):
+    def _adb(self, args: Sequence[object], serial: str | None = None, timeout: float = ADB_TIMEOUT_S,
+             cause: str | None = None, secret: Sequence[str] = ()) -> tuple[int, str]:
+        """adb with these arguments (a list, never a shell string); its answer goes to the log with the secrets
+        (pairing codes, passwords) left out. A timeout is said as `cause` when given."""
         try:
             code, out = self.run(args, serial=serial, timeout=timeout)
         except LinkError as e:
             if cause and e.cause == "timeout":
-                raise LinkError(cause, e.detail)
+                raise LinkError(cause, e.detail) from e
             raise
-        self.log(f"adb {' '.join(str(a) for a in args)}: {out.strip()[-200:]}")
+        shown = " ".join("***" if str(a) in secret else str(a) for a in args)
+        text = out.strip()[-200:]
+        for s in secret:
+            text = text.replace(str(s), "***")
+        self.log(f"adb {shown}: {text}")
         return code, out
 
-    def devices(self):
-        """[{serial, state, model, transport}] (LinkError no_adb or timeout)."""
-        return parse_devices(self._adb(["devices", "-l"], timeout=15)[1])
+    def _shell(self, *words: object, serial: str, timeout: float = SHELL_TIMEOUT_S) -> tuple[int, str]:
+        """A command in the phone's shell, every word quoted."""
+        return self._adb(["shell", shell_line(*words)], serial=serial, timeout=timeout)
 
-    def mdns(self):
+    def devices(self) -> list[dict]:
+        """[{serial, state, model, transport}] (LinkError no_adb or timeout)."""
+        return parse_devices(self._adb(["devices", "-l"], timeout=DEVICES_TIMEOUT_S)[1])
+
+    def mdns(self) -> list[dict]:
         """The adb services announced on the network: [{name, service, address}] ([] when mDNS is off)."""
         try:
-            return parse_mdns(self._adb(["mdns", "services"], timeout=10)[1])
+            return parse_mdns(self._adb(["mdns", "services"], timeout=MDNS_TIMEOUT_S)[1])
         except LinkError:
             return []
 
-    def _id_of(self, serial):
-        if serial not in self._ids:
-            pid = phone_id_of(serial)
-            if not pid:
-                try:
-                    code, out = self._adb(["shell", "getprop", "ro.serialno"], serial=serial, timeout=8)
-                    pid = out.strip() if code == 0 else ""
-                except LinkError:
-                    pid = ""
-            if pid:
+    def _id_of(self, serial: str) -> str:
+        with self._lock:
+            if serial in self._ids:
+                return self._ids[serial]
+        pid = phone_id_of(serial)
+        if not pid:
+            try:
+                code, out = self._shell("getprop", "ro.serialno", serial=serial)
+                pid = out.strip() if code == 0 else ""
+            except LinkError:
+                pid = ""
+        if pid:
+            with self._lock:
                 self._ids[serial] = pid
-            return pid
-        return self._ids[serial]
+        return pid
 
     def _one_phone(self, ready):
         """The same phone seen twice on Wi-Fi (its address and its mDNS name) is one phone: the name adb keeps up by
@@ -433,12 +532,13 @@ class Link:
         except (OSError, LinkError):
             return False
 
-    def wait_ready(self, timeout, stop=None, step=0.5):
+    def wait_ready(self, timeout: float, stop: threading.Event | None = None, step: float = POLL_S) -> str | None:
         """Waits for the phone on the chosen link, helping the reconnection along (check). The serial, or None after
         the timeout or when `stop` (an Event) is set."""
         t_end = self.clock() + timeout
         while self.clock() < t_end and not (stop is not None and stop.is_set()):
-            st = self.check()
+            # another check under way (a reconnection can take 10 s): waited for in slices, so stop is seen
+            st = self.check(wait=max(0.0, min(t_end - self.clock(), WAIT_SLICE_S)))
             if st["state"] == "ready":
                 return st["serial"]
             self.sleep(step)
@@ -452,8 +552,8 @@ class Link:
         return [s["address"] for s in mine] + [s["address"] for s in svcs if s not in mine and (len(svcs) == 1 or
                                                                                                not self.phone_id)]
 
-    def _try_connect(self, address):
-        code, out = self._adb(["connect", address], timeout=10, cause="unreachable")
+    def _try_connect(self, address: str) -> tuple[bool, str]:
+        code, out = self._adb(["connect", address], timeout=CONNECT_TIMEOUT_S, cause="unreachable")
         return parse_connect(out)
 
     def connect(self, address=None):
@@ -471,7 +571,7 @@ class Link:
             if ok:
                 with self._lock:
                     self.address = a
-                serial = self._wait_wifi(5.0, host_of(a))
+                serial = self._wait_wifi(CONNECT_WAIT_S, host_of(a))
                 if serial:
                     self._up(serial, "connected")
                     return serial
@@ -492,9 +592,9 @@ class Link:
                 return pick["serial"]
             if self.clock() >= t_end:
                 return ""
-            self.sleep(0.5)
+            self.sleep(POLL_S)
 
-    def _pair_result(self, out):
+    def _pair_result(self, out: str) -> None:
         ok, cause, pid = parse_pair(out)
         if not ok:
             raise LinkError(cause, out.strip()[-200:])
@@ -529,7 +629,7 @@ class Link:
                             self.address = s["address"]
             if self.clock() >= t_end:
                 raise LinkError("paired_no_connect")
-            self.sleep(0.5)
+            self.sleep(POLL_S)
 
     def pair_code(self, address, code):
         """Pairing with the 6-digit code the phone shows under "Pair device with pairing code", at the address it
@@ -545,7 +645,7 @@ class Link:
             address = svcs[0]["address"]
         if not ADDRESS_RE.fullmatch(address):
             raise LinkError("bad_address", address)
-        _, out = self._adb(["pair", address, code], timeout=PAIR_TIMEOUT_S, cause="unreachable")
+        _, out = self._adb(["pair", address, code], timeout=PAIR_TIMEOUT_S, cause="unreachable", secret=(code,))
         self._pair_result(out)
         return self._after_pairing(host_of(address))
 
@@ -569,16 +669,23 @@ class Link:
         if qr is None:
             raise LinkError("qr_timeout")
         if self.clock() - qr["t0"] > QR_TIMEOUT_S:
-            self.qr_cancel()
+            self._qr_cancel_if(qr)
             raise LinkError("qr_timeout")
         hit = next((s for s in self.mdns() if s["service"] == MDNS_PAIRING and s["name"] == qr["name"]), None)
         if hit is None:
             return "waiting"
-        self.qr_cancel()
-        _, out = self._adb(["pair", hit["address"], qr["password"]], timeout=PAIR_TIMEOUT_S, cause="unreachable")
+        self._qr_cancel_if(qr)              # this code is used up; a newer one shown meanwhile stays
+        _, out = self._adb(["pair", hit["address"], qr["password"]], timeout=PAIR_TIMEOUT_S, cause="unreachable",
+                           secret=(qr["password"],))
         self._pair_result(out)
         self._after_pairing(host_of(hit["address"]))
         return "ready"
+
+    def _qr_cancel_if(self, qr: dict) -> None:
+        """The QR code cancelled only if it is still this one (a new code shown in between is left alone)."""
+        with self._lock:
+            if self._qr is qr:
+                self._qr = None
 
     def qr_wait(self, stop=None, step=1.0):
         """qr_poll until the phone is paired ("ready"), the code is cancelled ("cancelled") or LinkError."""
@@ -601,9 +708,26 @@ class Link:
         return self._qr is not None
 
     # -- the state, and the watch
-    def check(self):
+    def check(self, wait: float = CHECK_WAIT_S) -> dict:
         """One look at the link: its state, the round trip, and on Wi-Fi an attempt to bring it back when the phone
-        is gone (the last address, then the one the phone announces), spaced by BACKOFF_S. Returns status()."""
+        is gone (the last address, then the one the phone announces), spaced by BACKOFF_S. Returns status(). One
+        check at a time: a caller that comes while another check runs waits for it (at most `wait` s) and gets its
+        result, or the state as it is then."""
+        with self._check_cond:
+            if self._checking:
+                gen = self._check_gen
+                self._check_cond.wait_for(lambda: self._check_gen != gen, timeout=wait)
+                return self.status()
+            self._checking = True
+        try:
+            return self._check()
+        finally:
+            with self._check_cond:
+                self._checking = False
+                self._check_gen += 1
+                self._check_cond.notify_all()
+
+    def _check(self) -> dict:
         try:
             serial = self.serial()
         except LinkError as e:
@@ -617,7 +741,7 @@ class Link:
                 stale = self.silent >= 2
             if stale:
                 try:
-                    self._adb(["disconnect", serial], timeout=10)
+                    self._adb(["disconnect", serial], timeout=CONNECT_TIMEOUT_S)
                 except LinkError:
                     pass
                 with self._lock:
@@ -668,7 +792,7 @@ class Link:
         try:
             for d in self.devices():
                 if d["transport"] == WIFI and d["state"] != "device" and ADDRESS_RE.fullmatch(d["serial"]):
-                    self._adb(["disconnect", d["serial"]], timeout=10)
+                    self._adb(["disconnect", d["serial"]], timeout=CONNECT_TIMEOUT_S)
         except LinkError:
             pass
         cands = ([self.address] if self.address else []) + self.discover()
@@ -705,7 +829,7 @@ class Link:
             self._set("ready", "")
         return answered
 
-    def _identify(self, serial):
+    def _identify(self, serial: str) -> None:
         info = {"model": "", "ip": host_of(serial)}
         try:
             info["model"] = next((d["model"] for d in self.devices() if d["serial"] == serial), "")
@@ -714,12 +838,13 @@ class Link:
                 with self._lock:
                     self.phone_id = pid
             if not info["ip"]:
-                code, out = self._adb(["shell", "ip", "-4", "-o", "addr", "show", "wlan0"], serial=serial, timeout=8)
+                code, out = self._shell("ip", "-4", "-o", "addr", "show", "wlan0", serial=serial)
                 m = re.search(r"inet (\d{1,3}(?:\.\d{1,3}){3})/", out)
                 info["ip"] = m.group(1) if m else ""
         except LinkError:
             pass
-        self._info[serial] = info
+        with self._lock:
+            self._info[serial] = info
 
     def _ping(self, serial):
         """The round trip, kept; False when none came back."""
@@ -734,28 +859,58 @@ class Link:
             self.rtt.append(ms)
         return True
 
-    def _event(self, what):
-        self.events.append((time.strftime("%H:%M:%S"), what))
+    def _event(self, what: str) -> None:
+        with self._lock:
+            self.events.append((time.strftime("%H:%M:%S"), what))
         self.log(f"link {what}")
 
-    def _set(self, state, cause):
-        """Under the lock. Listeners hear of a change of state, cause or link in use."""
+    def _set(self, state: str, cause: str) -> None:
+        """Under the lock. Listeners hear of a change of state, cause or link in use, with the status of that
+        moment."""
         if (state, cause) != (self.state, self.cause):
             self.state, self.cause, self.since = state, cause, self.clock()
         if (state, cause, self.via) != self._told:
             self._told = (state, cause, self.via)
             if self._listeners:
-                threading.Thread(target=self._notify, daemon=True).start()
+                self._post(self.status())
 
-    def _notify(self):
-        st = self.status()
-        for fn in list(self._listeners):
+    def _notify(self) -> None:
+        """The listeners hear the status as it is now (a change of mode)."""
+        if self._listeners:
+            self._post(self.status())
+
+    def _post(self, status: dict) -> None:
+        """A status for the listeners, delivered after those posted before it, by the notifier thread (started
+        here when it is not running)."""
+        with self._watch_lock:
+            news = self._news
+            news.put(status)
+            if self._notifier is None or not self._notifier.is_alive():
+                self._notifier = threading.Thread(target=self._deliver, args=(news,), daemon=True,
+                                                  name="phone_link_notify")
+                self._notifier.start()
+
+    def _deliver(self, news: queue.Queue) -> None:
+        me = threading.current_thread()
+        while True:
             try:
-                fn(st)
-            except Exception:   # noqa: BLE001  a listener never stops the link
-                pass
+                st = news.get(timeout=NOTIFY_IDLE_S)
+            except queue.Empty:
+                with self._watch_lock:
+                    if news.empty():
+                        if self._notifier is me:
+                            self._notifier = None
+                        return
+                continue
+            if st is None:                      # close()
+                return
+            for fn in list(self._listeners):
+                try:
+                    fn(st)
+                except Exception:   # noqa: BLE001  a listener never stops the link
+                    _LOGGER.exception("a listener of the link failed")
 
-    def status(self):
+    def status(self) -> dict:
         with self._lock:
             info = self._info.get(self.serial_now, {}) if self.state == "ready" else {}
             rtt = sorted(self.rtt)
@@ -767,59 +922,97 @@ class Link:
                     "reconnects": self.reconnects, "for_s": round(self.clock() - self.since, 1),
                     "qr_waiting": self._qr is not None, "events": list(self.events)[-6:]}
 
-    def watch(self, listener=None, period=WATCH_S):
-        """Starts the thread that checks the link every `period` (once per Link); listener(status) on every change of
-        state or cause, from that thread."""
-        if listener is not None and listener not in self._listeners:
-            self._listeners.append(listener)
-        if self._watch is None:
-            self._stop.clear()
-            self._watch = threading.Thread(target=self._loop, args=(period,), daemon=True, name="phone_link")
-            self._watch.start()
+    def watch(self, listener: Callable[[dict], None] | None = None, period: float = WATCH_S) -> Link:
+        """Starts the thread that checks the link every `period` (once per Link, again after close); listener(status)
+        on every change of state, cause or link in use, from the notifier thread, in order."""
+        with self._watch_lock:
+            if listener is not None and listener not in self._listeners:
+                self._listeners.append(listener)
+            if self._watch is None or not self._watch.is_alive():
+                self._stop = threading.Event()
+                self._watch = threading.Thread(target=self._loop, args=(period, self._stop), daemon=True,
+                                               name="phone_link")
+                self._watch.start()
         return self
 
-    def _loop(self, period):
-        while not self._stop.is_set():
+    def unwatch(self, listener: Callable[[dict], None]) -> None:
+        """That listener hears no more (the watch goes on)."""
+        with self._watch_lock:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+    def _loop(self, period: float, stop: threading.Event) -> None:
+        while not stop.is_set():
             try:
                 self.check()
             except Exception as e:   # noqa: BLE001  the watch never dies
+                _LOGGER.exception("link check failed")
                 self.log(f"link check: {e}")
-            self._stop.wait(period)
+            stop.wait(period)
 
-    def close(self):
-        self._stop.set()
+    def close(self) -> None:
+        """Stops the watch and the notifier (each waited for JOIN_S), forgets the listeners, cancels a QR code and
+        removes the tunnels of adb reverse laid here. watch() starts again afterwards."""
+        with self._watch_lock:
+            watch, notifier, news = self._watch, self._notifier, self._news
+            self._watch, self._notifier, self._news = None, None, queue.Queue()
+            self._listeners.clear()
+            self._stop.set()
         self.qr_cancel()
+        if notifier is not None:
+            news.put(None)
+        me = threading.current_thread()
+        for th in (watch, notifier):
+            if th is not None and th is not me:
+                th.join(JOIN_S)
+                if th.is_alive():
+                    _LOGGER.warning("%s still running after close", th.name)
+        self.unreverse()
 
     # -- the phone's browser on a page of this PC
-    def reverse(self, port):
+    def reverse(self, port: int) -> str:
         """The phone's own 127.0.0.1:port reaches this PC's through adb (adb reverse), on cable or Wi-Fi alike; adb
-        drops it with the link, so it is laid again after a reconnection."""
+        drops it with the link, so it is laid again after a reconnection. Removed by unreverse() or close()."""
         serial = self.serial()
-        code, out = self._adb(["reverse", f"tcp:{port}", f"tcp:{port}"], serial=serial, timeout=10)
+        code, out = self._adb(["reverse", f"tcp:{int(port)}", f"tcp:{int(port)}"], serial=serial,
+                              timeout=REVERSE_TIMEOUT_S)
         if code != 0:
             raise LinkError("unreachable", out.strip()[-200:])
+        with self._lock:
+            self._reversed[int(port)] = serial
         return serial
 
-    def open_url(self, url, port=None):
+    def unreverse(self, port: int | None = None) -> None:
+        """adb reverse --remove: the phone's 127.0.0.1:port no longer reaches this PC (every port laid here when
+        None). Never raises: a phone that is gone took its tunnels with it."""
+        with self._lock:
+            ports = [int(port)] if port is not None else list(self._reversed)
+            serials = {p: self._reversed.pop(p, None) for p in ports}
+        for p, serial in serials.items():
+            try:
+                self._adb(["reverse", "--remove", f"tcp:{p}"], serial=serial, timeout=UNREVERSE_TIMEOUT_S)
+            except LinkError as e:
+                self.log(f"adb reverse --remove tcp:{p}: {e.cause}")
+
+    def open_url(self, url: str, port: int | None = None) -> str:
         """Opens `url` in the phone's browser. With `port`, through adb reverse first, so the page needs neither the
-        network nor the PC's firewall."""
+        network nor the PC's firewall. The URL is quoted for the phone's shell."""
         serial = self.reverse(port) if port else self.serial()
-        code, out = self._adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url],
-                              serial=serial, timeout=15)
+        code, out = self._shell("am", "start", "-a", "android.intent.action.VIEW", "-d", url, serial=serial,
+                                timeout=OPEN_URL_TIMEOUT_S)
         if code != 0 or "Error" in out:
             raise LinkError("unreachable", out.strip()[-200:])
         return serial
 
-    def wifi_debugging_on(self):
+    def wifi_debugging_on(self) -> bool:
         """With the phone on the cable, Wireless debugging is switched on from here (a setting adb's shell may
         write), one step less for pairing. True if the phone took it; False otherwise, never raises."""
         try:
             serial = self.serial()
             if self.via != USB:
                 return False
-            self._adb(["shell", "settings", "put", "global", "adb_wifi_enabled", "1"], serial=serial, timeout=8)
-            code, out = self._adb(["shell", "settings", "get", "global", "adb_wifi_enabled"], serial=serial,
-                                  timeout=8)
+            self._shell("settings", "put", "global", "adb_wifi_enabled", "1", serial=serial)
+            code, out = self._shell("settings", "get", "global", "adb_wifi_enabled", serial=serial)
             return code == 0 and out.strip() == "1"
         except LinkError:
             return False
@@ -829,8 +1022,8 @@ _DEFAULT = None
 _DEFAULT_LOCK = threading.Lock()
 
 
-def get():
-    """The link of this process (made at first use, on cable)."""
+def get() -> Link:
+    """The link of this process (made at first use, in AUTO mode: the cable when the phone is on it, else Wi-Fi)."""
     global _DEFAULT
     with _DEFAULT_LOCK:
         if _DEFAULT is None:
@@ -869,6 +1062,8 @@ class SimulatedAdb:
         self.opened = []                # URLs the phone's browser was asked to open
         self.reversed = set()
         self.calls = []
+        self.timeouts = []              # the timeout of every call
+        self.shell_lines = []           # what the phone's shell was given, as adb passes it
         self._lock = threading.Lock()
 
     # what the tests do to the phone
@@ -904,9 +1099,10 @@ class SimulatedAdb:
         addr = self.connected.get(serial)
         return bool(addr) and self.network and self.debugging and addr == self._addr(self.connect_port)
 
-    def __call__(self, args, serial=None, timeout=20.0):
+    def __call__(self, args, serial=None, timeout=ADB_TIMEOUT_S):
         with self._lock:
             self.calls.append((serial, tuple(args)))
+            self.timeouts.append(timeout)
             return self._answer([str(a) for a in args], serial)
 
     def _answer(self, args, serial):
@@ -932,7 +1128,7 @@ class SimulatedAdb:
         if cmd == "pair":
             addr, code = args[1], args[2] if len(args) > 2 else ""
             if not self.network or host_of(addr) != self.ip:
-                return 1, f"Failed: Unable to start pairing client.\n"
+                return 1, "Failed: Unable to start pairing client.\n"
             want = self.qr[1] if self.qr and addr == self._addr(self.pair_port) and self.qr[1] == code else self.code
             if code != want or addr != self._addr(self.pair_port):
                 return 1, "Failed: Wrong password or connection was dropped.\n"
@@ -956,19 +1152,26 @@ class SimulatedAdb:
         if serial is not None and not self._reachable(serial):
             return 1, f"adb: device '{serial}' not found\n"
         if cmd == "reverse":
-            self.reversed.add(args[1])
+            if args[1] == "--remove":
+                self.reversed.discard(args[2])
+            elif args[1] == "--remove-all":
+                self.reversed.clear()
+            else:
+                self.reversed.add(args[1])
             return 0, ""
         if cmd == "shell":
-            line = " ".join(args[1:])
+            words = shlex.split(" ".join(args[1:]))     # the phone's sh reads the line as adb passes it
+            self.shell_lines.append(" ".join(args[1:]))
+            line = " ".join(words)
             if "ro.serialno" in line:
                 return 0, self.phone_id + "\n"
             if line.startswith("ip "):
                 return 0, f"30: wlan0    inet {self.ip}/24 brd 192.168.43.255 scope global wlan0\n"
             if "android.intent.action.VIEW" in line:
-                self.opened.append(args[-1])
+                self.opened.append(words[-1])
                 return 0, "Starting: Intent { act=android.intent.action.VIEW }\n"
             if line.startswith("settings put global adb_wifi_enabled"):
-                self.debugging = args[-1] == "1"
+                self.debugging = words[-1] == "1"
                 return 0, ""
             if line.startswith("settings get global adb_wifi_enabled"):
                 return 0, ("1" if self.debugging else "0") + "\n"
@@ -1074,6 +1277,18 @@ def run_test():
         st = link.check()
     expect(st["state"] == "ready" and st["reconnects"] == 1 and link.serial() == serial,
            "Wi-Fi back on the same port: reconnected by itself")
+    # a check under way elsewhere (a reconnection can take 10 s): wait_ready still sees its stop, in a second or so
+    with link._check_cond:
+        link._checking = True
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    t0 = time.perf_counter()
+    got = link.wait_ready(60, stop=stop)
+    waited = time.perf_counter() - t0
+    with link._check_cond:
+        link._checking = False
+    expect(got in (None, serial) and waited < WAIT_SLICE_S + 1.5,
+           f"another check under way: wait_ready waits for it in slices, never {CHECK_WAIT_S:.0f} s ({waited:.1f} s)")
 
     # wireless debugging turned on again: a new port, found again over mDNS
     sim.drop()
@@ -1190,11 +1405,135 @@ def run_test():
     time.sleep(0.3)
     sim3.usb = False
     time.sleep(0.3)
+    watcher = link3._watch
     link3.close()
     expect("ready" in heard and heard[-1] == "none", f"the watch tells the app: {heard}")
     expect(set(CAUSES) >= {"no_device", "wifi_lost", "pair_code", "unreachable", "qr_timeout"}, "causes listed")
+    test_threads(expect, watcher)
+    test_commands(expect)
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed")
     return 1 if fails else 0
+
+
+class _SlowAdb(SimulatedAdb):
+    """A simulated phone whose adb answers `devices` slowly, counting how many calls run at once."""
+
+    def __init__(self, delay_s=0.05, **kw):
+        super().__init__(**kw)
+        self.delay_s, self.running, self.most = delay_s, 0, 0
+        self._count = threading.Lock()
+
+    def __call__(self, args, serial=None, timeout=ADB_TIMEOUT_S):
+        if args and args[0] == "devices":
+            with self._count:
+                self.running += 1
+                self.most = max(self.most, self.running)
+            time.sleep(self.delay_s)
+            with self._count:
+                self.running -= 1
+        return super().__call__(args, serial, timeout)
+
+
+def test_threads(expect, watcher):
+    """The watch, the listeners and concurrent checks."""
+    expect(watcher is not None and not watcher.is_alive(), "close() stops the watch and waits for it")
+    # listeners: one notifier thread, every change in order, with the status of that moment
+    sim = SimulatedAdb()
+    link = Link(USB, runner=sim)
+    heard, threads = [], set()
+
+    def listener(st):
+        heard.append((st["state"], st["cause"]))
+        threads.add(threading.current_thread().name)
+        time.sleep(0.02)                    # a slow listener: the changes still arrive in order
+    link._listeners.append(listener)
+    link.check()
+    for usb in (False, True, False, True):
+        sim.usb = usb
+        link.check()
+    t_end = time.time() + 3
+    while len(heard) < 5 and time.time() < t_end:
+        time.sleep(0.02)
+    expect(heard == [("ready", ""), ("none", "no_device"), ("ready", ""), ("none", "no_device"), ("ready", "")]
+           and threads == {"phone_link_notify"},
+           f"listeners hear every change in order, from one notifier thread ({len(heard)} changes, {threads})")
+    # the watch starts again after close; a listener taken off hears no more
+    got = []
+    link.watch(got.append, period=0.05)
+    time.sleep(0.15)
+    link.close()
+    first = link._watch
+    link.watch(got.append, period=0.05)
+    again = link._watch is not None and link._watch.is_alive() and first is None
+    link.unwatch(got.append)
+    n = len(got)
+    sim.usb = False
+    time.sleep(0.3)
+    link.close()
+    expect(again and len(got) == n, "watch() starts again after close(); unwatch() takes a listener off")
+    # one check at a time: a caller that comes during a check gets its result
+    slow = _SlowAdb(delay_s=0.1)
+    link = Link(USB, runner=slow)
+    out = []
+    ths = [threading.Thread(target=lambda: out.append(link.check()["state"])) for _ in range(6)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(10)
+    expect(slow.most == 1 and out == ["ready"] * 6, f"checks from 6 threads: one at a time ({slow.most} at once), "
+                                                     "each gets the state")
+
+
+def test_commands(expect):
+    """What reaches adb and the phone's shell: quoted, with timeouts, secrets kept out of the log, tunnels
+    removed."""
+    sim = SimulatedAdb()
+    lines = []
+    link = Link(USB, runner=sim, log=lines.append)
+    url = "http://127.0.0.1:8790/v/a&b;reboot/?x=1 2"
+    link.open_url(url, port=8790)
+    line = next(x for x in sim.shell_lines if "VIEW" in x)
+    expect(sim.opened[-1] == url and shlex.split(line)[-1] == url and "'" in line,
+           "open_url: the address quoted for the phone's shell, & and ; kept inside it")
+    link.close()
+    expect(not sim.reversed, "close() removes the tunnels of adb reverse it laid")
+    expect(all(t is not None and 0 < t <= 60 for t in sim.timeouts), "every adb call has a timeout")
+    link.configure(mode=WIFI)
+    link.pair_code(f"{sim.ip}:{sim.pair_port}", sim.code)
+    expect(lines and not any(sim.code in x for x in lines), "the pairing code never reaches the log")
+    old = link._qr if link.qr_start() else None
+    link.qr_start()
+    link._qr_cancel_if(old)
+    expect(link.qr_waiting, "a new QR code is not cancelled by the pairing of the old one")
+    link.close()
+    clock = FakeClock()
+    sim_qr, qr_lines = SimulatedAdb(usb=False, clock=clock, scan_after_s=1.0), []
+    link_qr = Link(WIFI, runner=sim_qr, clock=clock, sleep=clock.sleep, log=qr_lines.append)
+    password = re.search(r"P:([^;]+);", link_qr.qr_start()).group(1)
+    clock.t += 2
+    paired = link_qr.qr_poll()
+    expect(paired == "ready" and any("pair" in x and "***" in x for x in qr_lines)
+           and not any(password in x for x in qr_lines), "the QR code's password never reaches the log")
+    try:
+        AdbRunner(exe=sys.executable)(["-c", "import time; time.sleep(5)", "123456"], timeout=0.5)
+        detail = None
+    except LinkError as e:
+        detail = (e.cause, e.detail)
+    expect(detail == ("timeout", "-c"), f"a timeout says the command, not its arguments ({detail})")
+    vs = ["scrcpy-win64-v3.9", "scrcpy-win64-v3.10", "scrcpy-win64-v2.7"]
+    expect(sorted(vs, key=_version, reverse=True)[0].endswith("v3.10")
+           and transport_of("localhost:5555") == WIFI and transport_of("PX7P0042") == USB,
+           "scrcpy versions in number order; localhost:5555 is not the cable")
+    old_port = os.environ.get("ANDROID_ADB_SERVER_PORT")
+    os.environ["ANDROID_ADB_SERVER_PORT"] = "5099"
+    try:
+        port = adb_port()
+    finally:
+        if old_port is None:
+            os.environ.pop("ANDROID_ADB_SERVER_PORT")
+        else:
+            os.environ["ANDROID_ADB_SERVER_PORT"] = old_port
+    expect(port == 5099 and adb_port() == int(old_port or ADB_PORT), "the adb server's port from the environment")
 
 
 def main():

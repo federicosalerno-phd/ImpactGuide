@@ -1,10 +1,9 @@
-"""Conformal calibration of the threshold u on the predicted TRE (module 5 of ai_design.md, "Taratura conforme").
+"""Conformal calibration of the threshold u on the predicted TRE.
 
 A correction is accepted when its final misalignment score is at most tau and its predicted 95% TRE is below u. Silent
 error: an accepted correction whose true TRE is above LIMIT_MM. Loss of a calibration sample at u:
 L_i(u) = 1[score_i <= tau and pred_i < u and tre_i > LIMIT_MM], bounded by 1 and non-decreasing in u. Conformal risk
-control (Angelopoulos, Bates, Fisch, Lei and Schuster, "Conformal risk control", ICLR 2024; reference to be checked in
-T15.3) takes the largest u with
+control (Angelopoulos, Bates, Fisch, Lei and Schuster, "Conformal risk control", ICLR 2024) takes the largest u with
 
     (n R_n(u) + 1) / (n + 1) <= alpha,   R_n(u) = mean of L_i(u) over the n calibration samples,
 

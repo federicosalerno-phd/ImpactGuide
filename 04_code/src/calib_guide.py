@@ -1,5 +1,5 @@
-"""The guided photos of a calibration (T5.1, T5.3, T20.3): where the phone goes for each photo, the same plan on screen
-and in the simulation.
+"""The guided photos of a calibration: where the phone goes for each photo, the same plan on screen and in the
+simulation.
 
 A plan is a list of poses of the phone relative to the board. A pose says
     view    where the phone looks from: front, left, right, above, below, or a corner (above_left ...): the phone moved
@@ -14,8 +14,9 @@ The phone is held across (landscape) with its top to the left for every photo: a
 size and would not calibrate with the rest (calibrate_charuco.detect), so the check of each photo says so.
 
 PLANS: quick (15 poses: the five views at 40 degrees, the four corners, two turns, the edges at two distances), accurate
-(40: eight directions at 25 and 40 degrees, the nine places of the screen, turns, near views, as the protocol of T5.1),
-check (10: the session check). Each plan covers tilts in every direction, the whole image and the three distances.
+(40: eight directions at 25 and 40 degrees, the nine places of the screen, turns, near views, as the calibration
+protocol asks), check (10: the session check). Each plan covers tilts in every direction, the whole image and the three
+distances.
 
 camera_pose(pose, board) gives T_C_M for a board (squares, square_mm) with the nominal camera of the mode (CAMERAS);
 guide(pose, board) what the page draws: the board as the phone's screen shows it (outline and black squares, in
@@ -30,14 +31,18 @@ Usage:
     python calib_guide.py test [--work DIR]                     the plans in simulation: every pose sees enough of the
                                                                 screen board, the 3D-printed plate and the A4 sheet;
                                                                 photos of each plan (with slips) calibrate within the
-                                                                limits of calibrate_charuco.py; exit 1 on failure
+                                                                limits of calibrate_charuco.py; exit 1 on failure.
+                                                                DIR must be empty, missing, or a folder of an earlier
+                                                                test (it is emptied)
 """
+from __future__ import annotations
+
 import argparse
-import contextlib
-import io
 import json
 import math
+import os
 import sys
+import threading
 from pathlib import Path
 
 import cv2
@@ -45,7 +50,8 @@ import numpy as np
 
 import calibrate_charuco
 
-WORK = Path(r"C:\work\marker-impact\calib_guide")
+WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "calib_guide"
+RAYS_KEPT = 2           # pixel ray tables kept (about 100 MB each at the photo size)
 # the nominal camera of each mode: the Poco X7 Pro main camera, 26 mm equivalent, 4:3, no distortion
 CAMERAS = {"photo": {"size": (4080, 3072), "f": 3070.0}, "stream": {"size": (1920, 1440), "f": 1439.0}}
 RANGE_MM = {"photo": (250.0, 400.0), "stream": (250.0, 600.0)}     # the board's centre from the phone
@@ -135,11 +141,14 @@ def _unit(v):
 
 
 def _rot_between(a, b):
-    """The rotation turning the unit vector a onto b (Rodrigues)."""
+    """The rotation turning the unit vector a onto b (Rodrigues); half a turn about an axis across a when b is -a."""
     a, b = _unit(a), _unit(b)
     v, c = np.cross(a, b), float(np.dot(a, b))
     if np.linalg.norm(v) < 1e-12:
-        return np.eye(3)
+        if c > 0:
+            return np.eye(3)
+        axis = _unit(np.cross(a, [1.0, 0, 0] if abs(a[0]) < 0.9 else [0, 1.0, 0]))
+        return 2 * np.outer(axis, axis) - np.eye(3)
     vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return np.eye(3) + vx + vx @ vx * (1 / (1 + c))
 
@@ -157,9 +166,11 @@ def direction(pose):
 def camera_pose(pose, board_mm, mode="photo", K=None, size=None):
     """T_C_M (4 x 4) of a pose for a board of board_mm = (width, height): the phone at the pose's distance from the
     board's centre, on the side its view says, looking at the centre with the board's top up, turned by roll, then
-    turned in place so that the centre falls at `at` on the screen."""
-    if K is None:
-        K, size = camera(mode)
+    turned in place so that the centre falls at `at` on the screen. K and size default to the mode's nominal
+    camera (each on its own)."""
+    nominal_K, nominal_size = camera(mode)
+    K = nominal_K if K is None else np.asarray(K, np.float64)
+    size = nominal_size if size is None else size
     W, H = board_mm
     centre = np.array([W / 2, H / 2, 0.0])
     yaw, pitch = (math.radians(a) for a in direction(pose))
@@ -169,6 +180,8 @@ def camera_pose(pose, board_mm, mode="photo", K=None, size=None):
     eye = centre + d * out
     z = -out
     y = np.array([0, 1.0, 0]) - z[1] * z
+    if np.linalg.norm(y) < 1e-9:                # looking straight along the board's y: its x gives the up instead
+        y = np.array([1.0, 0, 0]) - z[0] * z
     y = _unit(y)
     x = np.cross(y, z)
     R = np.stack([x, y, z])                      # rows: the camera's axes in M, so R maps M to C
@@ -306,33 +319,44 @@ def render_plan(out, plan, spec, kind, mode="photo", lay=None, seed=0, K=None, d
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     views = []
-    old = calibrate_charuco.SYNTH_BLUR
-    if blur is not None:
-        calibrate_charuco.SYNTH_BLUR = blur
-    try:
-        for i, pose in enumerate(PLANS[plan]):
-            if only is not None and i not in only:
-                continue
-            j = jittered(pose, rng)
-            d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
-            T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
-            img, b, nz = calibrate_charuco.render(page, origin, rays, T[:3, :3], T[:3, 3], rng, ppm)
-            name = f"{prefix}_{i:03d}.{'jpg' if mode == 'photo' else 'png'}"
-            if mode == "photo":
-                cv2.imwrite(str(out / name), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            else:
-                cv2.imwrite(str(out / name), img)
-            views.append({"image": name, "pose": i, "rvec": cv2.Rodrigues(T[:3, :3])[0].ravel().tolist(),
-                          "tvec": T[:3, 3].tolist(), "blur_px": round(b, 3), "noise_grey": round(nz, 3)})
-    finally:
-        calibrate_charuco.SYNTH_BLUR = old
-    (out / "truth.json").write_text(json.dumps({"image_size": [w, h], "K": np.asarray(K).tolist(),
-                                                "dist": np.asarray(dist).tolist(), "seed": seed, "views": views},
-                                               indent=1))
+    for i, pose in enumerate(PLANS[plan]):
+        if only is not None and i not in only:
+            continue
+        j = jittered(pose, rng)
+        d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
+        T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
+        img, b, nz = calibrate_charuco.render(page, origin, rays, T[:3, :3], T[:3, 3], rng, ppm, blur=blur)
+        name = f"{prefix}_{i:03d}.{'jpg' if mode == 'photo' else 'png'}"
+        if mode == "photo":
+            cv2.imwrite(str(out / name), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        else:
+            cv2.imwrite(str(out / name), img)
+        views.append({"image": name, "pose": i, "rvec": cv2.Rodrigues(T[:3, :3])[0].ravel().tolist(),
+                      "tvec": T[:3, 3].tolist(), "blur_px": round(b, 3), "noise_grey": round(nz, 3)})
+    calibrate_charuco.write_json_atomic(out / "truth.json", {"image_size": [w, h], "K": np.asarray(K).tolist(),
+                                                             "dist": np.asarray(dist).tolist(), "seed": seed,
+                                                             "views": views})
     return out
 
 
-_RAYS = {}
+_RAYS: dict[tuple[int, int], np.ndarray] = {}     # the pixel rays of the newest sizes, RAYS_KEPT at most
+_RAYS_LOCK = threading.Lock()
+
+
+def _rays(K, size):
+    """The pixel rays of the synthetic camera at this size, kept for the next photo (the oldest size let go)."""
+    key = (int(size[0]), int(size[1]))
+    with _RAYS_LOCK:
+        hit = _RAYS.pop(key, None)
+        if hit is not None:
+            _RAYS[key] = hit                    # now the newest
+            return hit
+    rays = calibrate_charuco.pixel_rays(K, calibrate_charuco.SYNTH_DIST, key)
+    with _RAYS_LOCK:
+        _RAYS[key] = rays
+        while len(_RAYS) > RAYS_KEPT:
+            del _RAYS[next(iter(_RAYS))]
+    return rays
 
 
 def photo(plan, i, spec, kind, mode="photo", lay=None, rng=None, size=None):
@@ -345,16 +369,14 @@ def photo(plan, i, spec, kind, mode="photo", lay=None, rng=None, size=None):
     K = calibrate_charuco.SYNTH_K.copy()
     K[:2] *= s
     K[:2, 2] = (calibrate_charuco.SYNTH_K[:2, 2] + 0.5) * s - 0.5
-    key = (w, h)
-    if key not in _RAYS:
-        _RAYS[key] = calibrate_charuco.pixel_rays(K, calibrate_charuco.SYNTH_DIST, (w, h))
+    rays = _rays(K, (w, h))
     page, origin, ppm = texture(kind, spec, lay)
     page = cv2.GaussianBlur(page, (0, 0), 0.6)
     pose = PLANS[plan][i % len(PLANS[plan])]
     j = jittered(pose, rng)
     d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
     T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
-    img, _, _ = calibrate_charuco.render(page, origin, _RAYS[key], T[:3, :3], T[:3, 3], rng, ppm)
+    img, _, _ = calibrate_charuco.render(page, origin, rays, T[:3, :3], T[:3, 3], rng, ppm)
     return img
 
 
@@ -381,6 +403,32 @@ def boards():
     return out
 
 
+def test_geometry(work):
+    """The edges of the geometry and the simulation: opposite vectors, a pose seen from straight above, a camera
+    given without its size, the blur of a plan passed along (nothing global changed), the rays kept bounded."""
+    a = np.array([0, 0, 1.0])
+    R = _rot_between(a, -a)
+    expect(np.allclose(R @ a, -a) and np.allclose(R @ R.T, np.eye(3)) and abs(np.linalg.det(R) - 1) < 1e-9,
+           "the rotation between opposite vectors is half a turn, not the identity")
+    _, _, spec, _ = boards()[2]
+    K, size = camera("photo")
+    up = camera_pose(free_pose(0, 90, (0.5, 0.5), 300.0, 0), board_mm(spec))
+    given = camera_pose(PLANS["quick"][1], board_mm(spec), K=K)
+    expect(np.isfinite(up).all() and np.allclose(up[:3, :3] @ up[:3, :3].T, np.eye(3))
+           and np.allclose(given, camera_pose(PLANS["quick"][1], board_mm(spec))),
+           "a pose from straight above (pitch 90 degrees) and a camera given without its size: a proper pose")
+    before = calibrate_charuco.SYNTH_BLUR
+    out = render_plan(work / "blur", "check", spec, "sheet", seed=3, only=[0], blur=(3.0, 3.0))
+    b = json.loads((out / "truth.json").read_text(encoding="utf-8"))["views"][0]["blur_px"]
+    expect(calibrate_charuco.SYNTH_BLUR == before and abs(b - 3.0) < 1e-9,
+           f"the blur of a plan reaches the render ({b} px) without changing calibrate_charuco.SYNTH_BLUR")
+    _RAYS.clear()
+    for w in (400, 320, 240, 400):
+        photo("check", 0, spec, "sheet", size=(w, w * 3 // 4))
+    expect(len(_RAYS) <= RAYS_KEPT and (400, 300) in _RAYS, f"pixel rays kept for {len(_RAYS)} sizes at most")
+    _RAYS.clear()
+
+
 def cmd_show(a):
     for name, kind, spec, lay in boards():
         print(f"{name}: {spec['squares'][0]} x {spec['squares'][1]} of {spec['square_mm']:.2f} mm")
@@ -391,7 +439,12 @@ def cmd_show(a):
 
 
 def cmd_test(a):
-    work = Path(a.work)
+    try:
+        work = calibrate_charuco.test_folder(a.work)
+    except ValueError as e:
+        expect(False, str(e))
+        return 1
+    test_geometry(work)
     # every pose of every plan keeps enough of each board in view, in both modes
     for name, kind, spec, lay in boards():
         for mode in CAMERAS:
@@ -426,10 +479,9 @@ def cmd_test(a):
             if plan == "accurate" and name != "screen" and not a.all:
                 continue
             out = work / f"{name}_{plan}"
-            with contextlib.redirect_stdout(io.StringIO()):
-                render_plan(out, plan, spec, kind, lay=lay, seed=7)
-                cal = calibrate_charuco.run_calibrate(out, None, out / "truth.json", spec["square_mm"],
-                                                      tuple(spec["squares"]), spec["marker_mm"])
+            render_plan(out, plan, spec, kind, lay=lay, seed=7)
+            cal = calibrate_charuco.run_calibrate(out, None, out / "truth.json", spec["square_mm"],
+                                                  tuple(spec["squares"]), spec["marker_mm"], log=lambda line: None)
             e = cal["error"]
             rms, focal, centre, model = limits_[plan]
             expect(cal["rms_px"] < rms and abs(e["fx_rel"]) < focal and abs(e["fy_rel"]) < focal
@@ -448,7 +500,7 @@ def main():
     a.add_argument("--plan", choices=list(PLANS), default="quick")
     a.add_argument("--mode", choices=list(CAMERAS), default="photo")
     a = sub.add_parser("test")
-    a.add_argument("--work", type=Path, default=WORK)
+    a.add_argument("--work", type=Path, default=WORK / "selftest")     # a folder of the test's own
     a.add_argument("--all", action="store_true", help="also the accurate plan on the plate and the sheet")
     args = ap.parse_args()
     if args.cmd == "show":

@@ -1,8 +1,8 @@
-"""Digital twin of the test bench: synthetic phone photos and video frames of the face with exact masks and true poses
-(T13.1, module 3a of ai_design.md). Replaces render_phone_views.py, which rebuilt the old scene.
+"""Digital twin of the test bench: synthetic phone photos and video frames of the face with exact masks and true poses.
+Replaces render_phone_views.py, which rebuilt the old scene.
 
 Runs in Blender 5.2 in the background on a copy of the bench scene, never on the original (it is edited elsewhere):
-    blender --background --factory-startup --python 04_code/src/synth_twin.py -- COMMAND [options]
+    blender --background --factory-startup --python-exit-code 1 --python 04_code/src/synth_twin.py -- COMMAND [options]
 The copy OUT/twin_scene.blend is refreshed from SCENE when SCENE has not been saved for 2 minutes; nothing is ever
 saved. Objects are found by name (02_cad/solidworks/part_names.md and the constants below), so the generator reruns
 unchanged when the scene changes.
@@ -10,29 +10,34 @@ unchanged when the scene changes.
 Commands
     copy     only refresh the copy of the scene
     probe    checks of the scene: phone camera from the lens against cam_phone_2, tilt hinge, A1 ball centre, board
+    test     checks of the marker motion on both interfaces: the board moves by exactly the sampled transform, in the
+             scene, in the label images and in the labels; exit code 1 on a failure (nothing is written to the dataset)
     meshes   face meshes in B for the renderer (full and decimated, with the decimation error), occluders, weights of
              the skin deformation
     drapes   drape shapes by cloth simulation, kept when they cover 10-40% of the face from the photo positions and
              stay clear of marker, spheres and pendulum
-    s1       ray casting of the head spheres from every phone position and along the video path (requirement S1), and
-             candidate positions on the bone hidden from the phone and seen by the scanner
+    s1       ray casting of the head spheres from every phone position and along the video path (they must stay out
+             of sight of the phone), and candidate positions on the bone hidden from the phone and seen by the scanner
     render   the dataset: sessions x registrations x states x (4 photos + video frames); resumable, one state at a time
 
 Head spheres. The head spheres and their frame (gt_sphere_mandible_*, gt_frame_mandible*) are left out of the images
-and of the drape simulation unless --head-spheres is given: on the bench they are in sight of the phone (S1), and a
+and of the drape simulation unless --head-spheres is given: on the bench they are in sight of the phone, and a
 network trained on the twin must never learn to use them. session.json and every frame record the choice.
 
-Frames (ai_design.md, Notazione). B = frame of the bench scene, mm. Camera C as in OpenCV (x right, y down, z forward,
-pixel centres at integer coordinates); board M as cv2.aruco.CharucoBoard (origin at the outer corner of the first
-square, x along the printed columns, y along the rows, z into the board). T_C_B camera from B, T_M_B board from B
-(registration), T_C_M = T_C_B . T_M_B^-1. Impact: T_M_B = T_M_B0 . dT, dT in B. A1: dT = [R, (I - R) c] about the
-ball centre c; general (B1): X' = R (X - o) + o + s about the face centroid o (as correct.py). The marker is moved in
-the scene by dT^-1.
+Frames. B = the head frame: coordinates of the bench scene, mm (not the local frame of the mandible mesh, which
+ground_truth.py calls "mandible"; T_B_mandible is in 03_data/processed/targets/mandible_frame.json). Camera C as in
+OpenCV (x right, y down, z forward, pixel centres at integer coordinates); board M as cv2.aruco.CharucoBoard (origin at
+the outer corner of the first square, x along the printed columns, y along the rows, z into the board). T_C_B camera
+from B, T_M_B board from B (registration), T_C_M = T_C_B . T_M_B^-1. Impact: T_M_B = T_M_B0 . dT, dT in B. A1:
+dT = [R, (I - R) c] about the ball centre c; general (B1): X' = R (X - o) + o + s about the face centroid o (as
+correct.py). Each registration starts from the scene pose moved by Q (A1: a rotation about c; B1: Q = I), and the
+impact moves the marker in the scene by dT^-1: world from board = dT^-1 . Q . (world from board in the scene).
 Images are pinhole renders (dist = 0) with the nominal intrinsics of the Poco X7 Pro, or the calibrated ones of
 03_data/processed/calibration/intrinsics_{photo,video}.json when they exist (their distortion is not rendered),
 scaled by --scale.
 
-Output in OUT (default C:\\work\\marker-impact\\synth), regenerable from this script and the seed:
+Output in OUT (default WORK/synth; WORK from the environment variable IMPACTGUIDE_WORK), regenerable from this
+script and the seed:
     twin_scene.blend                             copy of the bench scene
     meshes/face_<id>_full.npz, face_<id>_r20k.npz   face in B (vertices mm, triangles), decimation error in the json
     meshes/occluders.npz, meshes/face_weights.npz
@@ -57,6 +62,7 @@ import argparse
 import ast
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -72,20 +78,26 @@ from mathutils.kdtree import KDTree
 
 SRC = Path(__file__).resolve().parent
 ROOT = SRC.parents[1]
-sys.pycache_prefix = r"C:\work\marker-impact\pycache"   # Blender ignores PYTHONPYCACHEPREFIX
+# Blender's Python ignores PYTHONPYCACHEPREFIX: apply it here, and write no bytecode next to the sources without it
+if os.environ.get("PYTHONPYCACHEPREFIX"):
+    sys.pycache_prefix = os.environ["PYTHONPYCACHEPREFIX"]
+else:
+    sys.dont_write_bytecode = True
 sys.path.insert(0, str(SRC))
 import face_model as fm  # noqa: E402
 
-SCENE = Path(r"C:\work\marker-impact\test_bench_draft.blend")
-OUT = Path(r"C:\work\marker-impact\synth")
+WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
+SCENE = WORK / "test_bench_draft.blend"
+OUT = WORK / "synth"
 CALIB = ROOT / "03_data" / "processed" / "calibration"
 STABLE_S = 120          # the original is copied only when not saved for this long
 SCALE = 0.5             # rendered resolution / camera resolution
 SAMPLES = 16            # EEVEE samples of the RGB images
-DECIMATED = 20000       # triangles of the face for the renderer (ai_design.md, module 1)
+DECIMATED = 20000       # triangles of the face for the renderer
 
-# Poco X7 Pro main camera, nominal until T5.3: 12.5 MP photo (4:3) and 4K video (16:9 from the full sensor width),
-# 26 mm equivalent focal length, about 3070 px at 4080 px as in calibrate_charuco.py, principal point at the centre
+# Poco X7 Pro main camera, nominal until it is calibrated: 12.5 MP photo (4:3) and 4K video (16:9 from the full sensor
+# width), 26 mm equivalent focal length, about 3070 px at 4080 px as in calibrate_charuco.py, principal point at the
+# centre
 NOMINAL = {"photo": ((4080, 3072), 3070.0), "video": ((3840, 2160), 3070.0 * 3840 / 4080)}
 
 # names in the scene
@@ -106,6 +118,9 @@ DRAPE_CLEAR = ("marker_", "gt_sphere", "gt_frame", "a1_", "b1_")   # the drape k
 LABELS = {"background": 0, "face": 1, "marker": 2, "drape": 3, "interface": 4, "head_spheres": 5, "head": 6,
           "pendulum": 7, "bench": 8, "cap": 9}
 TARGETS = ROOT / "03_data" / "processed" / "targets" / "mandible_targets.csv"   # TRE targets (role "proposed")
+TEST_SCALE = 0.25       # resolution of the label images of the test command
+TEST_DEG, TEST_MM = 4.0, 3.0      # displacement of the test command
+TEST_TOL_MM = 1e-3      # the board must land within this distance of the sampled pose
 
 # sampling
 REG_DEG = 12.0          # A1 start rotated about c up to this angle: many marker-head registrations
@@ -208,6 +223,14 @@ def world_mesh(ob, evaluated=True):
     return co @ mw[:3, :3].T + mw[:3, 3], tri
 
 
+def parent_depth(ob):
+    """Number of parents above an object (used to set parents before their children)."""
+    n = 0
+    while ob.parent is not None:
+        ob, n = ob.parent, n + 1
+    return n
+
+
 def sphere_of(ob):
     """Centre and radius of a sphere object from its vertices."""
     v, _ = world_mesh(ob, evaluated=False)
@@ -242,7 +265,7 @@ def refresh_copy(src, dst, force=False):
 
 
 def intrinsics(mode, scale):
-    """K and size at the rendered resolution; calibrated values when T5.3 has written them."""
+    """K and size at the rendered resolution; calibrated values when the calibration has written them."""
     path = CALIB / f"intrinsics_{mode}.json"
     if path.exists():
         d = json.loads(path.read_text(encoding="utf-8"))
@@ -283,9 +306,12 @@ class Twin:
         self.o = self.face_w0.mean(0)
         self.face_shape = None          # identity displacement of the current session
         self.face_state = None
-        # moving parts of the marker
+        # moving parts of the marker: the empty marker_motion (parent of every marker part, A1 and B1 parts included)
+        # is a root of both interfaces, plus the arm or plate of each
         self.roots = {v: [o[MOTION]] + [o[n] for n in extra if n in o] for v, (_, extra) in VARIANTS.items()}
         self.root_mw0 = {ob.name: ob.matrix_world.copy() for v in self.roots.values() for ob in v}
+        unique = {ob.name: ob for v in self.roots.values() for ob in v}
+        self.root_order = sorted(unique.values(), key=parent_depth)      # each once, parents first
         self.pend_mw0 = o[PENDULUM_BASE].matrix_world.copy() if PENDULUM_BASE in o else None
         # phone camera fixed to the tilt hinge, from the lens geometry
         self.set_arm(self.sa["shown_deg"], 0.0)
@@ -392,12 +418,26 @@ class Twin:
         return None
 
     def set_marker(self, variant, D):
-        """Move the moving parts of the interface by the world transform D (from the scene pose)."""
-        for v, roots in self.roots.items():
-            for ob in roots:
-                m0 = self.root_mw0[ob.name]
-                ob.matrix_world = Matrix(D.tolist()) @ m0 if v == variant else m0
+        """Move the moving parts of the interface `variant` by the world transform D (from the scene pose); the other
+        roots go back to their scene pose. Each object is set once, parents before children: marker_motion is a root
+        of both interfaces, and setting it once per interface put it back at its scene pose for every interface but
+        the last one (the A1 marker never moved)."""
+        move = {ob.name for ob in self.roots[variant]}
+        Dm = Matrix(np.asarray(D, np.float64).tolist())
+        for ob in self.root_order:
+            m0 = self.root_mw0[ob.name]
+            ob.matrix_world = Dm @ m0 if ob.name in move else m0
         self.vl.update()
+
+    def place_marker(self, reg, st):
+        """Put the marker of registration reg at state st: world from board = dT^-1 . Q . (scene pose). Returns the
+        world from board as placed and the labels T_M_B (registration at the state) and T_M_B0 (before the impact,
+        T_M_B = T_M_B0 . dT)."""
+        D = np.linalg.inv(st["dT"]) @ reg["Q"]
+        self.set_marker(reg["interface"], D)
+        wb, _ = self.world_from_board()
+        T_M_B = np.linalg.inv(wb)
+        return wb, T_M_B, T_M_B @ np.linalg.inv(st["dT"])
 
     def set_pendulum(self, deg):
         if self.pend_mw0 is None:
@@ -538,8 +578,8 @@ class Twin:
             ob.hide_render = hide
 
     def show_head_spheres(self, show):
-        """Head spheres and their frame in the images or not. The dataset hides them (T13.2): on the bench they are
-        still in sight of the phone (S1), and a network must never learn to use them."""
+        """Head spheres and their frame in the images or not. The dataset hides them: on the bench they are still in
+        sight of the phone, and a network must never learn to use them."""
         for ob in self.objs:
             if ob.name.startswith(HEAD_REF):
                 ob.hide_render = not show
@@ -611,6 +651,17 @@ class Twin:
         counts = np.bincount(lab, minlength=len(LABELS))
         return {k: int(counts[v]) for k, v in LABELS.items()}
 
+    @staticmethod
+    def label_image(path):
+        """Labels of a label image as an H x W array, first row at the top (Blender stores the bottom row first)."""
+        img = bpy.data.images.load(str(path), check_existing=False)
+        img.colorspace_settings.name = "Non-Color"
+        w, h = img.size
+        px = np.empty(w * h * 4, np.float32)
+        img.pixels.foreach_get(px)
+        bpy.data.images.remove(img)
+        return np.round(px[0::4] * 255).astype(np.int64).reshape(h, w)[::-1]
+
 
 # ---------------------------------------------------------------- commands
 
@@ -656,6 +707,112 @@ def cmd_probe(tw, args):
                             "elevation_deg": round(math.degrees(math.asin(-m[2, 2])), 2)}
     print(json.dumps(rep, indent=1))
     (args.out / "probe.json").write_text(json.dumps(rep, indent=1), encoding="utf-8")
+
+
+def project_points(m, K, X):
+    """Pixels (OpenCV convention) of world points X (N x 3) seen by the camera m (world from camera)."""
+    x = (np.atleast_2d(X) - m[:3, 3]) @ m[:3, :3]
+    return np.c_[K[0, 0] * x[:, 0] / x[:, 2] + K[0, 2], K[1, 1] * x[:, 1] / x[:, 2] + K[1, 2]]
+
+
+def cmd_test(tw, args):
+    """Checks of the marker motion, through the code path of render (Twin.place_marker); exit code 1 on a failure.
+
+    For each interface a start registration Q (A1: rotated by TEST_DEG about the ball centre; B1: the scene pose) and
+    an impact dT (A1: TEST_DEG about the ball centre; B1: TEST_DEG about the face centroid plus TEST_MM), large enough
+    that a marker left at its scene pose cannot pass:
+    - scene: the board lands at dT^-1 . Q . (scene pose) within TEST_TOL_MM; on A1 the ball centre stays in place;
+    - labels: T_M_B0 is the registration before the impact (Q only, whatever dT) and T_M_B = T_M_B0 . dT;
+    - images: the marker pixels of the label image at photo position p1 move, and points of the board projected with
+      the label pose T_C_M = T_C_B . T_M_B^-1 fall on marker pixels, before and after the move;
+    - set_marker with the identity puts the board back at the scene pose.
+    Nothing is written but a temporary label image in OUT."""
+    fails = []
+
+    def check(ok, what):
+        print(("ok    " if ok else "FAIL  ") + what, flush=True)
+        if not ok:
+            fails.append(what)
+
+    side = tw.board["squares"] * tw.board["square_mm"]
+    board_pts = np.array([[side / 2, side / 2, 0.0], [side / 4, side / 4, 0.0], [3 * side / 4, side / 4, 0.0],
+                          [side / 4, 3 * side / 4, 0.0], [3 * side / 4, 3 * side / 4, 0.0]])   # in M
+    corners = np.array([[0.0, 0.0, 0.0], [side, 0.0, 0.0], [0.0, side, 0.0], [side, side, 0.0]])
+    probe_B = np.vstack([tw.c, tw.o, tw.c + [50.0, 0.0, 0.0], tw.o + [0.0, 0.0, 50.0]])       # points of B
+
+    def apply(T, X):
+        return X @ T[:3, :3].T + T[:3, 3]
+
+    def gap(A, B, X):
+        return float(np.linalg.norm(apply(A, X) - apply(B, X), axis=1).max())
+
+    tw.hide_phone(True)
+    tw.show_head_spheres(False)
+    tw.label_mode(depth=False)
+    K, size, _ = intrinsics("photo", TEST_SCALE)
+    tw.set_arm(tw.sa["arm_deg"][0], 0.0)
+    cam = tw.camera()
+    tw.set_camera(cam, K, size)
+    tmp = args.out / "_test_label.png"
+
+    def label():
+        tw.render(tmp)
+        lab = Twin.label_image(tmp)
+        tmp.unlink()
+        return lab
+
+    def on_marker(lab, wb):
+        uv = np.round(project_points(cam, K, apply(wb, board_pts))).astype(int)
+        inside = (uv[:, 0] >= 0) & (uv[:, 1] >= 0) & (uv[:, 0] < lab.shape[1]) & (uv[:, 1] < lab.shape[0])
+        return int(sum(lab[v, u] == LABELS["marker"] for u, v in uv[inside]))
+
+    ball = tw.objs[BALL]
+    for k, variant in enumerate(VARIANTS):
+        if VARIANTS[variant][0] not in bpy.data.collections:
+            check(False, f"{variant}: collection {VARIANTS[variant][0]} in the scene")
+            continue
+        rng = np.random.default_rng([args.seed, 7, k])
+        tw.set_variant(variant)
+        tw.set_marker(variant, np.eye(4))
+        wb0, _ = tw.world_from_board()
+        ball0 = mat(ball.matrix_world)
+        lab0 = label()
+        if variant == "a1":
+            reg = {"interface": "a1", "Q": about(rotation(unit(rng), TEST_DEG), tw.c)}
+            dT = about(rotation(unit(rng), TEST_DEG), tw.c)
+        else:
+            reg = {"interface": "b1", "Q": np.eye(4)}
+            dT = about(rotation(unit(rng), TEST_DEG), tw.o, unit(rng) * TEST_MM)
+        want = np.linalg.inv(dT) @ reg["Q"] @ wb0
+        wb, T_M_B, T_M_B0 = tw.place_marker(reg, {"dT": dT})
+        moved = gap(want, wb0, corners)
+        check(moved > 1.0, f"{variant}: the test displacement moves the board by {moved:.2f} mm")
+        err = gap(wb, want, corners)
+        check(err < TEST_TOL_MM, f"{variant}: board at dT^-1 . Q . scene pose (off by {err:.5f} mm)")
+        if variant == "a1":
+            c1 = apply(mat(ball.matrix_world) @ np.linalg.inv(ball0), tw.c[None])[0]
+            check(np.linalg.norm(c1 - tw.c) < TEST_TOL_MM,
+                  f"a1: the ball turns in its seat (centre moved {np.linalg.norm(c1 - tw.c):.5f} mm)")
+        T_reg = np.linalg.inv(reg["Q"] @ wb0)
+        check(gap(T_M_B0, T_reg, probe_B) < TEST_TOL_MM,
+              f"{variant}: T_M_B0 is the registration before the impact (off by {gap(T_M_B0, T_reg, probe_B):.5f} mm)")
+        check(gap(T_M_B, T_M_B0 @ dT, probe_B) < 1e-9, f"{variant}: T_M_B = T_M_B0 . dT")
+        lab1 = label()
+        m0, m1 = lab0 == LABELS["marker"], lab1 == LABELS["marker"]
+        changed = int((m0 ^ m1).sum())
+        check(m0.any() and changed > max(20, 0.02 * m0.sum()),
+              f"{variant}: marker pixels move in the label image ({changed} of {int(m0.sum())} changed)")
+        hits0, hits1 = on_marker(lab0, wb0), on_marker(lab1, np.linalg.inv(T_M_B))
+        check(hits0 == len(board_pts) and hits1 == len(board_pts),
+              f"{variant}: board points projected with the label pose land on marker pixels "
+              f"({hits0}/{len(board_pts)} before, {hits1}/{len(board_pts)} after)")
+        tw.set_marker(variant, np.eye(4))
+        back = gap(tw.world_from_board()[0], wb0, corners)
+        check(back < TEST_TOL_MM, f"{variant}: the identity puts the board back ({back:.5f} mm)")
+    tw.set_marker("a1", np.eye(4))
+    print(f"{len(fails)} failed" if fails else "all passed", flush=True)
+    if fails:
+        raise SystemExit(1)
 
 
 def decimate(vertices, faces, target):
@@ -936,11 +1093,7 @@ def cmd_render(tw, args):
                     continue
                 t0 = time.perf_counter()
                 st = sample_state(tw, sess, reg, s, drapes)
-                D = np.linalg.inv(st["dT"]) @ reg["Q"]       # marker in the world: start Q, then dT^-1
-                tw.set_marker(reg["interface"], D)
-                wb, _ = tw.world_from_board()
-                T_M_B = np.linalg.inv(wb)
-                T_M_B0 = T_M_B @ np.linalg.inv(st["dT"])
+                wb, T_M_B, T_M_B0 = tw.place_marker(reg, st)      # marker in the world: start Q, then dT^-1
                 shift = np.linalg.norm(targets @ st["dT"][:3, :3].T + st["dT"][:3, 3] - targets, axis=1)
                 target_mm = {"mean": round(float(shift.mean()), 4), "max": round(float(shift.max()), 4)} if len(shift) else None
                 disp, dpar = fm.deformation(tw.face_w0, tw.face_n0, w, np.random.default_rng(st["def_seed"]),
@@ -1018,7 +1171,7 @@ def cmd_render(tw, args):
                           "label_s_per_image": round(sum(t["label_s"] for t in times) / imgs, 3)}))
 
 
-# --- S1: the head spheres seen from the phone
+# --- s1: the head spheres seen from the phone
 
 def phone_poses(tw, video_step=2.0, tilts=(-TILT_MAX, 0.0, TILT_MAX)):
     poses = [("photo", f"p{k + 1}", phi, 0.0) for k, phi in enumerate(tw.sa["arm_deg"])]
@@ -1382,7 +1535,7 @@ def coverage_counts(tw, views, K, size, out):
 
 def main(argv):
     p = argparse.ArgumentParser(prog="synth_twin.py")
-    p.add_argument("command", choices=("probe", "meshes", "drapes", "s1", "render", "copy"))
+    p.add_argument("command", choices=("probe", "test", "meshes", "drapes", "s1", "render", "copy"))
     p.add_argument("--out", type=Path, default=OUT)
     p.add_argument("--force-copy", action="store_true")
     p.add_argument("--sessions", default="0:1", help="range a:b of session indices")
@@ -1405,7 +1558,8 @@ def main(argv):
         print(refresh_copy(SCENE, args.out / "twin_scene.blend", args.force_copy))
         return
     tw = open_twin(args.out, args.force_copy)
-    {"probe": cmd_probe, "meshes": cmd_meshes, "drapes": cmd_drapes, "s1": cmd_s1, "render": cmd_render}[args.command](tw, args)
+    {"probe": cmd_probe, "test": cmd_test, "meshes": cmd_meshes, "drapes": cmd_drapes, "s1": cmd_s1,
+     "render": cmd_render}[args.command](tw, args)
 
 
 if __name__ == "__main__":

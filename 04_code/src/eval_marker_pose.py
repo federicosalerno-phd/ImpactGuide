@@ -1,9 +1,10 @@
-"""Marker pose and mandible overlay on the synthetic phone views of the bench, against the ground truth (T5.4).
+"""Marker pose and mandible overlay on the synthetic phone views of the bench, against the ground truth.
 
 Input: two runs of render_phone_views.py, one at the photo resolution (DATA, 4080 x 3072) and one at the resolution of
-a live stream (LIVE, 1920 x 1440, same field of view):
+a live stream (LIVE, 1920 x 1440, same field of view), both in the work folder (environment variable
+IMPACTGUIDE_WORK):
     blender --background --factory-startup --python 04_code/src/render_phone_views.py
-    blender --background --factory-startup --python 04_code/src/render_phone_views.py -- --out C:\\work\\marker-impact\\synthetic_pose_live --size 1920 1440
+    blender --background --factory-startup --python 04_code/src/render_phone_views.py -- --out WORK/synthetic_pose_live --size 1920 1440
 For each photo position and both resolutions:
 - ChArUco detection and PnP on the clean render; pose error, and the error it puts on the mandible (3D, mm, and in the
   image, px) over all mandible vertices;
@@ -21,6 +22,7 @@ edges).
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,8 +35,9 @@ import marker_pose as mp   # noqa: E402
 import mesh_overlay as mo  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = Path(r"C:\work\marker-impact\synthetic_pose")
-LIVE = Path(r"C:\work\marker-impact\synthetic_pose_live")
+WORK_ROOT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
+DATA = WORK_ROOT / "synthetic_pose"
+LIVE = WORK_ROOT / "synthetic_pose_live"
 CSV = ROOT / "05_results" / "pose_synthetic.csv"
 SHEET = ROOT / "02_cad" / "renders" / "check_pose_overlay.png"
 TRIALS, NOISE, JPEG_Q, SEED = 30, 3.0, 90, 0
@@ -67,11 +70,17 @@ def outline_distance(a, b):
 
 def iou(a, b):
     a, b = a > 0, b > 0
-    return float((a & b).sum() / (a | b).sum())
+    return float((a & b).sum() / max((a | b).sum(), 1))
 
 
 def mean_pose(Ts):
-    """Chordal mean of the rotations, mean of the translations."""
+    """Chordal mean of the rotations, mean of the translations.
+
+    Raises:
+        ValueError: no pose.
+    """
+    if not len(Ts):
+        raise ValueError("mean_pose of no pose")
     u, _, vt = np.linalg.svd(sum(T[:3, :3] for T in Ts))
     T = np.eye(4)
     T[:3, :3] = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
@@ -88,6 +97,9 @@ def jitter(board, detector, image, K, X, rng, trials):
         est = mp.estimate_pose(board, *mp.detect(detector, jpg)[:2], K)
         if est is not None:
             Ts.append(est["T"])
+    if not Ts:                      # the board was found in none of the noisy copies
+        nan = float("nan")
+        return {"found": 0, "rot_deg": nan, "trans_mm": nan, "tre_mm": nan, "overlay_px": nan}
     Tm = mean_pose(Ts)
     dev = [mp.pose_error(T, Tm) for T in Ts]
     tgt = [mp.target_error(T, Tm, X, K) for T in Ts]
@@ -97,11 +109,18 @@ def jitter(board, detector, image, K, X, rng, trials):
 
 
 def evaluate(board, image, K, T_gt, X, rng, trials):
+    """Detection, pose and its errors on one image, and the jitter over noisy copies.
+
+    Raises:
+        ValueError: the board is not found in the image.
+    """
     detector = mp.make_detector(board, K)
     t0 = time.perf_counter()
     det = mp.detect(detector, image)
     detect_ms = (time.perf_counter() - t0) * 1e3
     est = mp.estimate_pose(board, det[0], det[1], K)
+    if est is None:
+        raise ValueError(f"board not found ({len(det[1])} corners)")
     return {"det": det, "est": est, "detect_ms": detect_ms, "err": mp.pose_error(est["T"], T_gt),
             "tgt": mp.target_error(est["T"], T_gt, X, K), "gt_rms": mp.reprojection_rms(board, det[0], det[1], T_gt, K),
             "jit": jitter(board, detector, image, K, X, rng, trials)}
@@ -153,13 +172,21 @@ def main():
         image = cv2.imread(str(args.data / f"view_{k}.png"))
         blender_mask = np.where(cv2.imread(str(args.data / f"mandible_mask_{k}.png"), cv2.IMREAD_UNCHANGED)[..., 3] > 127,
                                 255, 0).astype(np.uint8)
-        a = evaluate(board, image, K, T_gt, X, rng, args.trials)
+        try:
+            a = evaluate(board, image, K, T_gt, X, rng, args.trials)
+        except ValueError as e:
+            raise SystemExit(f"view {k}, photo: {e}") from e
         ren_gt = renderer.render(K, None, T_gt, (w, h))
         ren = renderer.render(K, None, a["est"]["T"], (w, h))
         live = cv2.imread(str(args.live / f"view_{k}.png"))
-        b = evaluate(board, live, K_live, T_gt, X, rng, args.trials)
+        try:
+            b = evaluate(board, live, K_live, T_gt, X, rng, args.trials)
+        except ValueError as e:
+            raise SystemExit(f"view {k}, live: {e}") from e
         blurred = cv2.GaussianBlur(live, (0, 0), BLUR)
         est_blur = mp.estimate_pose(board, *mp.detect(mp.make_detector(board, K_live), blurred)[:2], K_live)
+        if est_blur is None:
+            raise SystemExit(f"view {k}, live with a blur of {BLUR} px: board not found")
         tgt_blur = mp.target_error(est_blur["T"], T_gt, X, K_live)
         ren_live = renderer.render(K_live, None, b["est"]["T"], tuple(gt_live["image_size"]))
         for name, r in (("photo", a), ("live", b)):

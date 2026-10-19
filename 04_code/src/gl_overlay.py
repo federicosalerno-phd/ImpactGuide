@@ -1,5 +1,5 @@
-"""OpenGL renderer of module 1 with the interface of mesh_overlay.MeshRenderer (T13.1): silhouette, visibility buffer
-and visible edges of a mesh seen by a calibrated camera.
+"""OpenGL renderer with the interface of mesh_overlay.MeshRenderer: silhouette, visibility buffer and visible edges of
+a mesh seen by a calibrated camera.
 
 Same projection as mesh_overlay.py: vertices projected with cv2.projectPoints (lens distortion included), triangles
 straight between the projected vertices. The GPU (moderngl, OpenGL 3.3 standalone context) rasterises the index of the
@@ -14,7 +14,18 @@ the silhouette comes with its true coverage (anti-aliased, steady under a sub-pi
 
     r = GLMeshRenderer(vertices, faces).render(K, dist, T, (w, h))      # same Render as mesh_overlay.py
     o = GLMeshRenderer(vertices, faces).overlay(K, dist, T, (w, h), light)   # Overlay: coverage and light
+
+OpenGL contexts. A context is current on the thread that made it. context() is the one shared context of a process,
+for callers that render from one thread (the research scripts). A thread that renders on its own (the compose thread
+of the live view) makes its own with standalone_context(), passes it as GLMeshRenderer(..., ctx=ctx), and releases
+the renderers (release()) and then the context on that same thread when it ends.
+
+    python gl_overlay.py test     the renderer on and off the image, overlay(), a context of its own released
 """
+from __future__ import annotations
+
+import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -76,17 +87,44 @@ def project(xc, K, dist):
 
 
 def context():
-    """One standalone context per process (creating one takes about 0.4 s)."""
+    """The shared standalone context of the process, made at the first call (about 0.4 s) on the calling thread and
+    current there only: for callers that render from one thread."""
     global _CTX
     if _CTX is None:
         _CTX = moderngl.create_standalone_context()
     return _CTX
 
 
+def standalone_context():
+    """A new standalone context, current on the calling thread, owned by the caller: renderers made with it render on
+    that thread only, and the caller releases them and then the context (ctx.release()) on that thread."""
+    return moderngl.create_standalone_context()
+
+
+def _release_framebuffer(fb):
+    """A framebuffer and its attachments (moderngl releases neither with the other)."""
+    if fb is None:
+        return
+    for a in tuple(fb.color_attachments) + ((fb.depth_attachment,) if fb.depth_attachment else ()):
+        a.release()
+    fb.release()
+
+
 class GLMeshRenderer(MeshRenderer):
-    def __init__(self, vertices, faces, crease_deg=60.0):
+    """MeshRenderer on the GPU (see the module docstring).
+
+    Args:
+        vertices: N x 3 vertices (mm).
+        faces: M x 3 triangles, consistently wound.
+        crease_deg: dihedral angle above which an edge is a crease.
+        ctx: the OpenGL context to render with (standalone_context() of the calling thread); None for the shared
+            context of the process (context()).
+    """
+
+    def __init__(self, vertices, faces, crease_deg=60.0, ctx=None):
         super().__init__(vertices, faces, crease_deg)
-        ctx = self.ctx = context()
+        ctx = self.ctx = ctx if ctx is not None else context()
+        self.thread = threading.get_ident()     # the thread the context is current on: the only one to render
         self.prog = ctx.program(vertex_shader=VS, fragment_shader=FS)
         self.vbo = ctx.buffer(reserve=len(self.v) * 12)
         self.ibo_all = ctx.buffer(self.f.astype("i4").tobytes())
@@ -111,8 +149,7 @@ class GLMeshRenderer(MeshRenderer):
         if w > self.cap[0] or h > self.cap[1]:
             cw, ch = max(w, self.cap[0]), max(h, self.cap[1])
             cw, ch = -(-cw // 256) * 256, -(-ch // 256) * 256
-            if self.fbo is not None:
-                self.fbo.release()
+            _release_framebuffer(self.fbo)
             self.fbo = self.ctx.framebuffer(color_attachments=[self.ctx.texture((cw, ch), 1, dtype="i4")],
                                             depth_attachment=self.ctx.depth_renderbuffer((cw, ch)))
             self.cap = (cw, ch)
@@ -156,6 +193,19 @@ class GLMeshRenderer(MeshRenderer):
         xc = self.v @ T[:3, :3].T + T[:3, 3]
         c = np.abs(np.sum((self.vn @ T[:3, :3].T) * xc, axis=1))
         return c / np.maximum(np.linalg.norm(xc, axis=1), 1e-9)
+
+    def release(self):
+        """Frees the GPU objects of this renderer (on the thread its context is current on); it cannot render after.
+        The context itself stays: its owner releases it."""
+        for fb in (self.fbo, self.fbo_ms, self.fbo_res):
+            _release_framebuffer(fb)
+        self.fbo, self.fbo_ms, self.fbo_res = None, None, None
+        self.cap, self.cap_lit = (0, 0), (0, 0)
+        for name in ("vao_all", "vao_lit", "ibo_all", "vbo", "vbo_light", "prog", "prog_lit"):
+            obj = getattr(self, name, None)
+            if obj is not None:
+                obj.release()
+                setattr(self, name, None)
 
     def render(self, K, dist, T, size, depth_tol=1.0, near=1.0, edges=True):
         """Silhouette, visibility buffer and visible edges of the mesh for camera from model T (4 x 4, mm)."""
@@ -202,10 +252,7 @@ class GLMeshRenderer(MeshRenderer):
             cw, ch = max(w, self.cap_lit[0]), max(h, self.cap_lit[1])
             cw, ch = -(-cw // 128) * 128, -(-ch // 128) * 128
             for fb in (self.fbo_ms, self.fbo_res):
-                if fb is not None:
-                    for a in tuple(fb.color_attachments) + ((fb.depth_attachment,) if fb.depth_attachment else ()):
-                        a.release()
-                    fb.release()
+                _release_framebuffer(fb)
             self.fbo_ms = self.ctx.framebuffer(
                 color_attachments=[self.ctx.renderbuffer((cw, ch), 2, samples=SAMPLES)],
                 depth_attachment=self.ctx.depth_renderbuffer((cw, ch), samples=SAMPLES))
@@ -274,3 +321,53 @@ class GLMeshRenderer(MeshRenderer):
         vis = cand[(~hidden).sum(0) >= 2]
         kind = np.where(self.border[vis], 2, np.where(contour[vis], 0, 1))
         return uv[self.edges[vis]], kind
+
+
+# ── checks ───────────────────────────────────────────────────────────────────
+def run_test():
+    """mesh_overlay's checks on this renderer, overlay() on and off the image, and a context of a thread's own: two
+    renderers on two threads, each with its context, released on their thread, the shared context untouched."""
+    import mesh_overlay
+    fails = []
+
+    def expect(ok, what):
+        print(("ok    " if ok else "FAIL  ") + what, flush=True)
+        if not ok:
+            fails.append(what)
+
+    v, f = mesh_overlay.check_cube()
+    K = np.array([[600.0, 0, 319.5], [0, 600.0, 239.5], [0, 0, 1]])
+    size = (640, 480)
+    out = {}
+
+    def own(key):
+        ctx = standalone_context()
+        ren = GLMeshRenderer(v, f, ctx=ctx)
+        rows = {}
+        for where, T in mesh_overlay.check_poses().items():
+            o = ren.overlay(K, None, T, size, ren.facing(T))
+            rows[where] = (int(np.count_nonzero(o.mask)), o.cover.shape)
+        ren.release()
+        ctx.release()
+        out[key] = rows
+
+    shared_before = _CTX
+    threads = [threading.Thread(target=own, args=(k,), name=f"gl_check_{k}") for k in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30.0)
+    seen = ("inside", "across the left edge")
+    ok = len(out) == 2 and all((rows[w][0] > 0) == (w in seen) for rows in out.values() for w in rows)
+    expect(ok and _CTX is shared_before, "overlay() on two threads with a context each, released there: covered px "
+           + ", ".join(f"{w} {n}" for w, (n, _) in out.get(0, {}).items()))
+    if mesh_overlay.run_test(GLMeshRenderer, "gl_overlay"):
+        fails.append("render() on and off the image")
+    print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["test"]:
+        sys.exit(run_test())
+    sys.exit(__doc__)

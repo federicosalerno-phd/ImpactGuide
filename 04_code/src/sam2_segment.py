@@ -1,8 +1,9 @@
 """SAM 2.1 segmentation of the mandible from a box prompt, and GPU benchmark.
 
 The image predictor of SAM 2.1 segments the mandible in a smartphone image,
-prompted with a box around the mandible. Checkpoints live outside Drive, in
-C:\\work\\marker-impact\\models\\sam2, downloaded from
+prompted with a box around the mandible. Checkpoints live in the work folder
+(WEIGHTS_DIR: models/sam2 under the environment variable IMPACTGUIDE_WORK),
+downloaded from
 https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_<model>.pt
 with <model> in tiny, small, base_plus, large.
 
@@ -12,8 +13,9 @@ encode an image and to decode one box prompt, peak GPU memory, and agreement of
 the masks with those of the large model in fp32 (mean IoU over the views, one
 column per prompt). The GPU also drives the display: other programs using it
 (Blender, SolidWorks) slow the timings down, so close them first. It writes
-05_results/sam2_runtime.csv and, in C:\\work\\marker-impact\\sam2, one sheet per
-model with the masks and the prompt boxes on the four views.
+05_results/sam2_runtime.csv and, in SHEETS_DIR (sam2 in the work folder), one
+sheet per model with the masks and the prompt boxes on the four views. Without
+a CUDA device only the CPU run of --cpu is possible.
 
 Usage: python sam2_segment.py [--models tiny small ...] [--repeats N] [--cpu]
 """
@@ -21,6 +23,7 @@ Usage: python sam2_segment.py [--models tiny small ...] [--repeats N] [--cpu]
 import argparse
 import csv
 import gc
+import os
 import time
 from pathlib import Path
 
@@ -33,8 +36,9 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 ROOT = Path(__file__).resolve().parents[2]
 RENDERS_DIR = ROOT / "02_cad" / "renders"
 OUTPUT_CSV = ROOT / "05_results" / "sam2_runtime.csv"
-WEIGHTS_DIR = Path(r"C:\work\marker-impact\models\sam2")
-SHEETS_DIR = Path(r"C:\work\marker-impact\sam2")
+WORK_ROOT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
+WEIGHTS_DIR = WORK_ROOT / "models" / "sam2"
+SHEETS_DIR = WORK_ROOT / "sam2"
 
 MODELS = {
     "tiny": "sam2.1_hiera_t.yaml",
@@ -46,15 +50,15 @@ MODELS = {
 # Boxes (x0, y0, x1, y1 in pixels of the 1600 x 1200 renders) drawn by hand on
 # the phone views: "mandible" around the whole mandible (chin, inferior border,
 # ramus), "window" around the bone exposed by the surgical window. In the
-# pipeline the box comes from the mandible rendered from the marker pose (T5.4).
+# pipeline the box comes from the mandible rendered from the marker pose.
 BOXES = {
     1: {"mandible": (765, 420, 1155, 705), "window": (850, 585, 1010, 690)},
     2: {"mandible": (815, 420, 1250, 740), "window": (850, 615, 1070, 700)},
     3: {"mandible": (850, 440, 1335, 780), "window": (920, 650, 1100, 740)},
     4: {"mandible": (860, 470, 1395, 830), "window": (930, 690, 1100, 790)},
 }
-# Margins added to the boxes: 30% as in ai_design.md, 50% as the alternative
-# to compare in T12.2.
+# Margins added to the boxes: 30% as in the design of the pipeline, 50% as the
+# alternative to compare.
 PROMPTS = {
     "mandible": ("mandible", 1.0),
     "mandible_30": ("mandible", 1.3),
@@ -212,9 +216,18 @@ def main():
     args = parser.parse_args()
 
     views = read_views()
-    free, total = torch.cuda.mem_get_info()
-    print(f"{torch.cuda.get_device_name()}: {free / 2**20:.0f} of {total / 2**20:.0f} MB free")
-    runs = [(m, "cuda", d) for m in args.models for d in ("fp32", "fp16")]
+    if not views:
+        raise SystemExit(f"no phone views check_2*_phone_view_*.png in {RENDERS_DIR}")
+    cuda = torch.cuda.is_available()
+    if cuda:
+        free, total = torch.cuda.mem_get_info()
+        print(f"{torch.cuda.get_device_name()}: {free / 2**20:.0f} of {total / 2**20:.0f} MB free")
+    elif not args.cpu:
+        raise SystemExit("no CUDA device: run with --cpu for the CPU timing of the tiny model")
+    else:
+        free = None
+        print("no CUDA device: CPU run only")
+    runs = [(m, "cuda", d) for m in args.models for d in ("fp32", "fp16")] if cuda else []
     if args.cpu:
         runs.append(("tiny", "cpu", "fp32"))
 
@@ -228,7 +241,7 @@ def main():
             torch.cuda.empty_cache()
             print(f"{model} {dtype}: out of GPU memory")
             continue
-        row["gpu_free_mb_before"] = round(free / 2**20)
+        row["gpu_free_mb_before"] = round(free / 2**20) if free is not None else ""
         rows.append(row)
         all_masks[model, device, dtype] = masks
         save_sheet(f"{model}_{device}_{dtype}", views, masks, scores)
@@ -241,7 +254,9 @@ def main():
             row[f"iou_{prompt}"] = round(float(np.mean(
                 [iou(masks[view, prompt], reference[view, prompt]) for view in views]
             )), 3) if reference else ""
-    with open(OUTPUT_CSV, "w", newline="") as f:
+    if not rows:
+        raise SystemExit("no model ran: nothing written")
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(max(rows, key=len)))
         writer.writeheader()
         writer.writerows(rows)

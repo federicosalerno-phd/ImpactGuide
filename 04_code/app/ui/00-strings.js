@@ -1,23 +1,26 @@
-// ImpactGuide · the words. Loads first: every other part asks it for a string.
+// ImpactGuide · the words. Every other part asks them for a string.
 // A plain script, not a module: the parts share one global scope.
 //
 // ui/strings/en.json is the reference; it, fr, es, de and zh are its translations,
 // with the same keys and the same {0}, {1}... A key says where the string is
 // (`cal.board.action`), not what it says. A key missing in a language falls back
-// to English, and a key missing everywhere shows itself.
-// {0}, {1}... are the arguments of T().
+// to English; a key missing everywhere gives an empty string (and a warning in the
+// console), never the key itself on screen. {0}, {1}... are the arguments of T().
+'use strict';
 
 const STRINGS = {};
 let LANG = 'en';
 // How each language writes numbers and dates.
 const LOCALES = { en: 'en-GB', it: 'it-IT', fr: 'fr-FR', es: 'es-ES', de: 'de-DE', zh: 'zh-CN' };
+const MISSING_SAID = {};     // the keys already reported missing, said once each
 function locale() { return LOCALES[LANG] || 'en-GB'; }
 
+/** Reads ui/strings/<lang>.json once (a few kB beside the page). */
 function loadLang(lang) {
   if (STRINGS[lang]) return true;
   try {
     const x = new XMLHttpRequest();
-    x.open('GET', 'ui/strings/' + lang + '.json', false);  // a few kB beside the page, read once
+    x.open('GET', 'ui/strings/' + lang + '.json', false);
     x.send();
     STRINGS[lang] = JSON.parse(x.responseText);
     return true;
@@ -31,10 +34,14 @@ function hasT(key) {
   return (STRINGS[LANG] && STRINGS[LANG][key] !== undefined) || (STRINGS.en && STRINGS.en[key] !== undefined);
 }
 
+/** The string of a key in the language in use, {0}, {1}... replaced by the arguments that follow the key. */
 function T(key) {
   let s = STRINGS[LANG] ? STRINGS[LANG][key] : undefined;
   if (s === undefined) s = STRINGS.en ? STRINGS.en[key] : undefined;
-  if (s === undefined) return key;
+  if (s === undefined) {
+    if (!MISSING_SAID[key]) { MISSING_SAID[key] = true; console.warn('no string for ' + key); }
+    return '';
+  }
   const a = arguments;
   return String(s).replace(/\{(\d+)\}/g, function (m, i) {
     const v = a[(+i) + 1];
@@ -42,22 +49,13 @@ function T(key) {
   });
 }
 
-// A number as the language writes it, with n decimals.
-function cifre(v, n) {
-  const x = Number(v);
-  if (!isFinite(x)) return String(v);
-  return x.toLocaleString(locale(),
-                          { minimumFractionDigits: n || 0, maximumFractionDigits: n || 0, useGrouping: false });
-}
-
-// A time stamp of the log (ISO 8601) as hours and minutes, with the day if it is not today.
-function quando(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d)) return iso;
-  const today = new Date().toDateString() === d.toDateString();
-  const hm = d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
-  return today ? hm : d.toLocaleDateString(locale(), { day: 'numeric', month: 'short' }) + ' ' + hm;
+/**
+ * The string of a code under a prefix (`link.state.` + `ready`), or of the fallback code when the code has none:
+ * a code the backend learns later never reaches the screen as a key. Arguments after the fallback go to T().
+ */
+function Tcode(prefix, code, fallback) {
+  const key = prefix + (code !== undefined && code !== null && code !== '' && hasT(prefix + code) ? code : fallback);
+  return T.apply(null, [key].concat(Array.prototype.slice.call(arguments, 3)));
 }
 
 function setLang(lang) {

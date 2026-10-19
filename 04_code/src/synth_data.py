@@ -1,24 +1,26 @@
-"""Reader, augmentations and checks of the digital twin dataset written by synth_twin.py (T13.1, module 3a).
+"""Reader, augmentations and checks of the digital twin dataset written by synth_twin.py.
 
     python 04_code/src/synth_data.py index  [--root DIR]
         OUT/index.csv: one row per image (session, split, face, interface, state, view, mode, motion, deformation,
         head spheres shown or not, pixel counts); OUT/index.json: counts, splits, faces, distributions of displacements
         and deformations, render time. Sessions 900 and above (check set) are left out.
     python 04_code/src/synth_data.py check  [--root DIR] [--sessions s0900] [--renderer numpy|gl|both]
-        renderer of module 1 (mesh_overlay.py, and gl_overlay.py) against the exact masks of Blender: the decimated face
+        renderer of the face (mesh_overlay.py, and gl_overlay.py) against the exact masks of Blender: the decimated face
         rendered at the true pose T_C_B against <image>_model.png (undeformed face alone, same camera); IoU, outline
         distance in px and mm, time of a ~200 mm crop at 256 x 256 (with edges, and for gl also mask and buffer
         only) and of the whole image. Writes
         05_results/twin_overlay.csv (one row per renderer) and OUT/check_overlay.csv (one row per image).
 
 Library: sessions(root), frames(session_dir), load(session_dir, frame) -> dict with rgb (BGR uint8), labels (uint8),
-masks (face, marker, drape: bool), depth (mm, NaN where nothing is hit) and the poses as arrays; augment(img, rng) for
-the photometric augmentations of module 3 (exposure and white balance, defocus and motion blur up to 3 px, noise,
-JPEG); crop_K(K, centre, side_px, out_px) for the ~200 mm crops.
+masks (face, marker, drape: bool), depth (mm, NaN where nothing is hit) and the poses as arrays (head frame B:
+coordinates of the bench scene); augment(img, rng) for the photometric augmentations of the dataset (exposure and
+white balance, defocus and motion blur up to 3 px, noise, JPEG); crop_K(K, centre, side_px, out_px) for the ~200 mm
+crops.
 """
 import argparse
 import csv
 import json
+import os
 import statistics
 import sys
 import time
@@ -29,11 +31,11 @@ import numpy as np
 
 SRC = Path(__file__).resolve().parent
 ROOT = SRC.parents[1]
-OUT = Path(r"C:\work\marker-impact\synth")
+OUT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "synth"
 RESULTS = ROOT / "05_results"
 LABELS = {"background": 0, "face": 1, "marker": 2, "drape": 3, "interface": 4, "head_spheres": 5, "head": 6,
           "pendulum": 7, "bench": 8, "cap": 9}
-CROP_MM = 200.0          # side of the crop on the face (ai_design.md, T12.0 proposals)
+CROP_MM = 200.0          # side of the crop on the face
 CROP_PX = 256
 CHECK_FROM = 900         # sessions from here on are the check set of the renderer, left out of the index
 
@@ -64,7 +66,7 @@ def load(session_dir, frame):
 
 
 def augment(img, rng, max_blur_px=3.0):
-    """Photometric augmentation of a BGR uint8 image (module 3): exposure, white balance, defocus or motion blur,
+    """Photometric augmentation of a BGR uint8 image: exposure, white balance, defocus or motion blur,
     sensor noise, JPEG. Geometry is untouched, so masks and poses stay valid."""
     x = img.astype(np.float32) / 255.0
     x = np.clip(x ** rng.uniform(0.8, 1.25) * rng.uniform(0.7, 1.3) * rng.uniform(0.92, 1.08, 3), 0, 1)
@@ -115,7 +117,7 @@ def cmd_index(args):
         if int(sd.name[1:]) >= CHECK_FROM:
             continue
         for f in frames(sd):
-            shown = f.get("head_spheres", True)        # frames written before T13.2 always showed them
+            shown = f.get("head_spheres", True)        # frames written before the choice existed always showed them
             rows.append({"session": f["session"], "split": f["split"], "face": f["face"], "interface": f["interface"],
                          "image": f"{sd.name}/{f['image']}", "registration": f["registration"], "state": f["state"],
                          "view": f["view"], "mode": f["mode"], "motion": f["motion"]["kind"],
@@ -161,10 +163,14 @@ def cmd_index(args):
                         "scale_mm": spread([f["deformation"]["scale_mm"] for f in st])},
         "face_pixels_photo": spread([r["px_face"] for r in rows if r["mode"] == "photo"]),
         "ms_per_image": {k: round(statistics.mean(m[k] for m in ms), 1) for k in ("rgb", "label")},
+        # a marker that moves gives as many poses as samples; a single pose means the marker never moved
+        "distinct_marker_poses": {i: {k: len({tuple(np.round(np.array(f[k]).ravel(), 2)) for f in st
+                                              if f["interface"] == i}) for k in ("T_M_B0", "T_M_B")}
+                                  for i in sorted({f["interface"] for f in st})},
     }
     (root / "index.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print(json.dumps({k: summary[k] for k in ("sessions", "samples", "images", "registrations", "splits", "faces",
-                                              "head_spheres")}))
+                                              "head_spheres", "distinct_marker_poses")}))
 
 
 def outline_distance(a, b):
@@ -210,6 +216,8 @@ def cmd_check(args):
             if not model.exists():
                 continue
             ref = cv2.imread(str(model), cv2.IMREAD_GRAYSCALE) == LABELS["face"]
+            if not ref.any():           # the face is out of this view: nothing to compare
+                continue
             K, T, size = np.array(fr["K"]), np.array(fr["T_C_B"]), tuple(fr["size"])
             depth = float(np.median((v @ T[:3, :3].T + T[:3, 3])[:, 2]))
             mm_per_px = depth / K[0, 0]

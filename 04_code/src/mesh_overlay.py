@@ -1,11 +1,17 @@
-"""Silhouette and edges of a mesh seen by a calibrated camera, for the AR overlay of the mandible (T5.4).
+"""Silhouette and edges of a mesh seen by a calibrated camera, for the AR overlay of the mandible.
 
 NumPy and OpenCV only. Vertices are projected with cv2.projectPoints (lens distortion included) and the triangles are
 painted far to near with their index (painter's algorithm, exact for small triangles that do not intersect): this gives
 the silhouette and a visibility buffer. Edges: mesh edges between a triangle facing the camera and one facing away
 (occluding contours, the outline included), creases (dihedral angle above crease_deg) and open borders, kept where the
-visibility buffer shows them. The mesh must be consistently wound (checked at construction).
+visibility buffer shows them. The mesh must be consistently wound (checked at construction). A mesh that falls
+outside the image or behind the camera gives an empty render (no silhouette, no edges), never an error.
+
+    python mesh_overlay.py test     the renderer on and off the image; exit 1 on failure
 """
+from __future__ import annotations
+
+import sys
 import time
 from dataclasses import dataclass
 
@@ -68,7 +74,10 @@ class MeshRenderer:
         p = uv[self.f[idx]]
         x0, y0 = np.clip(np.floor(p.reshape(-1, 2).min(0)).astype(int) - 2, 0, (w, h))
         x1, y1 = np.clip(np.ceil(p.reshape(-1, 2).max(0)).astype(int) + 3, 0, (w, h))
-        buf = np.full((max(y1 - y0, 0), max(x1 - x0, 0)), -1, np.int32)
+        if x1 <= x0 or y1 <= y0:      # in front of the camera but outside the image: nothing to draw
+            return Render(mask, np.full((0, 0), -1, np.int32), (int(x0), int(y0)), np.empty((0, 2, 2)),
+                          np.empty(0, np.int64), (time.perf_counter() - t0) * 1e3)
+        buf = np.full((y1 - y0, x1 - x0), -1, np.int32)
         pts = np.round((p - (x0, y0)) * (1 << SHIFT)).astype(np.int32)
         zf = xc[self.f[idx], 2].mean(1)
         for i in np.argsort(-zf, kind="stable"):   # far to near
@@ -123,3 +132,58 @@ def overlay(image, render, color=(90, 220, 60), fill_alpha=0.3, thickness=None):
     out[m] = (out[m] * (1 - fill_alpha) + np.array(color) * fill_alpha).astype(np.uint8)
     thickness = thickness or max(1, round(out.shape[1] / 1000))
     return draw_segments(out, render.segments, color, thickness)
+
+
+# ── checks ───────────────────────────────────────────────────────────────────
+def check_cube(side_mm=40.0):
+    """(vertices, faces) of a cube centred on the origin, wound outwards: the mesh of the renderers' checks."""
+    h = side_mm / 2
+    v = np.array([[x, y, z] for x in (-h, h) for y in (-h, h) for z in (-h, h)], np.float64)
+    quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    f = np.array([t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))], np.int64)
+    return v, f
+
+
+def check_poses(distance_mm=300.0):
+    """{name: T} of the cube in front of the camera, across the image edge, beside the image and behind the camera."""
+    def at(x, y, z):
+        T = np.eye(4)
+        T[:3, 3] = (x, y, z)
+        return T
+    return {"inside": at(0, 0, distance_mm), "across the left edge": at(-170, 0, distance_mm),
+            "left of the image": at(-2000, 0, distance_mm), "below the image": at(0, 2000, distance_mm),
+            "behind the camera": at(0, 0, -distance_mm)}
+
+
+def run_test(renderer=MeshRenderer, name="mesh_overlay"):
+    """The renderer on a cube inside the image, across its edge, outside it and behind the camera: a silhouette where
+    the cube is seen, an empty render (and no error) where it is not."""
+    fails = []
+
+    def expect(ok, what):
+        print(("ok    " if ok else "FAIL  ") + what, flush=True)
+        if not ok:
+            fails.append(what)
+
+    v, f = check_cube()
+    ren = renderer(v, f)
+    K = np.array([[600.0, 0, 319.5], [0, 600.0, 239.5], [0, 0, 1]])
+    size = (640, 480)
+    for where, T in check_poses().items():
+        try:
+            r = ren.render(K, None, T, size)
+        except (IndexError, ValueError, cv2.error) as e:
+            expect(False, f"{name}: cube {where}: {type(e).__name__}: {e}")
+            continue
+        covered = int(np.count_nonzero(r.mask))
+        seen = where in ("inside", "across the left edge")
+        expect((covered > 0) == seen and r.mask.shape == (480, 640) and (len(r.segments) > 0) == seen,
+               f"{name}: cube {where}: {covered} px covered, {len(r.segments)} edges")
+    print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["test"]:
+        sys.exit(run_test())
+    sys.exit(__doc__)

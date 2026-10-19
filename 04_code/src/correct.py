@@ -1,12 +1,12 @@
-"""Correction of the registration from the outlines of the observed anatomy, with its uncertainty (T14.2, module 5 of
-ai_design.md).
+"""Correction of the registration from the outlines of the observed anatomy, with its uncertainty.
 
-Object agnostic. Input: a renderer of the anatomy in its model frame B with the interface of mesh_overlay.MeshRenderer
-(render(K, dist, T, size) giving the silhouette mask, the visibility buffer of triangle indices and its offset; vertices
-v and faces f), the registration before the impact T_M_B0 and, per view, the observed binary mask (SAM), the intrinsics
-and the marker pose T_C_M. Poses are 4 x 4 in mm as in marker_pose.py; the AR draws the model with T_C_M . T_M_B.
+Object agnostic. Input: a renderer of the anatomy in the head frame B (the frame its vertices are given in: for the
+bench, the coordinates of the bench scene) with the interface of mesh_overlay.MeshRenderer (render(K, dist, T, size)
+giving the silhouette mask, the visibility buffer of triangle indices and its offset; vertices v and faces f), the
+registration before the impact T_M_B0 and, per view, the observed binary mask (SAM), the intrinsics and the marker pose
+T_C_M. Poses are 4 x 4 in mm as in marker_pose.py; the AR draws the model with T_C_M . T_M_B.
 
-Model of the impact: T_M_B = T_M_B0 . dT, dT in the frame B (ai_design.md, Notazione):
+Model of the impact: T_M_B = T_M_B0 . dT, dT in the frame B:
 - "a1": rotation about the ball centre c (B frame), X' = R (X - c) + c, 3 parameters;
 - "rigid": X' = R (X - o) + o + s about the model centroid o, 6 parameters.
 The state (R, s) is updated on the manifold: R <- exp(d_r) R, s <- s + d_t.
@@ -24,7 +24,7 @@ misalignment score (score.py, the one used for the decision) go on to convergenc
 
 Uncertainty (Laplace): cov = kappa sigma^2 (J^T W J)^-1 at the solution, sigma^2 from the weighted residuals; propagated
 to the targets (B frame) as predicted TRE, mean and 95th percentile of the mean target error over draws from N(0, cov).
-kappa is calibrated on validation (T15.3); with kappa = 1 the residuals, sampled every STEP_PX px, count as independent.
+kappa is calibrated on validation data; with kappa = 1 the residuals, sampled every STEP_PX px, count as independent.
 Decision: the correction is applied when the final score is at most tau and the predicted 95% TRE is below u
 (conformal.py); otherwise warning, and the AR keeps the old registration flagged as unreliable.
 """

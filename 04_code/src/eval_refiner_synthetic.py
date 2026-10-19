@@ -1,23 +1,25 @@
-"""Optimisation only, network only and network then optimisation on the test split of the digital twin (T14.4).
+"""Optimisation only, network only and network then optimisation on the test split of the digital twin.
 
-Test split of T13.2 (6 sessions, 72 samples, never seen in training or early stopping). Per sample the 4 photos at
-half resolution (2040 x 1536) with their marker pose T_C_M and the true registration T_M_B; observed masks: the SAM 2
-masks of refiner.py prepare without the known covers and occluders, which (dilated) are the ignore mask of correct.py.
-Perturbations as in T14.2 (eval_correction_synthetic.perturbation): "a1" rotation about the ball centre up to 5 deg,
+Test split of the twin dataset (6 sessions, 72 samples, never seen in training or early stopping). Per sample the 4
+photos at half resolution (2040 x 1536) with their marker pose T_C_M and the true registration T_M_B (head frame B:
+coordinates of the bench scene); observed masks: the SAM 2 masks of refiner.py prepare without the known covers and
+occluders, which (dilated) are the ignore mask of correct.py.
+Perturbations as in eval_correction_synthetic.py (its perturbation()): "a1" rotation about the ball centre up to 5 deg,
 "rigid" rotation about the face centroid up to 5 deg plus translation up to 5 mm; stale registration T_M_B0 = T_M_B . P;
-PERTURBATIONS per sample and kind. View sets as in T14.2: 1 view (a random photo), 2 views (p1+p3 or p2+p4), 4 views.
+PERTURBATIONS per sample and kind. View sets as in eval_correction_synthetic.py: 1 view (a random photo), 2 views
+(p1+p3 or p2+p4), 4 views.
 Methods on the same views, masks and perturbations:
-- opt: correct.correct from T_M_B0, multi-start (zero plus +-2.5 deg about the axes), as T14.2;
+- opt: correct.correct from T_M_B0, multi-start (zero plus +-2.5 deg about the axes), as eval_correction_synthetic.py;
 - net: refiner.Refiner.refine, ITERS iterations with a new render each;
 - net_opt: the network, then refiner.optimize from its output (one start);
 - net_prior: the same with the network's prediction as a Gaussian prior on the update, its predicted standard
   deviations scaled per mode on the validation split (sigma_scale) (extra).
 Renderer: gl_overlay.py on the decimated face for both (masks and visibility buffers only for the optimisation).
-TRE: mean error at the 7 clinical targets of T1.3. Time per correction: one at a time in this process, GPU for the
-renders and the network, CPU for the rest.
+TRE: mean error at the 7 clinical targets (role "proposed"). Time per correction: one at a time in this process, GPU
+for the renders and the network, CPU for the rest.
 
 Writes
-- C:\\work\\marker-impact\\refiner\\eval_samples.csv: one row per sample, kind, perturbation, view set and method;
+- refiner.WORK/eval_samples.csv: one row per sample, kind, perturbation, view set and method;
 - 05_results/correction_network_synthetic.csv: per kind, view set and method: TRE before and after (median, 95th
   percentile, maximum), share below 1 and 2 mm, time (median, 95th percentile); for net the coverage of its predicted
   variance (share of parameters within 1.96 sigma, raw and scaled); for the others the paired comparison with opt

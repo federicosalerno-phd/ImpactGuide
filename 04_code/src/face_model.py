@@ -1,5 +1,5 @@
-"""Face shapes and skin deformations of the digital twin (T13.1, module 3a of ai_design.md). NumPy only: it runs inside
-Blender (synth_twin.py) and outside.
+"""Face shapes and skin deformations of the digital twin. NumPy only: it runs inside Blender (synth_twin.py) and
+outside.
 
 Face bank. A face identity is the phantom face (`silicone_face` of the bench scene) plus a displacement of its vertices,
 so mouth on the splint, cut of the mask and seat on the skull stay where they are and only the shape changes:
@@ -8,8 +8,8 @@ so mouth on the splint, cut of the mask and seat on the skull stay where they ar
         vertex_count   N, checked against the scene mesh (a remodelled face invalidates the bank)
         split          "train", "val" or "test" (identities never cross splits)
         source         free text, e.g. the model and its coefficients
-The phantom itself ("phantom") has no file. Faces of the parametric model (FLAME 2023 Open, ai_design.md) enter the
-dataset by writing files of this form with save_face(); the generator needs nothing else.
+The phantom itself ("phantom") has no file. Faces of a parametric model (FLAME 2023 Open) enter the dataset by
+writing files of this form with save_face(); the generator needs nothing else.
 
 Skin deformation. A smooth random field along the vertex normals: a Gaussian process with squared exponential kernel
 approximated by random Fourier features (length scale 20-40 mm), scaled so that its largest value on the weighted
@@ -66,16 +66,33 @@ def deformation(points, normals, w, rng, amp_mm=None, scale_mm=None):
     return (f[:, None] * normals).astype(np.float32), {"amp_mm": round(float(amp), 3), "scale_mm": round(float(scale), 2)}
 
 
+SPLITS = ("train", "val", "test")
+
+
 def save_face(folder, face_id, displacement, split, source):
+    """Write one face of the bank (see the module docstring).
+
+    Raises:
+        ValueError: split is not one of SPLITS, or the displacement is not N x 3.
+    """
+    if split not in SPLITS:
+        raise ValueError(f"split {split!r}: one of {SPLITS}")
+    displacement = np.asarray(displacement, np.float32)
+    if displacement.ndim != 2 or displacement.shape[1] != 3:
+        raise ValueError(f"displacement of shape {displacement.shape}: N x 3 expected")
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    assert split in ("train", "val", "test")
-    np.savez_compressed(folder / f"{face_id}.npz", displacement=np.asarray(displacement, np.float32),
-                        vertex_count=len(displacement), split=split, source=source)
+    np.savez_compressed(folder / f"{face_id}.npz", displacement=displacement, vertex_count=len(displacement),
+                        split=split, source=source)
 
 
 def load_bank(folder, vertex_count):
-    """Faces of the bank that fit the current phantom mesh: {face_id: {"displacement", "split", "source"}}."""
+    """Faces of the bank, {face_id: {"displacement", "split", "source"}}; an empty bank when the folder has none.
+
+    Raises:
+        ValueError: a face was made for another vertex count (a remodelled phantom invalidates the whole bank, which
+            is never filtered silently: it would change the faces of the sessions).
+    """
     bank = {}
     for p in sorted(Path(folder).glob("*.npz")):
         z = np.load(p)

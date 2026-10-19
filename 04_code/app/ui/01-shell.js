@@ -1,12 +1,14 @@
 // ImpactGuide · the shell: home and the modules, the rail of the module open,
-// the views on the stage, the panels, the Advanced parts, the status pill, the
-// toast and the wait. A plain script sharing one global scope.
+// the views on the stage, the panels, the Advanced parts, the sentences of a
+// failure, the status pill, the toast and the wait. A plain script sharing one
+// global scope.
 //
-// As UniGuide (ui/19-ingresso.js, ui/20-boot.js): the app opens at home, four
-// large choices and no rail; each choice is a MODULE that opens its own view,
-// with its own steps on the rail and a panel for each step; the mark on the
-// band always leads home. What a module is, is said once, here (MODULES): its
-// steps in the order of the work and the step it opens at.
+// The app opens at home, four large choices and no rail; each choice is a
+// MODULE that opens its own view, with its own steps on the rail and a panel
+// for each step; the mark on the band always leads home. What a module is, is
+// said once, here (MODULES): its steps in the order of the work and the step it
+// opens at.
+'use strict';
 
 const MODULES = {
   calibration: { steps: ['board', 'photos', 'result'], start: 'board' },
@@ -14,7 +16,6 @@ const MODULES = {
   trials: { steps: ['guide', 'log', 'sequence', 'config'], start: 'guide' },
   results: { steps: ['scans', 'analysis', 'charts', 'dataset'], start: 'scans' },
 };
-const PAGES = Object.keys(MODULES);
 // The word of each step on the rail (its key in ui/strings).
 const STEP_WORD = {
   calibration: { board: 'cal.step.board', photos: 'cal.step.photos', result: 'cal.step.result' },
@@ -24,6 +25,12 @@ const STEP_WORD = {
   results: { scans: 'page.scans.title', analysis: 'page.analysis.title', charts: 'page.charts.title',
              dataset: 'page.dataset.title' },
 };
+
+const TOAST_MS = 2600;          // a toast that says something went as asked
+const TOAST_SAID_MS = 3500;     // one that says what happened by itself (a trial closed, the phone on Wi-Fi)
+const TOAST_ERROR_MS = 4200;    // one that says why something did not work
+const TOAST_LONG_MS = 6000;     // one with something to do (the live view did not start, a pairing failed)
+const ARMED_MS = 4000;          // how long a button that cannot be taken back waits for its second press
 
 // The signs this application adds to SlantUI's set, on the same 24 grid.
 ICONS.camera = { s: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9'
@@ -54,24 +61,6 @@ let page = 'home';          // the module open, or home
 let trialsView = 'guide';   // the step open in Trials (ui/20-trials.js)
 const STEP = { calibration: 'board', live: 'view', results: 'scans' };   // and in the others
 
-function $(id) { return document.getElementById(id); }
-
-// An element with a class and a text; never markup from data.
-function E(tag, cls, text) {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined && text !== null) el.textContent = String(text);
-  return el;
-}
-
-function piRow(label, value, cls) {
-  const r = E('div', 'pi-row' + (cls ? ' ' + cls : ''));
-  r.append(E('span', 'pi-l', label), E('span', null, value));
-  return r;
-}
-
-function chip(text, kind) { return E('span', 'chip' + (kind ? ' chip-' + kind : ''), text); }
-
 // The signs in the markup: a [data-icon] span becomes the <svg> itself, so the
 // button centres sign and word by their ink; a window button gets it inside.
 function placeIcons(root) {
@@ -79,7 +68,7 @@ function placeIcons(root) {
     const name = el.getAttribute('data-icon');
     if (el.tagName === 'SPAN') {
       const holder = document.createElement('span');
-      holder.innerHTML = icon(name);
+      holder.innerHTML = icon(name);      // SlantUI's own sign, made by the app: no data in it
       const svg = holder.firstElementChild;
       if (!svg) return;
       if (el.previousElementSibling) svg.classList.add('r');
@@ -100,39 +89,96 @@ function closeFolds(root) {
   (root || document).querySelectorAll('.fold.open').forEach(function (f) { setFold(f, false); });
 }
 
-// ── the answers of the backend ─────────────────────────────────────────────
-// Every slot answers JSON; a failure carries `error`, a cause the page names.
-// A cause of the link to the phone (phone_link.py) has its own plain words and
-// never shows adb's text.
-// What the operator reads is always a sentence of the app: a detail from the backend is kept only
-// when it is short and plain (a file or a trial name), never an exception or a log line.
-function plainDetail(m) {
-  m = String(m || '').trim();
-  if (!m || m.length > 48 || /[|\n\r{}<>]|exception|error|java|android|traceback|adb|server|socket|\bat\s/i.test(m)) return '';
-  return m;
-}
-function sayError(code, message) {
-  if (message) console.warn('error', code, message);
-  const d = plainDetail(message);
-  if (hasT('err.' + code)) return d ? T('err.' + code, d) : T('err.' + code, '').replace(/[\s:]+$/, '');
-  if (hasT('link.cause.' + code)) return T('link.cause.' + code);
-  return T('err.generic.plain');
+// ── the sentences of a failure ─────────────────────────────────────────────
+// A failure from the backend carries a code (`error`; `cause` for the link to the phone), maybe its values
+// (`args`) and a short detail (`message`). The operator always reads a sentence of the app in his language: the
+// code's own (err.*, link.cause.*, or a part's own prefix such as board.err.*), else the generic one. Only a
+// value of a known kind reaches the screen beside it (a file or trial name, a field, a step, a camera mode, a count,
+// a size, a number), read from its values (`args`, or `params` as the library names them) or, for the first one,
+// from `message` when that is a single plain word; any other text (an exception, adb's output, a path, a sentence)
+// stays in the console.
+// code: the values its sentence shows, in the order of {0}, {1}: [kind, the names the value may have]
+const ERROR_DETAIL = {
+  missing_file: [['names', 'files', 'file']], trial_open: [['name', 'trial']], exists: [['name', 'file', 'trial']],
+  not_found: [['name', 'file']], bad_registration: [['name', 'file']], no_intrinsics: [['mode', 'mode']],
+  bad_value: [['field', 'field']], bad_field: [['field', 'field']], ruler_bad: [['number', 'value', 'mm']],
+  config_corrupt: [['name', 'file']], unknown_trial: [['name', 'trial']], unknown_step: [['step', 'step']],
+  cannot_close: [['problems', 'problems']], not_open: [['name', 'trial']], no_step: [['step', 'step']],
+  trial_changed: [['name', 'trial']],
+  few_photos: [['count', 'n'], ['count', 'need']], intrinsics_size: [['size', 'got'], ['size', 'want']],
+};
+const PLAIN_NAME = /^\w[\w .,()+-]{0,63}$/;     // a name the backend gives as a value
+const PLAIN_WORD = /^\w[\w.()+-]{0,63}$/;       // a name read from `message`: one word, never a sentence
+const DETAIL_LIST_MAX = 3;                       // names or problems shown in a list, at most
+
+/** One value of a failure in the language's words, or '' when it is not of its kind. */
+function detailValue(kind, v, fromMessage) {
+  if (v === undefined || v === null || v === '') return '';
+  if (kind === 'names' || kind === 'problems') {
+    const all = Array.isArray(v) ? v : kind === 'names' ? String(v).split(/,\s*/) : [];
+    const one = function (x) { return kind === 'names' ? detailValue('name', x, fromMessage) : TRIALS.checkProblem(x); };
+    const out = all.slice(0, DETAIL_LIST_MAX).map(one);
+    if (!out.length || out.some(function (x) { return !x; })) return '';
+    return out.join(kind === 'names' ? ', ' : '; ') + (all.length > DETAIL_LIST_MAX ? ' …' : '');
+  }
+  if (kind === 'size') return Array.isArray(v) && v.length === 2 && v.every(isFinite) ? fmtNum(v[0], 0) + ' × ' + fmtNum(v[1], 0) : '';
+  const s = String(v).trim();
+  if (kind === 'name') { const b = s.split(/[\\/]/).pop(); return (fromMessage ? PLAIN_WORD : PLAIN_NAME).test(b) ? b : ''; }
+  if (kind === 'mode') return hasT('cal.mode.' + s) ? T('cal.mode.' + s) : '';
+  if (kind === 'field') return hasT('col.' + s) ? T('col.' + s) : '';
+  if (kind === 'step') return /^\w+$/.test(s) && hasT('step.' + TRIALS.base(s) + '.title') ? TRIALS.stepTitle({ key: s }) : '';
+  if (kind === 'count') return /^\d+$/.test(s) ? fmtNum(s, 0) : '';
+  const m = /^-?\d+(?:[.,](\d+))?$/.exec(s);
+  return m ? fmtNum(s.replace(',', '.'), m[1] ? m[1].length : 0) : '';
 }
 
+/** The values a failure shows beside its sentence, in the order of its placeholders ('' for one it lacks). */
+function errorDetails(code, args, message) {
+  return (ERROR_DETAIL[code] || []).map(function (spec, i) {
+    const k = args && typeof args === 'object'
+      ? spec.slice(1).find(function (x) { return args[x] !== undefined && args[x] !== null; }) : undefined;
+    if (k) return detailValue(spec[0], args[k], false);
+    return i === 0 ? detailValue(spec[0], message, true) : '';
+  });
+}
+
+/**
+ * A sentence with its {0}, {1} filled; a value it lacks is left out with its colon when it ends the sentence, and
+ * the generic sentence is said when it is needed in the middle.
+ */
+function fillDetail(key, values) {
+  const marks = ['\u0000', '\u0001', '\u0002'];
+  let s = T.apply(null, [key].concat(marks));
+  for (let i = 0; i < marks.length; i++) {
+    const at = s.indexOf(marks[i]);
+    if (at < 0) continue;
+    if (values[i]) { s = s.split(marks[i]).join(values[i]); continue; }
+    if (s.slice(at + 1).trim()) return T('err.generic.plain');
+    s = s.slice(0, at).replace(/[\s:：,，(（]+$/, '');
+  }
+  return s;
+}
+
+/** The sentence of a code: the part's own (prefix), the app's (err.), the link's (link.cause.), else the generic. */
+function sayError(code, args, message, prefix) {
+  if (message) console.warn('failure', code, message);
+  const key = [prefix ? prefix + code : '', 'err.' + code, 'link.cause.' + code]
+    .find(function (k) { return k && hasT(k); });
+  return key ? fillDetail(key, errorDetails(code, args, message)) : T('err.generic.plain');
+}
+
+/** The sentence of a failed answer or of an event that says a failure. */
+function errorText(a, prefix) {
+  if (!a) return T('err.generic.plain');
+  if (a.cause && hasT('link.cause.' + a.cause)) return T('link.cause.' + a.cause);
+  return sayError(String(a.error || a.code || a.cause || 'internal'), a.args || a.params, a.message, prefix);
+}
+
+/** Says a failed answer in a toast; false when the answer is not a failure. */
 function failed(a) {
   if (!a || !a.error) return false;
-  toast(a.cause && hasT('link.cause.' + a.cause) ? T('link.cause.' + a.cause) : sayError(a.error, a.message), 4200);
+  toast(errorText(a), TOAST_ERROR_MS);
   return true;
-}
-
-function ask(slot) {
-  // ask(slot, args..., fn): the answer parsed, failures said once here
-  const args = Array.prototype.slice.call(arguments, 1);
-  const fn = typeof args[args.length - 1] === 'function' ? args.pop() : null;
-  beJson.apply(null, [slot].concat(args, [function (a) {
-    if (failed(a)) { if (fn) fn(null, a); return; }
-    if (fn) fn(a);
-  }]));
 }
 
 // ── the pill, the toast, the wait ──────────────────────────────────────────
@@ -144,7 +190,7 @@ function toast(text, ms) {
   el.textContent = text;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(function () { el.classList.remove('show'); }, ms || 2600);
+  toastTimer = setTimeout(function () { el.classList.remove('show'); }, ms || TOAST_MS);
 }
 
 function setStatus(kind, text) {
@@ -154,20 +200,37 @@ function setStatus(kind, text) {
 }
 
 let PHONE = { ok: false, cause: 'unknown', link: 'usb' };
-let working = 0;
+
+// What the app is doing for the operator, by what started it ('cal_photo', 'calib', 'live'...), each with the key
+// of its word: the pill says the newest one, in the language in use. Each is ended by the event that closes it;
+// ending one that is not on is harmless.
+const WORK = new Map();
+function workOn(key, word) {
+  WORK.delete(key);
+  WORK.set(key, word || 'pill.working');
+  showWork();
+}
+function workOff(key) {
+  if (WORK.delete(key)) showWork();
+}
+/** Everything ended at once: the backend said that something failed without saying which work. */
+function workClear() {
+  WORK.clear();
+  showWork();
+}
+function showWork() {
+  if (!WORK.size) { showPhone(); return; }
+  setStatus('busy', T(Array.from(WORK.values()).pop()));
+}
+
 // The pill says whether the phone is there; the button beside it says how.
 function showPhone() {
   if (typeof HOME !== 'undefined') HOME.phone();
   if (typeof LINK !== 'undefined') LINK.btn();
-  if (working) return;
+  if (WORK.size) return;
   if (PHONE.ok) setStatus('ok', T('pill.phone.ok'));
   else setStatus(PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
-                 T('pill.phone.' + (hasT('pill.phone.' + PHONE.cause) ? PHONE.cause : 'none')));
-}
-function work(on, text) {
-  working = Math.max(0, working + (on ? 1 : -1));
-  if (working) setStatus('busy', text || T('pill.working'));
-  else showPhone();
+                 Tcode('pill.phone.', PHONE.cause, 'none'));
 }
 
 function busy(on, text) {
@@ -176,17 +239,16 @@ function busy(on, text) {
 }
 
 // A button that does something that cannot be taken back asks for a second
-// press: the first one writes what it will do on the button, for four seconds.
+// press: the first one writes what it will do on the button, for a few seconds.
 function armed(btn, text) {
+  const l = btn.querySelector('.btn-label');
   if (btn._armed) {
     clearTimeout(btn._armed);
     btn._armed = null;
     btn.classList.remove('on');
-    const l = btn.querySelector('.btn-label');
     if (l) l.textContent = btn._word;
     return true;
   }
-  const l = btn.querySelector('.btn-label');
   btn._word = l ? l.textContent : '';
   if (l) l.textContent = text;
   btn.classList.add('on');
@@ -194,8 +256,41 @@ function armed(btn, text) {
     btn._armed = null;
     btn.classList.remove('on');
     if (l) l.textContent = btn._word;
-  }, 4000);
+  }, ARMED_MS);
   return false;
+}
+
+// ── the live stream: whose it is ───────────────────────────────────────────
+// One stream serves either the Live AR view or a calibration of the streaming mode. Its events say whose it is
+// (`purpose`); an older backend leaves it out, and then the owner is the one the page last asked for (or the one
+// the last calibration state names), so that one part never stops or counts the other's stream.
+let liveOwner = 'live';
+function setLiveOwner(purpose) { liveOwner = purpose === 'calibration' ? 'calibration' : 'live'; }
+function livePurpose(e) {
+  if (e.purpose === 'calibration' || e.purpose === 'live') return e.purpose;
+  return liveOwner;
+}
+
+// The stream's codes (live_ar.ERRORS) and the sentence each one says; several share one.
+const LIVE_ERRORS = {
+  no_adb: 'link.cause.no_adb', camera_busy: 'live.err.busy', adb_failed: 'live.err.no_phone', no_phone: 'live.err.no_phone',
+  link_lost: 'live.err.link_lost', start_failed: 'live.err.start_failed', no_stream: 'live.err.start_failed',
+  no_frame: 'live.err.start_failed', stopped: 'live.err.stream_failed', server_exited: 'live.err.stream_failed',
+  stream_closed: 'live.err.stream_failed', stream_failed: 'live.err.stream_failed', stream_stopped: 'live.err.stream_failed',
+  bad_stream: 'live.err.stream_failed', stalled: 'live.err.stalled', behind: 'live.err.stalled',
+  frames_failing: 'live.err.frames_failing', replay_unreadable: 'live.err.replay_unreadable', bad_board: 'live.err.bad_board',
+  bad_value: 'live.err.bad_value', bad_registration: 'err.bad_registration', closed: 'live.err.closed',
+  intrinsics_bad: 'err.intrinsics_bad',
+};
+
+/** Why the live stream did not start or stopped, in the app's words: the link's cause, else the stream's code. */
+function liveErrorText(x) {
+  if (x.cause && hasT('link.cause.' + x.cause)) return T('link.cause.' + x.cause);
+  const code = typeof x.error === 'string' ? x.error : '';
+  if (LIVE_ERRORS[code]) return fillDetail(LIVE_ERRORS[code], []);
+  // an older backend sends the stream's own text (often a Java stack): it only chooses the sentence
+  if (/camera|in use|disconnect/i.test(String(x.message || code))) return T('live.err.busy');
+  return T(PHONE.link === 'wifi' ? 'live.err.wifi' : 'live.err.generic');
 }
 
 // ── the views, the panels ──────────────────────────────────────────────────
@@ -216,9 +311,9 @@ function showPanel(name) {
 }
 
 // ── home, the modules, the rail ────────────────────────────────────────────
-// Home is the start (Federico, 15/10 and 16/10): the app opens there and the
-// mark on the band always leads back to it, from every module and step. The
-// way back is SlantUI's: the mark becomes a button, raised and pressable.
+// Home is the start: the app opens there and the mark on the band always leads
+// back to it, from every module and step. The way back is SlantUI's: the mark
+// becomes a button, raised and pressable.
 function goHome() { go('home'); }
 function showHome() {
   setBrandAction(goHome, T('win.home.hint'));
@@ -230,6 +325,7 @@ function stepWord(p, s) { return T(STEP_WORD[p][s]); }
 // The rail: the steps of the module open, numbered, the open one lit; nothing at home.
 function rail() {
   const host = $('rail');
+  const focused = host.contains(document.activeElement);    // a step chosen with the keyboard keeps the focus
   host.replaceChildren();
   if (page === 'home' || !MODULES[page]) return;
   const now = stepOf(page);
@@ -237,9 +333,12 @@ function rail() {
     const t = E('div', 'tab' + (s === now ? ' active' : ''));
     t.dataset.step = s;
     t.title = stepWord(page, s);
+    t.tabIndex = 0;
+    t.setAttribute('role', 'button');
     t.append(E('div', 'tn', i + 1), E('span', null, stepWord(page, s)));
-    t.onclick = function () { go(page, s); };
+    onActivate(t, function () { go(page, s); });
     host.append(t);
+    if (focused && s === now) t.focus();
   });
 }
 

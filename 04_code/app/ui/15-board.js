@@ -11,15 +11,19 @@
 // monitor. Physical: the 3D-printed plate (recommended, shown in 3D by
 // ui/17-plate3d.js) or a printed A4 sheet, each measured three times with a
 // caliper; the mean and the spread are shown as the readings are typed.
+'use strict';
+
+const BOARD_LAYOUT_DELAY_MS = 60;   // a burst of size changes (a resize being dragged) asks for one layout
 
 // The sign of a monitor, on SlantUI's 24 grid.
 ICONS.screen = { s: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/>' };
 
+/** The board's controls, in Calibrate and in Live AR (ids starting with cal and lv), and the board step's stage. */
 const BOARD = {
   state: null,
   copies: ['cal', 'lv'],
 
-  mm: function (v, n) { return cifre(v, n === undefined ? 1 : n); },
+  mm: function (v, n) { return fmtNum(v, n === undefined ? 1 : n); },
   physical: function (kind) { return kind === 'plate' || kind === 'sheet'; },
   // a board in plain words: 11 × 8 · 20,00 mm
   line: function (b) { return b.squares[0] + ' × ' + b.squares[1] + ' · ' + BOARD.mm(b.square_mm, 2) + ' mm'; },
@@ -35,7 +39,7 @@ const BOARD = {
     if (!m.is_native && m.native) return T('board.warn.native', m.native[0], m.native[1]);
     if (m.source === 'none') return T('board.sure.unknown');
     if (m.source === 'edid_cm') return T('board.sure.rough');
-    if (m.agree === false && m.source !== 'ruler') return T('board.warn.disagree', cifre(100 * m.spread, 1));
+    if (m.agree === false && m.source !== 'ruler') return T('board.warn.disagree', fmtNum(100 * m.spread, 1));
     return '';
   },
 
@@ -77,8 +81,8 @@ const BOARD = {
     const lay = s.layout, m = s.mon, rows = [];
     if (lay) rows.push(piRow(T('board.f.board'), BOARD.line(lay)));
     if (m) {
-      const r = piRow(T('board.f.monitor'), (m.label || '') + (m.diag_in ? ' · ' + cifre(m.diag_in, 1) + '″' : ''));
-      r.title = m.px[0] + ' × ' + m.px[1] + ' · ' + T('board.src.' + m.source);
+      const r = piRow(T('board.f.monitor'), (m.label || '') + (m.diag_in ? ' · ' + fmtNum(m.diag_in, 1) + '″' : ''));
+      r.title = m.px[0] + ' × ' + m.px[1] + ' · ' + Tcode('board.src.', m.source, 'none');
       rows.push(r);
     }
     $(p + 'BdRows').replaceChildren.apply($(p + 'BdRows'), rows);
@@ -92,7 +96,7 @@ const BOARD = {
       if (document.activeElement !== ruler) ruler.value = '';
       ruler.disabled = !lay;
       $('calBdRulerNote').textContent = !lay || !m ? T('board.ruler.none')
-        : m.ruler ? T('board.ruler.done', quando(m.ruler.date), BOARD.mm(m.ruler.measured_mm))
+        : m.ruler ? T('board.ruler.done', fmtTime(m.ruler.date), BOARD.mm(m.ruler.measured_mm))
         : T('board.ruler.note', BOARD.mm(lay.width_mm));
       $('calBdForget').classList.toggle('hidden', !(m && m.ruler));
     }
@@ -100,8 +104,7 @@ const BOARD = {
     // physical: the readings and what they give
     const info = phys ? s.physical[kind] : null;
     if (!info) return;
-    const rd = kind === 'plate' ? info.long : info.long, nominal = kind === 'plate' ? info.measure.long.nominal_mm
-      : info.nominal_mm;
+    const rd = info.long, nominal = kind === 'plate' ? info.measure.long.nominal_mm : info.nominal_mm;
     const spec = info.spec, out = [];
     if (rd) {
       out.push(piRow(T('board.read.mean', rd.n), BOARD.mm(rd.mean_mm, 2) + ' mm'),
@@ -122,7 +125,7 @@ const BOARD = {
       $('calBdShortV').querySelectorAll('input').forEach(function (i) { i.placeholder = BOARD.mm(info.measure.short.nominal_mm, 1); });
       const sh = info.short, so = [];
       if (sh) so.push(piRow(T('board.read.mean', sh.n), BOARD.mm(sh.mean_mm, 2) + ' mm'));
-      if (spec.anisotropy !== undefined) so.push(piRow(T('board.read.xy'), cifre(100 * spec.anisotropy, 2) + ' %'));
+      if (spec.anisotropy !== undefined) so.push(piRow(T('board.read.xy'), fmtNum(100 * spec.anisotropy, 2) + ' %'));
       $('calBdShortRead').replaceChildren.apply($('calBdShortRead'), so);
     }
   },
@@ -146,17 +149,17 @@ const BOARD = {
 
   // ── the stage of the board step ───────────────────────────────────────
   stage: function (s) {
-    const ask = !s.chosen, phys = !ask && BOARD.physical(s.kind);
+    const asking = !s.chosen, phys = !asking && BOARD.physical(s.kind);
     $('bdPatient').classList.add('hidden');
-    $('bdAsk').classList.toggle('hidden', !ask);
-    $('bdSplit').classList.toggle('hidden', ask || phys);
+    $('bdAsk').classList.toggle('hidden', !asking);
+    $('bdSplit').classList.toggle('hidden', asking || phys);
     $('bdPhys').classList.toggle('hidden', !phys);
     // in Calibrate the board sits where it will be for the photos, beside the guide of the first one
     // (none while no board fits: the column is then empty, never a guide drawn for another board or language)
     const guide = page === 'calibration' && CAL.state && CAL.state.next;
     $('bdGuideCol').classList.toggle('hidden', page !== 'calibration');
     FIG.guide($('bdGuide'), guide || null, false);
-    BOARDVIEW.place(!ask && !phys ? 'bdHostBoard' : null);
+    BOARDVIEW.place(!asking && !phys ? 'bdHostBoard' : null);
     if (!phys) { PLATE3D.hide(); return; }
     const plate = s.kind === 'plate' && s.physical.plate;
     $('bd3d').classList.toggle('hidden', !plate);
@@ -170,7 +173,7 @@ const BOARD = {
   steps: function (s) {
     const plate = s.kind === 'plate', info = s.physical[s.kind];
     const nominal = plate ? info.measure.long.nominal_mm : info.nominal_mm;
-    const mm = function (v, n) { return BOARD.mm(v, n) + '\u00a0mm'; };     // a number never apart from its unit
+    const mm = function (v, n) { return withUnit(v, n, 'mm'); };     // a number never apart from its unit
     const rows = plate ? [
       [T('board.st.print'), T('board.st.print.plate')],
       [T('board.st.measure'), T('board.st.measure.plate', mm(nominal, 1))],
@@ -193,24 +196,14 @@ const BOARD = {
     host.append(E('div', 'bd-tool', T('board.st.tool')));
   },
 
-  // The backend's answer: the board state, or a cause said in this part's own words.
-  answer: function (fn) {
-    return function (a) {
-      if (a && a.error) {
-        toast(hasT('board.err.' + a.error) ? T('board.err.' + a.error, a.message || '') : sayError(a.error, a.message),
-              5000);
-        return;
-      }
-      if (fn) fn(a);
-    };
-  },
-
+  // A change of the board; a refusal is said in this part's own words (board.err.*) when it has them.
   set: function (change) {
-    beJson('board_set', JSON.stringify(change), BOARD.answer(function (s) {
+    askQuiet('board_set', JSON.stringify(change), function (s, bad) {
+      if (bad) { toast(errorText(bad, 'board.err.'), TOAST_LONG_MS); return; }
       BOARD.render(s);
-      if (change.ruler_mm !== undefined) toast(T('board.said.corrected'), 3500);
+      if (change.ruler_mm !== undefined) toast(T('board.said.corrected'), TOAST_SAID_MS);
       BOARD.pageRefresh();
-    }));
+    });
   },
 
   pageRefresh: function () {
@@ -224,9 +217,6 @@ const BOARD = {
   },
 
   wire: function () {
-    const key = function (it) {
-      it.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); it.onclick(); } };
-    };
     // the first question, on the stage
     document.querySelectorAll('#bdAsk .choice').forEach(function (b) {
       b.onclick = function () {
@@ -237,17 +227,15 @@ const BOARD = {
     BOARD.copies.forEach(function (p) {
       if (!$(p + 'Bd')) return;
       document.querySelectorAll('#' + p + 'BdKinds .mitem').forEach(function (it) {
-        it.onclick = function () {
+        onActivate(it, function () {
           const s = BOARD.state;
           let k = it.dataset.kind;
           if (k === 'physical') k = s && BOARD.physical(s.kind) ? s.kind : 'plate';
           BOARD.set({ kind: k });
-        };
-        key(it);
+        });
       });
       document.querySelectorAll('#' + p + 'BdWhich .mitem').forEach(function (it) {
-        it.onclick = function () { BOARD.set({ kind: it.dataset.kind }); };
-        key(it);
+        onActivate(it, function () { BOARD.set({ kind: it.dataset.kind }); });
       });
     });
     $('calBdRulerV').onchange = function () {
@@ -288,6 +276,7 @@ const BOARD = {
 // as the canvas, so it is drawn at (0, 0) one pixel on one pixel. While the
 // canvas has another size than its image (a resize in progress) it is hidden:
 // a stretched board is never on screen.
+/** The board on this monitor: one canvas the backend's image is drawn on, one image pixel on one screen pixel. */
 const BOARDVIEW = {
   wrap: null, canvas: null, len: null, msg: null, host: null, key: '', dev: null, timer: null, busy: false,
   again: false, lay: null, shown: false,
@@ -302,6 +291,8 @@ const BOARDVIEW = {
     const msg = E('div', 'bd-msg hidden');
     msg.id = 'bdMsg';
     w.append(c, len, msg);
+    // the GPU reset empties the canvas: the image is asked for again (never a blank where the board should be)
+    c.addEventListener('contextrestored', function () { BOARDVIEW.key = ''; BOARDVIEW.soon(); });
     BOARDVIEW.wrap = w;
     BOARDVIEW.canvas = c;
     BOARDVIEW.len = len;          // the wrap is out of the document while no step shows it: kept by reference
@@ -340,7 +331,7 @@ const BOARDVIEW = {
 
   soon: function () {
     clearTimeout(BOARDVIEW.timer);
-    BOARDVIEW.timer = setTimeout(BOARDVIEW.send, 60);
+    BOARDVIEW.timer = setTimeout(BOARDVIEW.send, BOARD_LAYOUT_DELAY_MS);
   },
 
   area: function () {
@@ -357,9 +348,10 @@ const BOARDVIEW = {
     const a = BOARDVIEW.area();
     if (!a.w && !BOARDVIEW.shown) return;
     BOARDVIEW.busy = true;
-    beJson('board_area', JSON.stringify(Object.assign({ have: BOARDVIEW.key }, a)), function (r) {
+    // asked again on every change of the area: a failure is not toasted (the board step says what is wrong)
+    askQuiet('board_area', JSON.stringify(Object.assign({ have: BOARDVIEW.key }, a)), function (r) {
       BOARDVIEW.busy = false;
-      if (r && !r.error) BOARDVIEW.answer(r, a);
+      if (r) BOARDVIEW.answer(r, a);
       if (BOARDVIEW.again) { BOARDVIEW.again = false; BOARDVIEW.soon(); }
     });
   },

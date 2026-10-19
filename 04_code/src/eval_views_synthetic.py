@@ -1,10 +1,12 @@
-"""Guided, random, fixed and all views for the correction, on synthetic perturbations (T14.3, module 6 of ai_design.md).
+"""Guided, random, fixed and all views for the correction, on synthetic perturbations.
 
-Source "face" (default when T13.1 has written it): the phantom face of the digital twin, decimated (SYNTH/meshes,
-frame B of the bench scene), the 7 clinical targets of T1.3 (03_data/processed/targets, role "proposed"), the A1 ball
-centre and the photo intrinsics of the twin, the arc of the arm fitted on the twin frames with the phone level (tilt
-below 0.1 deg), the known occluders of the A1 variant (marker, A1 parts, splint) at the registration of the scene.
-Source "mandible" (fallback): the T5.4 renders of synthetic_pose (B = board frame), 64 placeholder targets.
+Source "face" (default when synth_twin.py has written it): the phantom face of the digital twin, decimated
+(SYNTH/meshes, head frame B: coordinates of the bench scene), the 7 clinical targets (03_data/processed/targets, role
+"proposed", columns x_B, y_B, z_B), the A1 ball centre and the photo intrinsics of the twin, the arc of the arm fitted
+on the twin frames with the phone level (tilt below 0.1 deg), the known occluders of the A1 variant (marker, A1 parts,
+splint) at the registration of the scene.
+Source "mandible" (fallback): the renders of render_phone_views.py in synthetic_pose (the mandible mesh in the board
+frame M, so the true registration is the identity), 64 placeholder targets.
 Truth: the registration of the scene T_M_B. Candidates: the phone along the arc, camera azimuth AZIMUTHS (35 to 95 deg
 every 5); T_C_M = T_C_B . T_M_B^-1. Observed mask of each candidate: the anatomy rendered (mesh_overlay.py, or
 gl_overlay.py on the GPU with --renderer gl, about 3 times faster) at the truth, its outline moved by the smooth random field of eval_correction_synthetic.py, minus the occluders in front of it
@@ -16,11 +18,13 @@ Strategies per sample, the same noisy masks for all:
 - random: the first K of a random order of the eligible candidates;
 - fixed: the photo positions of the protocol (azimuths PHOTO_AZ): 1 (a random one), 2 (1+3 or 2+4), 4;
 - all: every eligible candidate.
-Each set is corrected with correct.py (same settings as T14.2). The first TIMING samples of each perturbation run one at
+Each set is corrected with correct.py (same settings as eval_correction_synthetic.py). The first TIMING samples of
+each perturbation run one at
 a time in this process: their times go in the table; the others run in parallel worker processes.
 
 Writes
-- C:\\work\\marker-impact\\t14\\views_samples.csv: one row per sample, strategy and K;
+- WORK/views_samples.csv (WORK: t14 in the work folder, environment variable IMPACTGUIDE_WORK): one row per sample,
+  strategy and K;
 - 05_results/views_synthetic.csv: per perturbation, strategy and K: TRE after the correction (median, 95th percentile,
   maximum), share below THRESHOLDS, predicted RMS TRE of the plan, guided views most often chosen, guided against
   random and fixed with the same K on the same samples (paired); per perturbation and strategy: views needed for the
@@ -52,8 +56,8 @@ import score as sc                        # noqa: E402
 import view_guidance as vg                # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-SYNTH = Path(r"C:\work\marker-impact\synth")
-WORK = Path(r"C:\work\marker-impact\t14")
+SYNTH = ecs.WORK_ROOT / "synth"
+WORK = ecs.WORK
 RESULTS = ROOT / "05_results"
 TARGETS_CSV = ROOT / "03_data" / "processed" / "targets" / "mandible_targets.csv"
 AZIMUTHS = tuple(range(35, 96, 5))
@@ -174,7 +178,8 @@ def run_sample(job):
     one, pair = ph[int(rng.integers(4))], [(ph[0], ph[2]), (ph[1], ph[3])][int(rng.integers(2))]
     sets = [("guided", k, pl.order[:k]) for k in range(1, min(K_MAX, len(pl.order)) + 1)] + \
            [("random", k, rnd[:k]) for k in range(1, min(K_MAX, len(rnd)) + 1)] + \
-           [("fixed", 1, [one]), ("fixed", 2, list(pair)), ("fixed", 4, ph), ("all", len(pl.eligible), pl.eligible)]
+           [("fixed", 1, [one]), ("fixed", 2, list(pair)), ("fixed", 4, ph)] + \
+           ([("all", len(pl.eligible), pl.eligible)] if pl.eligible else [])     # no eligible view: no "all" set
     done, rows = {}, []
     for strategy, k, sel in sets:
         key = tuple(sorted(sel))
