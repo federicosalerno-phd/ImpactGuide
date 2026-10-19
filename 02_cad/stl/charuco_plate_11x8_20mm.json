@@ -74,6 +74,17 @@
   "layer_mm": 0.2,
   "colour_change_mm": 8.0,
   "filament_1": "white",
-  "filament_2": "black"
+  "filament_2": "black",
+  "settings": {
+   "wall_loops": "2",
+   "top_shell_layers": "5",
+   "top_shell_thickness": "1",
+   "bottom_shell_layers": "3",
+   "bottom_shell_thickness": "0",
+   "sparse_infill_density": "10%",
+   "sparse_infill_pattern": "grid",
+   "enable_support": "0",
+   "brim_type": "no_brim"
+  }
  }
 }
