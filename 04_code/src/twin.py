@@ -50,6 +50,9 @@ CACHE = LOCAL / "twin"
 EXPORTER = SRC / "twin_export.py"
 DATASET_INDEX = WORK / "synth" / "index.json"                 # synth_data.py index
 NETWORK_LOG = WORK / "models" / "refiner" / "refiner.json"    # refiner.py train, beside refiner.pt
+# the scanner at each arm position as the scene has it, written at each export (read by ground_truth.py's simulated
+# scans)
+SCANNER_POSES = ROOT / "03_data" / "processed" / "protocol" / "scanner_poses.json"
 QUIET_S = 120           # the scene is exported once it has not been saved for this long
 RETRY_S = 600           # an export that failed is tried again on the same scene after this long
 EXPORT_TIMEOUT_S = 900
@@ -148,11 +151,14 @@ class Watcher:
         export: export(copy, out) writes out/bench.glb and out/bench.json (by default Blender with twin_export.py).
         seed: a cache whose newest model is taken when this one has none for the same scene (the app's own, for a
             simulation: no second export of the same scene).
+        poses: where an export's scanner poses are written (SCANNER_POSES; None: nowhere).
     """
 
     def __init__(self, cache: Path | str = CACHE, scene: Path | str | None = None, blender: Path | None | bool = True,
-                 quiet_s: float = QUIET_S, clock=time.time, export=None, seed: Path | str | None = None) -> None:
+                 quiet_s: float = QUIET_S, clock=time.time, export=None, seed: Path | str | None = None,
+                 poses: Path | str | None = SCANNER_POSES) -> None:
         self.cache = Path(cache)
+        self.poses = Path(poses) if poses is not None else None
         self.scene = Path(scene) if scene is not None else scene_path()
         self.blender = blender_path() if blender is True else blender
         self.quiet_s, self.clock = quiet_s, clock
@@ -268,6 +274,12 @@ class Watcher:
         if same:
             new["exported"] = cur.get("exported", new["exported"])
         write_json(self.cache / CURRENT, new)
+        if self.poses is not None and info.get("scanner_poses"):
+            write_json(self.poses, {
+                "scene": self.scene.name, "scene_saved": new["scene_saved"], "version": new["version"], "hash": h,
+                "written": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "frame": "the bench's world, mm: x towards the patient's left, -y anterior, z up",
+                "centroid": info.get("spheres_centroid"), "positions": info["scanner_poses"]})
         self._prune(new)
         return new
 
@@ -587,6 +599,23 @@ def selftest(work: Path | None = None) -> int:
                "a failed export is not tried again at once, and leaves no model")
     w3 = Watcher(work / "cache3", scene, blender=None, seed=work / "cache")
     expect(w3.current() and w3.current()["model"] == c2["model"], "a simulation's cache takes the app's model")
+
+    # an export with the scanner's poses: written for ground_truth.py's simulated scans, with the scene's version
+    def posed_export(copy, out):
+        fake_export(copy, out)
+        info = json.loads((out / "bench.json").read_text(encoding="utf-8"))
+        info.update(centroid=[0.0, 0.0, 0.0], scanner_poses=[
+            {"camera": f"cam_scanner_{k}", "position": k, "camera_deg": 25.0 + 15 * k, "azimuth_deg": 15.0 * k,
+             "elevation_deg": -10.0, "distance_mm": 400.0 - 10 * k} for k in (1, 2, 3, 4)])
+        (out / "bench.json").write_text(json.dumps(info), encoding="utf-8")
+    posed = work / "scanner_poses.json"
+    w4 = Watcher(work / "cache4", scene, blender=None, clock=lambda: now[0] + QUIET_S * 3, export=posed_export,
+                 poses=posed)
+    c4 = w4.run()
+    sp = read_json(posed) or {}
+    expect(len(sp.get("positions", [])) == 4 and sp.get("version") == c4["version"] and sp.get("hash") == c4["hash"]
+           and sp.get("scene") == scene.name and not (work / "cache" / "scanner_poses.json").exists(),
+           "an export's scanner poses written beside the protocol, with the scene's version; none without them")
 
     ds, net = work / "index.json", work / "refiner.json"
     v = versions(c2["phone_print"], ds, net)

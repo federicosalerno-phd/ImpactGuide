@@ -625,7 +625,48 @@ def extras(frames):
     if T is not None:
         ex["T_W_mandible"] = rows(T, 6)
     ex["lamps"], ex["world"] = lamps(), world()
+    cen = spheres_centroid()
+    sp = scanner_poses(o, cen, ex.get("arm", {}))
+    if sp:
+        ex["scanner_poses"] = sp
+        ex["spheres_centroid"] = [round(float(x), 4) for x in cen]
     return ex
+
+
+def spheres_centroid():
+    """The centroid of the reference spheres the scanner sees (the gt_sphere_* objects shown in a render: the
+    marker's and the mandible's), as the bench's script takes it; None without them."""
+    c = [np.array(ob.matrix_world.translation) for ob in present()
+         if ob.type == "MESH" and ob.name.startswith("gt_sphere")]
+    return np.mean(c, 0) if c else None
+
+
+def scanner_poses(o, cen, arm):
+    """The scanner at each arm position as the scene has it (cam_scanner_<k>, on its wedge): where it is, where it
+    looks (its optical axis, the camera's -z), its up (+y) and field (degrees), the arm position's camera azimuth;
+    seen from the spheres' centroid (spheres_centroid), its azimuth (0 anterior, -y; positive towards the patient's
+    left, +x), elevation and distance. World coordinates, mm."""
+    cam_deg = list(arm.get("camera_deg") or [])
+    out = []
+    for k in range(1, 9):
+        ob = o.get(f"cam_scanner_{k}")
+        if ob is None:
+            continue
+        m, fov_y, aspect = camera_of(ob)
+        org, axis, up = m[:3, 3], -m[:3, 2], m[:3, 1]
+        fov_x = math.degrees(2 * math.atan(math.tan(math.radians(fov_y) / 2) * aspect))
+        row = {"camera": ob.name, "position": k, "origin": [round(float(x), 3) for x in org],
+               "direction": [round(float(x), 6) for x in axis], "up": [round(float(x), 6) for x in up],
+               "fov_deg": [round(fov_x, 3), round(fov_y, 3)]}
+        if k <= len(cam_deg):
+            row["camera_deg"] = round(float(cam_deg[k - 1]), 3)
+        if cen is not None:
+            rel = org - cen
+            row["azimuth_deg"] = round(math.degrees(math.atan2(rel[0], -rel[1])), 3)
+            row["elevation_deg"] = round(math.degrees(math.atan2(rel[2], math.hypot(rel[0], rel[1]))), 3)
+            row["distance_mm"] = round(float(np.linalg.norm(rel)), 3)
+        out.append(row)
+    return out
 
 
 def lamps():

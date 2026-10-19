@@ -688,11 +688,39 @@ def scene_poses():
     return pose(SCENE["R_W_mandible"], np.zeros(3)), pose(R, o)
 
 
+# The scanner at each arm position as the bench scene has it (its cameras cam_scanner_<k> on their wedge), written by
+# the twin's export (twin.py, twin_export.py): azimuth, elevation and distance seen from the spheres' centroid, in a
+# frame turned as SCENE's (x left, -y anterior, z up).
+SCANNER_POSES = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "protocol" / "scanner_poses.json"
+_said = []
+
+
+def scan_views(path=SCANNER_POSES):
+    """(azimuth, elevation, distance) of the scanner at the protocol's scan positions (SCENE views_deg, camera
+    azimuths of the arm), from the bench scene's scanner poses; without them the nominal SCENE values (elevation_deg,
+    range_mm), said once."""
+    try:
+        pos = json.loads(Path(path).read_text(encoding="utf-8"))["positions"]
+        out = []
+        for az in SCENE["views_deg"]:
+            p = min(pos, key=lambda q: abs(float(q.get("camera_deg", 1e9)) - az))
+            if abs(float(p.get("camera_deg", 1e9)) - az) > 0.5:
+                raise KeyError(f"no scanner pose at camera {az} deg")
+            out.append((float(p["azimuth_deg"]), float(p["elevation_deg"]), float(p["distance_mm"])))
+        return out
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        if not _said:
+            _said.append(1)
+            print(f"warning: {Path(path).name} not usable ({e}): simulated scans from the nominal "
+                  f"{SCENE['range_mm']:.0f} mm", file=sys.stderr, flush=True)
+        return [(az, SCENE["elevation_deg"], SCENE["range_mm"]) for az in SCENE["views_deg"]]
+
+
 def scanner_poses(centroid, jitter=None):
-    """T_W_scan of the scanner views: optical axis z on the sphere centroid, x horizontal."""
+    """T_W_scan of the scanner views (scan_views): optical axis z on the sphere centroid, x horizontal."""
     out = []
-    for i, az in enumerate(SCENE["views_deg"]):
-        a, e, rng_ = np.radians(az), np.radians(SCENE["elevation_deg"]), SCENE["range_mm"]
+    for i, (az, el, rng_) in enumerate(scan_views()):
+        a, e = np.radians(az), np.radians(el)
         if jitter is not None:
             a, e, rng_ = a + jitter[i][0], e + jitter[i][1], rng_ + jitter[i][2]
         d = np.array([np.sin(a) * np.cos(e), -np.cos(a) * np.cos(e), np.sin(e)])
