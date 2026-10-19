@@ -43,10 +43,10 @@ the log and can be corrected there without touching raw files.
                                  bytes, SHA-256
         trial_log.lock           only while a program writes the log
         t001/
-            t001_ref_scan_az55.ply   reference scans, only when a reference
-            t001_ref_scan_az70.ply   precedes the impact
-            t001_scan_az55.ply       post-impact scans, arm at 55 and 70 degrees
-            t001_scan_az70.ply       (arm positions 2 and 3)
+            t001_ref_scan_az40.ply   reference scans, only when a reference
+            t001_ref_scan_az55.ply   precedes the impact
+            t001_scan_az40.ply       post-impact scans, arm at 40 and 55 degrees
+            t001_scan_az55.ply
             t001_photo_az40.jpg      photos from the 4 arm positions
             t001_photo_az55.jpg
             t001_photo_az70.jpg
@@ -134,7 +134,7 @@ WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "tri
 
 PREFIX = {"campaign": "t", "pilot": "p"}
 SUFFIXES = {
-    "scan": (".ply", ".stl", ".obj", ".asc"),
+    "scan": (".ply", ".stl", ".obj", ".asc", ".3mf"),
     "photo": (".jpg", ".jpeg"),
     "video": (".mp4",),
     "highspeed": (".mp4", ".mov"),
@@ -269,7 +269,7 @@ class Config:
     seed: int = 20261020
     washers_per_side: int = 3
     reposition_mm: float = 3.0  # cap shift since the last reference
-    scan_az: tuple = (55, 70)  # arm positions 2 and 3 (the scanner's field), camera azimuth in degrees
+    scan_az: tuple = (40, 55)  # arm positions, camera azimuth in degrees
     photo_az: tuple = (40, 55, 70, 85)
     video_az: tuple = (35, 95)
     video_min_s: float = 7.0
