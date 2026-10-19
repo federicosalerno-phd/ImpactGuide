@@ -1,16 +1,25 @@
 // ImpactGuide · Live AR, two steps on the rail: the board the phone follows
 // (the patient board, or the calibration board on a monitor or printed, with
 // the controls of 15-board.js) and the view: the phone's stream with the board
-// pose and the face overlay, the status light, fps and latency, and the
-// opacity of what is drawn over the picture. The work is live_ar.py's: the
-// backend composes the frames and serves them on 127.0.0.1; the page shows
-// them and asks for the rest.
+// pose and the face overlay, the status light, fps and latency. Its panel says
+// what is drawn over the picture (a row per element, grouped, with an eye) and
+// how solid, and holds the view on the phone's own screen: how it stands and
+// the command that opens it. The work is live_ar.py's: the backend composes the
+// frames and serves them on 127.0.0.1; the page shows them and asks for the rest.
 'use strict';
 
 const LIVE_POLL_MS = 400;        // the state of the view, read while the view is open
-const OPACITY_SEND_MS = 150;     // the opacity is sent at most this often while the slider moves
-const OPACITY_HOLD_MS = 1500;    // and the state does not move the slider for this long after a send
+const OPACITY_HOLD_MS = 1500;    // the state does not move the opacity slider for this long after the hand let it go
 const LIVE_FAILS_SAID = 2;       // reads of the state failed in a row before the view says so
+const PHONE_OPENING_MS = 8000;   // after Open on the phone, the phone's page has this long to show up before it is off
+
+// What can be drawn over the picture, in groups: a row each in the panel, with its eye. A new hologram is one more
+// name here, with its word live.layer.<name> and its colour in app.css (.lyr[data-layer=...]); the patient's
+// elements are models, shown only once the live view has the model. The board's are drawn from its pose.
+const LIVE_LAYERS = [
+  { group: 'patient', layers: ['face', 'mandible'] },
+  { group: 'board', layers: ['axes'] },
+];
 
 /** Live AR: the board the phone follows and the view of its stream. */
 const LIVE = {
@@ -19,6 +28,9 @@ const LIVE = {
   src: '',          // the address of the frames while the view runs, '' otherwise
   sliding: false,   // the opacity slider is being moved
   sentAt: 0,        // when the opacity was last sent
+  opNext: null,     // the newest opacity of the slider not sent yet (sent at the next frame of the screen)
+  opFrame: 0,       // the frame that will send it (requestAnimationFrame), 0 when none is asked for
+  phoneAt: 0,       // when Open on the phone was pressed
   waiting: false,   // Start was pressed and the stream has not started yet
 
   enter: function (step) {
@@ -131,21 +143,85 @@ const LIVE = {
     $('where').textContent = T(s.synthetic ? 'live.where.sim' : 'live.where', size[0], size[1]);
     LIVE.overlay(s, on);
 
-    // the panel: how strongly the virtual elements are drawn
+    // the panel: what is drawn and how strongly, the phone's screen, Advanced
+    LIVE.renderLayers(s);
     const op = $('lvOpacity');
     if (typeof s.opacity === 'number' && !LIVE.sliding && Date.now() - LIVE.sentAt > OPACITY_HOLD_MS) op.value = s.opacity;
     $('lvOpacityV').textContent = fmtNum(100 * Number(op.value), 0) + ' %';
+    LIVE.phone(s);
     LIVE.advanced(s, on);
 
-    // the toolbar and the footer
-    document.querySelectorAll('.layer-btn').forEach(function (btn) {
-      const k = btn.dataset.layer;
-      btn.classList.toggle('on', !!s.layers[k]);
-      btn.disabled = k !== 'axes' && !s.models[k];
-    });
+    // the footer
     $('lvStart').classList.toggle('hidden', s.running);
     $('lvStop').classList.toggle('hidden', !s.running);
     $('lvStart').disabled = starting;
+  },
+
+  // The rows of what is drawn: a heading per group (SlantUI's metric rows), a row per element with its name and an
+  // eye; a press (Enter, Space) shows or hides it. Made again when the language changes.
+  buildLayers: function () {
+    const out = [];
+    LIVE_LAYERS.forEach(function (g) {
+      out.push(E('div', 'mg', T('live.group.' + g.group)));
+      g.layers.forEach(function (k) {
+        const row = E('div', 'mrow lyr');
+        row.dataset.layer = k;
+        row.dataset.model = g.group === 'patient' ? '1' : '';
+        row.setAttribute('role', 'switch');
+        row.append(E('span', 'ml', T('live.layer.' + k)), E('span', 'lyr-eye'));
+        onActivate(row, function () { LIVE.toggleLayer(row); });
+        out.push(row);
+      });
+    });
+    $('lvLayers').replaceChildren.apply($('lvLayers'), out);
+    if (LIVE.state) LIVE.renderLayers(LIVE.state);
+  },
+
+  // a model the view does not have (or cannot draw) cannot be shown; the board's elements always can
+  hasLayer: function (s, row) { return !row.dataset.model || !!(s.models && s.models[row.dataset.layer]); },
+
+  toggleLayer: function (row) {
+    const s = LIVE.state, k = row.dataset.layer, change = {};
+    if (!s || !LIVE.hasLayer(s, row)) return;
+    change[k] = !(s.layers && s.layers[k]);
+    LIVE.settings(change);
+  },
+
+  renderLayers: function (s) {
+    document.querySelectorAll('#lvLayers .lyr').forEach(function (row) {
+      const have = LIVE.hasLayer(s, row), on = have && !!(s.layers && s.layers[row.dataset.layer]);
+      row.classList.toggle('active', on);
+      itemOff(row, !have);
+      row.setAttribute('aria-checked', on ? 'true' : 'false');
+      row.title = have ? '' : T('live.layer.missing');
+      const eye = row.querySelector('.lyr-eye'), sign = on ? 'eye' : 'eye-off';
+      if (eye.dataset.sign !== sign) { setIcon(eye, sign); eye.dataset.sign = sign; }
+    });
+  },
+
+  // The view on the phone's own screen, in a few words: off; opening; open on the phone (its page there, waiting for
+  // frames: the view not started); linked to the view (its page painting the frames). The command opens it (again);
+  // the Phone panel has the rest.
+  phone: function (s) {
+    const v = s.phone_view || {}, busy = (s.busy || []).indexOf('view_open') >= 0;
+    const ready = (s.phone_link || {}).state === 'ready';
+    const there = (v.viewers || 0) > 0;
+    let st = 'off', dot = '';
+    if (there && (v.frames || 0) > 0) { st = 'linked'; dot = ' ok'; }
+    else if (there) { st = 'open'; dot = ' warn'; }
+    else if (busy || (ready && Date.now() - LIVE.phoneAt < PHONE_OPENING_MS)) { st = 'opening'; dot = ' busy'; }
+    $('lvPhDot').className = 'live-dot' + dot;
+    $('lvPhWord').textContent = !ready && !there ? T('link.btn.none') : T('view.st.' + st);
+    $('lvPhOpen').disabled = !ready || busy;
+  },
+
+  openPhone: function () {
+    LIVE.phoneAt = Date.now();
+    ask('view_open', function (a) {
+      if (!a) LIVE.phoneAt = 0;
+      LIVE.refresh();
+    });
+    if (LIVE.state) LIVE.phone(LIVE.state);
   },
 
   // Over the picture: a link that dropped, what is not real yet, the light and why. The pace and the delay are
@@ -180,6 +256,13 @@ const LIVE = {
                 piRow(T('live.f.rms', fmtNum(s.rms_limit_px, 0)), s.rms_px === null || s.rms_px === undefined ? '-'
                   : T('live.f.px', fmtNum(s.rms_px, 2))));
       if (s.distance_mm) rows.push(piRow(T('live.f.distance'), fmtNum(s.distance_mm, 0) + ' mm'), piRow(T('live.f.tilt'), fmtNum(s.tilt_deg, 0) + '°'));
+      // how much the drawn face shakes, against the pose as found (px of the phone's picture, the last moments)
+      if (typeof s.tremble_px === 'number') {
+        const tr = piRow(T('live.f.tremble'), T('live.f.tremble.v', fmtNum(s.tremble_px, 2),
+                                                 typeof s.tremble_raw_px === 'number' ? fmtNum(s.tremble_raw_px, 2) : '-'));
+        tr.title = T('live.f.tremble.hint');
+        rows.push(tr);
+      }
       // the video keeps the stream's rate; the board pose is found as often as the computer allows
       rows.push(piRow(T('live.f.stream'), T('live.f.fps', fmtNum(s.fps_stream, 1))),
                 piRow(T('live.f.video'), T('live.f.fps', fmtNum(s.fps_ar || 0, 1))),
@@ -209,20 +292,29 @@ const LIVE = {
     if (c.error) $('lvCam').append(E('div', 'callout callout-warn', liveErrorText({ error: c.error })));
   },
 
-  // The opacity of the virtual elements, 0 to 1, as the live setting `opacity`: sent while the slider
-  // moves (at most every OPACITY_SEND_MS) and when it is let go; the backend keeps it for the next session.
-  // Once let go, the slider follows the value the live view reports.
+  // The opacity of the virtual elements, 0 to 1 with no steps, as the live setting `opacity`. While the slider moves
+  // (the hand, the wheel, the arrow keys: SlantUI's initFineRanges) the newest value goes to the live view once per
+  // frame of the screen (requestAnimationFrame joins the moves of a frame), without waiting for an answer: the call
+  // only sets the value (live_opacity) and the next picture composed takes it. Let go, the value is kept for the next
+  // session (live_settings) and the slider follows the value the live view reports.
   opacity: function (final) {
-    const v = Math.round(Number($('lvOpacity').value) * 100) / 100;
+    const v = Math.min(1, Math.max(0, Number($('lvOpacity').value) || 0));
     $('lvOpacityV').textContent = fmtNum(100 * v, 0) + ' %';
-    clearTimeout(LIVE._opTimer);
-    const send = function () {
-      LIVE.sentAt = Date.now();
-      LIVE._opLast = LIVE.sentAt;
+    LIVE.sentAt = Date.now();
+    if (final) {
+      LIVE.opNext = null;
       ask('live_settings', JSON.stringify({ opacity: v }), function (s) { if (s && page === 'live') LIVE.render(s); });
-    };
-    if (final || Date.now() - (LIVE._opLast || 0) > OPACITY_SEND_MS) send();
-    else LIVE._opTimer = setTimeout(send, OPACITY_SEND_MS);
+      return;
+    }
+    LIVE.opNext = v;
+    if (!LIVE.opFrame) LIVE.opFrame = requestAnimationFrame(LIVE.sendOpacity);
+  },
+
+  sendOpacity: function () {
+    LIVE.opFrame = 0;
+    const v = LIVE.opNext;
+    LIVE.opNext = null;
+    if (v !== null) be('live_opacity', v);
   },
 
   start: function () {
@@ -255,7 +347,7 @@ const LIVE = {
     } else if (e.action === 'failed') {
       workOff('live');
       LIVE.waiting = false;
-      toast(liveErrorText(e), TOAST_LONG_MS);
+      toast(liveErrorText(e), TOAST_LONG_MS, 'error');
     } else if (e.action === 'stopped' && e.reason === 'cancelled') {
       workOff('live');            // a start stopped before its stream came: nothing to say, the view is at rest
       LIVE.waiting = false;
@@ -269,18 +361,16 @@ const LIVE = {
     document.querySelectorAll('#lvBoards .mitem').forEach(function (it) {
       onActivate(it, function () { LIVE.settings({ board: it.dataset.board }); });
     });
-    document.querySelectorAll('.layer-btn').forEach(function (btn) {
-      btn.onclick = function () {
-        const k = btn.dataset.layer, change = {};
-        change[k] = !(LIVE.state && LIVE.state.layers[k]);
-        LIVE.settings(change);
-      };
-    });
+    LIVE.buildLayers();
+    $('lvPhOpen').onclick = LIVE.openPhone;
     $('lvStart').onclick = LIVE.start;
     $('lvStop').onclick = LIVE.stop;
+    $('lvStart').setAttribute('data-sound', 'on');       // SlantUI's voices, on the press
+    $('lvStop').setAttribute('data-sound', 'off');
     $('lvRegLoad').onclick = function () { ask('live_registration_load', function (s) { if (s) LIVE.render(s); }); };
     $('lvRegDemo').onclick = function () { ask('live_registration_demo', function (s) { if (s) LIVE.render(s); }); };
     $('lvOpacity').oninput = function () { LIVE.sliding = true; LIVE.opacity(false); };
     $('lvOpacity').onchange = function () { LIVE.sliding = false; LIVE.opacity(true); };
+    initFineRanges($('lvOpacity').parentElement);      // the wheel and the arrow keys by 0.1 %, by 1 % with Shift
   },
 };

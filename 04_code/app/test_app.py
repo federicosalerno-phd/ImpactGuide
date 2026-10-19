@@ -24,7 +24,11 @@ backend   the slots the page calls, without a window: a trial from the first
           way; the plan's least and most; a board changed after the photos);
           the calibration with its errors per photo and over the board, a photo
           left out by hand and the calibration again, saved; the session check;
-          the streaming mode on frames of the live stream. Then what must
+          the streaming mode on frames of the live stream; the twin of the
+          bench (its model made again once the scene rests for two minutes,
+          a new version only for a changed scene, dataset and network out of
+          date by their fingerprints, the trial's setting, the marker's
+          motion and the error at the targets after the scans). Then what must
           never come back: an exception out of a Qt callback that closes the
           app, a library's SystemExit, a traceback or a raw error text sent to
           the page, preferences or checks lost to a half-written file, the
@@ -47,14 +51,20 @@ backend   the slots the page calls, without a window: a trial from the first
           photos taken with the page's Take button, calibrated, the worst left
           out with a press on its bar, calibrated again, saved; the live view
           started from its step, its opacity set with the slider, and left; the
+          twin opened from the trial's page within a second, its ready views,
+          the trial after its scans with the marker's motion enlarged; the
           Phone panel in the panel down the right (home and a module) and Wi-Fi
           paired with the QR code; then every step of every module and the
           Phone panel, with their Advanced parts open, are checked for words
           that are cut or wrap and for anything laid over the page, at the
-          smallest window and at 1920 x 1032, in the six languages; last the
-          board pixel for pixel at 125 and 150 % display scaling. The window is
-          grabbed into DIR at each stage, and on every view in English and
-          Italian (large) and in English and German (smallest).
+          smallest window and at 1920 x 1032, in the six languages (each view
+          measured twice, only what stays wrong counts, with the window at its
+          size); last the board pixel for pixel at 125 and 150 % display
+          scaling, set over the screen's own. The window lies right of every
+          screen, out of the way of whoever uses the computer (the focus given
+          back to them), and comes onto the screen only while the screen itself
+          is grabbed. It is grabbed into DIR at each stage, and on every view
+          in English and Italian (large) and in English and German (smallest).
 
     python test_app.py [--work DIR] [--ui SHOTS] [--no-calibration]
 
@@ -358,7 +368,7 @@ def test_robust(d, work):
 def test_trial_fixes(d, work):
     """A photo that arrives after its trial was voided is not filed under the next one; notes typed at the start and
     at the close are both kept, the trial closed; a staged file is never dropped by confirming a step done before;
-    a staged file carries its problems as codes."""
+    a staged file carries its problems as codes; a trial's photos leave the camera app in its mode (no intent)."""
     b = d.backend
     run = b.run()
     # a photo on its way while the trial is voided: dropped, said, nothing staged
@@ -368,7 +378,7 @@ def test_trial_fixes(d, work):
     phone = b.phone()
     gate = threading.Event()
     real_shoot = phone.shoot
-    phone.shoot = lambda out: (gate.wait(10), real_shoot(out))[1]
+    phone.shoot = lambda out, **kw: (gate.wait(10), real_shoot(out, **kw))[1]
     try:
         a = d.call("step_shoot", key)
         d.call("trial_void", trial, "voided while a photo was on its way")
@@ -433,6 +443,31 @@ def test_trial_fixes(d, work):
     expect(e is not None and e.get("error") in ("no_trial", "trial_changed") and not stray.exists()
            and not any(x["type"] == "staged" for x in d.events[n:]),
            f"a photo for a trial voided behind the app's back: dropped and said ({e and e.get('error')})")
+    # a trial's photo leaves the camera app in its mode (the Pro mode of the calibration): no intent to it, as for a
+    # calibration's photo; a camera that counted down all the same (its own timer on) is said once
+    s = d.call("trial_start", json.dumps({"swing_mass_g": "137.2"}))
+    trial = s["trial"]["trial"]
+    photos = [st["key"] for st in s["steps"] if st["kind"] == "photo"]
+    seen, real_take = [], phone.take
+
+    def take(timeout=None, pressed=None, keep_mode=False):
+        seen.append(keep_mode)
+        phone.countdown_seen = True         # as the phone says after a photo that came seconds after its press
+        return real_take(pressed=pressed, keep_mode=keep_mode)
+    phone.take = take
+    said, b._countdown_said = b._countdown_said, False
+    n = len(d.events)
+    try:
+        d.run_trial(stop_after=photos[1])          # its first two photos
+    finally:
+        del phone.take
+        phone.countdown_seen = False
+    told = [x for x in d.events[n:] if x["type"] == "calib_photo" and x.get("action") == "countdown"]
+    d.call("trial_void", trial, "test of the camera's mode")
+    b._countdown_said = said
+    expect(len(seen) >= 2 and all(k is True for k in seen) and len(told) == 1,
+           f"{trial}: a trial's photos leave the camera app in its mode ({seen}); its countdown said once "
+           f"({len(told)})")
 
 
 def test_backend(app, work, calibration=True):
@@ -538,6 +573,7 @@ def test_backend(app, work, calibration=True):
     problems = {t["trial"]: t["problems"] for t in R["trials"] if t["problems"]}
     expect(not problems and not R["orphans"] and R["extra"] == [t4] and R["duplicates"] == [] and R["open"] == [],
            f"completeness: no problems, no stray folders, outside the matrix {R['extra']}")
+    test_twin(d, work, t1)
     test_trial_fixes(d, work)
 
     # 9. live AR on the synthetic stream: on, board tracked, the other board, a photo stops it first
@@ -562,6 +598,16 @@ def test_backend(app, work, calibration=True):
     expect(abs(s.get("opacity", -1) - 0.55) < 1e-9 and bad.get("opacity") == 1.0
            and ig.Prefs(d.backend.roots.prefs)["live"]["opacity"] == 1.0,
            "live view: the opacity of the virtual elements set through live_settings, kept, held between 0 and 1")
+    d.call("live_settings", json.dumps({"opacity": 0.3}))
+    # the slider moving: every value to the live view at once, quick, nothing saved until it is let go
+    t0 = time.perf_counter()
+    moved = [d.call("live_opacity", 0.3 + 0.004 * k) for k in range(100)]
+    per_ms = (time.perf_counter() - t0) * 10
+    expect(all(abs(a.get("opacity", -1) - (0.3 + 0.004 * k)) < 1e-9 for k, a in enumerate(moved))
+           and abs(d.backend._live.settings()["opacity"] - 0.696) < 1e-9 and d.call("live_opacity", -2)["opacity"] == 0.0
+           and ig.Prefs(d.backend.roots.prefs)["live"]["opacity"] == 0.3 and per_ms < 20,
+           f"live view: the opacity slider's values taken one by one (live_opacity, {per_ms:.2f} ms each), held "
+           "between 0 and 1, the preference left for the slider's release")
     d.call("live_settings", json.dumps({"opacity": 0.3}))
     folder = d.call("calib_folder_new", "check_photo")["folder"]
     n = len(d.events)
@@ -591,12 +637,344 @@ def test_backend(app, work, calibration=True):
     test_board(d)
     if calibration:
         test_series(d)
+        test_flow(d)
+        test_judged(d)
     test_midnight(d)
     d.backend.shutdown()
     t0 = time.monotonic()
     frame = d.backend._frames.next_frame(0, 5.0)
     expect(frame[0] is None and time.monotonic() - t0 < 0.5,
            "app closed: the phone's page waiting for a frame is answered at once")
+
+
+def test_twin(d, work, scanned):
+    """The twin of the bench: its model made again by itself once the scene has rested for two minutes (a stand-in
+    exporter and a clock moved by hand), a new version each time the scene changes and none when it does not, the
+    page told to load it again; dataset and network said out of date by their fingerprints; the setting of the trial
+    in progress; the marker's motion and the error at each target after the scans of a trial (simulated)."""
+    import twin
+    b = d.backend
+    scene = fresh(work / "twin_scene") / "bench.blend"
+    scene.write_bytes(b"bench 1")
+    now = [time.time()]
+    os.utime(scene, (now[0], now[0]))
+    targets = [{"id": f"T{i}", "name": f"T{i}", "mandible": [10.0 * i, 80.0, -60.0 + 5 * i],
+                "world": [10.0 * i, 0.0, -60.0]} for i in range(7)]
+
+    def export(copy, out):
+        out.mkdir(parents=True, exist_ok=True)
+        body = copy.read_bytes()
+        (out / "bench.glb").write_bytes(b"glTF" + body)
+        (out / "bench.json").write_text(json.dumps({
+            "phone_print": hashlib.sha256(body).hexdigest()[:16], "targets": targets, "board_centre": [0, -91, 9],
+            "ball_centre": [0, -51, -19], "T_W_mandible": [[1, 0, 0, 0], [0, 0, 1, 96], [0, -1, 0, 17], [0, 0, 0, 1]]}),
+            encoding="utf-8")
+    real = b.twin
+    b.twin = twin.Watcher(fresh(work / "twin_cache"), scene, blender=None, clock=lambda: now[0], export=export)
+    b._twin_said = None
+    n = len(d.events)
+    b._twin_poll()
+    now[0] += twin.QUIET_S - 5
+    b._twin_poll()
+    d.wait(lambda: False, 0.4)
+    expect(not any(e["type"] == "twin" for e in d.events[n:]) and d.call("twin_state", "{}")["model"]["state"] == "none",
+           "twin: the scene saved under two minutes ago is not exported")
+    now[0] += 10
+    b._twin_poll()
+    up = d.wait(lambda: any(x["type"] == "twin" and x.get("action") == "updated" for x in d.events[n:]), 20)
+    said = [x["action"] for x in d.events[n:] if x["type"] == "twin"]
+    m1 = d.call("twin_state", "{}")["model"]
+    expect(said[:1] == ["exporting"] and up and m1["state"] == "ready" and m1["version"] == 1
+           and m1["url"].startswith("file:") and m1["url"].endswith(".glb"),
+           f"twin: two minutes without a save, the model is made and the page told (version {m1.get('version')})")
+    scene.write_bytes(b"bench 2")
+    os.utime(scene, (now[0], now[0]))
+    b._twin_poll()
+    now[0] += 61
+    b._twin_poll()
+    busy = "twin_export" in b._busy
+    now[0] += 61
+    n = len(d.events)
+    b._twin_poll()
+    up = d.wait(lambda: any(x["type"] == "twin" and x.get("action") == "updated" for x in d.events[n:]), 20)
+    m2 = d.call("twin_state", "{}")["model"]
+    expect(not busy and up and m2["version"] == 2 and m2["url"] != m1["url"] and m2["phone_print"] != m1["phone_print"],
+           "twin: the scene changed, waited for its rest again, a new version to load (2)")
+    os.utime(scene, (now[0], now[0]))       # saved again with nothing changed
+    b._twin_poll()
+    now[0] += twin.QUIET_S + 1
+    n = len(d.events)
+    b._twin_poll()
+    same = d.wait(lambda: any(x["type"] == "twin" and x.get("action") == "same" for x in d.events[n:]), 20)
+    m3 = d.call("twin_state", "{}")["model"]
+    expect(same and m3["version"] == 2 and m3["url"] == m2["url"], "twin: saved without a change, the same model")
+    # dataset and network: made on this scene, on another one, before fingerprints
+    ds, net = work / "twin_scene" / "index.json", work / "twin_scene" / "refiner.json"
+    old = twin.DATASET_INDEX, twin.NETWORK_LOG
+    twin.DATASET_INDEX, twin.NETWORK_LOG = ds, net
+    try:
+        ds.write_text(json.dumps({"scene_print": m2["phone_print"]}), encoding="utf-8")
+        net.write_text(json.dumps({"scene_print": m1["phone_print"]}), encoding="utf-8")
+        v1 = d.call("twin_state", "{}")["versions"]
+        net.write_text(json.dumps({"scene_print": m2["phone_print"]}), encoding="utf-8")
+        v2 = d.call("twin_state", "{}")["versions"]
+        ds.write_text(json.dumps({"samples": 300}), encoding="utf-8")
+        v3 = d.call("twin_state", "{}")["versions"]
+    finally:
+        twin.DATASET_INDEX, twin.NETWORK_LOG = old
+    expect(v1["dataset"] == "current" and v1["network"] == "old" and v1["stale"] and not v2["stale"]
+           and v3["dataset"] == "old" and v3["stale"],
+           "twin: the network made on the scene before said out of date, then current; a dataset without a "
+           "fingerprint out of date")
+    # the trial in progress, and a trial after its scans
+    s = d.call("twin_state", json.dumps({"mode": "trials"}))
+    plan = d.call("trials_state")["trial"]
+    t = s["trial"]
+    expect(t and t["trial"] == plan["trial"] and t["holder"] == plan["holder"]
+           and t["angle_deg"] == float(plan["angle_deg"]) and t["direction_deg"] == float(plan["direction_deg"])
+           and t["arm_az"] == 40 and abs(s["phone"]["aspect"] - 4080 / 3072) < 1e-3,
+           f"twin: the setting of the trial to do ({t and t['trial']}: holder, hole, direction, arm at 40°)")
+    keys = [x["key"] for x in d.call("trials_state")["steps"]]
+    expect(s.get("steps") == keys and s.get("step") == 0 and "release" in keys
+           and s.get("arm", {}).get("video_az") and s["arm"].get("photo_az") and s["arm"].get("video_deg_s"),
+           f"twin: the steps of the trial to do, as the trial's page has them ({len(keys)}), at the first; the "
+           f"arm's positions and its sweep")
+    r = d.call("twin_state", json.dumps({"mode": "results", "trial": scanned}))
+    sc = r["scan"] or {}
+    D = sc.get("D") or []
+    expect(r["trial"]["trial"] == scanned and sc.get("state") == "ready" and sc.get("simulated")
+           and len(sc.get("tre", [])) == 7 and len(D) == 4 and sc.get("tre_max_mm", 0) > 0
+           and any(x["trial"] == scanned for x in r["trials"]) and r["steps"][r["step"]].startswith("scan_"),
+           f"twin: {scanned} after its scans, at its first scan, the marker's motion and the error at the 7 targets "
+           f"(simulated, worst {sc.get('tre_max_mm')} mm)")
+    r2 = d.call("twin_state", json.dumps({"mode": "results", "trial": scanned}))
+    expect(r2["scan"]["D"] == D, "twin: the same trial, the same motion")
+    b.twin = real
+    b._twin_said = (real.current() or {}).get("version")
+
+
+def test_flow(d):
+    """The photos without waiting: never a countdown (none in the preferences, the page or the host; the shutter at
+    once); a Take while a photo is taken follows it; the guide on the next pose at the shutter, the check later on the
+    photo's small picture, its pose kept with it; Calibrate with photos on their way waits for them, and is refused
+    only under the calibration's own least; the photo taken by itself when the simulated phone holds the guide's pose,
+    once the gap is over, and not once the Photos step is left."""
+    import re
+    import numpy as np
+    b = d.backend
+    raw = b.roots.calib_raw
+    had = {x.name for x in raw.iterdir()} if raw.is_dir() else set()
+    phone = b.phone()
+    phone.photo_px = (2040, 1536)
+    d.call("calib_set", json.dumps({"mode": "photo", "plan": "quick", "kind": "calibration", "auto": False}))
+    d.call("board_area", area(1500, 820))
+    d.call("calib_series_new")
+    # no countdown anywhere: nothing in the preferences that delays a photo, nothing in the page's Take or keys
+    def keys(x, at=""):
+        out = []
+        for k, v in x.items():
+            out.append(at + k)
+            if isinstance(v, dict):
+                out += keys(v, at + k + ".")
+        return out
+    page = (ig.APP / "ui" / "10-calibration.js").read_text(encoding="utf-8")
+    take_src = page[page.index("  take: function () {"):page.index("  run: function () {")]
+    keys_src = page[page.index("if (!CAL.keys) {"):page.index("$('calRetake').onclick")]
+    expect(not [k for k in keys(ig.Prefs.DEFAULTS) if re.search(r"timer|countdown|delay", k, re.I)]
+           and not re.search(r"setTimeout|setInterval|countdown", take_src + keys_src),
+           "no countdown: nothing in the preferences, in the page's Take or its keys, that waits before a photo")
+    # every method the backend calls on itself is there (a call to one not written yet made calib_state fail on
+    # every answer: "Something went wrong" on the Photos step, 19/10); the photo taken by itself, failing, never
+    # costs the page its state
+    import ast
+    tree = ast.parse(Path(ig.__file__).read_text(encoding="utf-8"))
+    cls = next(x for x in tree.body if isinstance(x, ast.ClassDef) and x.name == "Backend")
+    called = {x.func.attr for x in ast.walk(cls) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+              and isinstance(x.func.value, ast.Name) and x.func.value.id == "self"}
+    missing = sorted(a for a in called if not hasattr(ig.Backend, a) and not hasattr(b, a))
+    b._auto_target = lambda *a: 1 / 0
+    try:
+        st = d.call("calib_state")
+    finally:
+        del b._auto_target
+    expect(not missing and "error" not in st and st.get("next"),
+           f"the backend calls only methods it has ({missing or 'all there'}); a failing watcher leaves calib_state "
+           f"answering")
+    # Take, and Take again at once: the second follows the first; the shutter of each said before its check
+    n0 = len(d.events)
+    t0 = time.monotonic()
+    a1 = d.call("calib_take")
+    a2 = d.call("calib_take")
+    first_shot = d.wait(lambda: any(x["type"] == "calib_photo" and x.get("action") == "shot" for x in d.events[n0:]), 20)
+    t_shot = time.monotonic() - t0
+    s_mid = d.call("calib_state")
+    both = d.wait(lambda: sum(1 for x in d.events[n0:] if x["type"] == "calib_photo" and x.get("check")) >= 2, 90)
+    ev = d.events[n0:]
+    kinds = [("shot" if x.get("action") == "shot" else "check") for x in ev
+             if x["type"] == "calib_photo" and (x.get("action") == "shot" or x.get("check"))]
+    at = [i for i, k in enumerate(kinds) if k == "shot"], [i for i, k in enumerate(kinds) if k == "check"]
+    s = d.call("calib_state")
+    folder = raw / s["series"]["name"]
+    checks = b._photo_checks(folder)
+    poses = sorted(c.get("pose") for c in checks.values())
+    expect(a1.get("ok") and a2.get("queued") and first_shot and t_shot < 1.5 and len(at[0]) == 2 and len(at[1]) == 2
+           and at[0][0] < at[1][0] and at[0][1] < at[1][1]
+           and both and poses == [0, 1] and s_mid["next"]["n"] >= 1 and s["next"]["n"] == 2 and s["count"] == 2,
+           f"Take twice: the second taken right after the first ({a2}); the shutter {t_shot:.2f} s after Take, both "
+           f"shutters before their checks ({' '.join(kinds)}); the guide on pose {s_mid['next']['n'] + 1} at once; "
+           f"each photo kept with its pose ({poses})")
+    shots = s["series"]["shots"]
+    tim = [c.get("timing_s") or {} for c in checks.values()]
+    expect(len(shots) == 2 and all(x["state"] == "kept" and x["thumb"].startswith("file:") for x in shots)
+           and all(b._thumb_path(folder, x["name"]).is_file() for x in shots)
+           and all(t.get("shutter") is not None and t["checked"] >= t["shutter"] for t in tim),
+           f"the strip: each photo a small picture with its check (kept); timings kept with the checks {tim}")
+    # a photo put aside frees its pose: the guide comes back to it, the one after keeps its own
+    b._sim_scene = lambda: (lambda: np.full((1536, 2040, 3), 90, np.uint8))
+    try:
+        n1 = len(d.events)
+        d.call("calib_take")
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n1:]), 60)
+    finally:
+        del b._sim_scene
+    s = d.call("calib_state")
+    expect(s["next"]["n"] == 2 and s["series"]["shots"][-1]["state"] == "retake" and s["count"] == 2,
+           f"a photo without the board: retake on its small picture, its pose asked again ({s['next']['n'] + 1})")
+    # Calibrate always pressable from the calibration's own least: with photos on their way it waits for them
+    while d.call("calib_state")["count"] < calibrate_charuco.MIN_VIEWS - 1:
+        n1 = len(d.events)
+        d.call("calib_take")
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n1:]), 60)
+    n1 = len(d.events)
+    d.call("calib_take")
+    d.wait(lambda: any(x["type"] == "calib_photo" and x.get("action") == "shot" for x in d.events[n1:]), 20)
+    r = d.call("calib_run", "[]")
+    s = d.call("calib_state")
+    e = d.wait_event("calib", timeout=600)
+    expect(r.get("waiting") and s["calib_waiting"] and e and e.get("action") == "calibrate"
+           and not d.call("calib_state")["calib_waiting"],
+           f"Calibrate with a photo still on its way: waits for its check, then calibrates by itself "
+           f"({s['count']} photos, fewer than the {s['limits']['min']} advised; {e and ('ok' if e.get('ok') else e.get('error'))})")
+    # the photo taken by itself: the simulated phone shows the board at the guide's pose, held still
+    d.call("calib_set", json.dumps({"auto": True}))
+    w = d.call("calib_watch", True)
+    b._auto.watch.gap_s, b._auto.watch.hold_s = 1.5, 0.2
+    n2 = len(d.events)
+    got = d.wait(lambda: sum(1 for x in d.events[n2:] if x["type"] == "calib_photo" and x.get("action") == "shot"
+                             and x.get("auto")) >= 2, 60)
+    autos = [x for x in d.events[n2:] if x["type"] == "calib_photo" and x.get("action") == "shot"]
+    states = {x["state"] for x in d.events[n2:] if x["type"] == "calib_auto"}
+    d.call("calib_watch", False)
+    d.wait(lambda: not b._shots and not b._checking(), 60)
+    n3 = len(d.events)
+    d.wait(lambda: False, 3)
+    later = [x for x in d.events[n3:] if x["type"] == "calib_photo" and x.get("action") == "shot"]
+    expect(w.get("ok") and got and len(autos) >= 2 and all(x.get("auto") for x in autos) and "hold" in states
+           and b._auto is None and not later,
+           f"the photo taken by itself: {len(autos)} photos once the phone held the guide's pose ({sorted(states)}); "
+           f"none once the Photos step is left")
+    # the phone's video: never a photo taken by itself, nor a film started by one, while filming or not
+    d.call("calib_set", json.dumps({"mode": "video", "auto": True}))
+    d.call("calib_watch", True)
+    in_video = b._auto is None
+    b._auto_fire()
+    film = d.call("calib_state").get("film") or {}
+    d.call("calib_watch", False)
+    d.call("calib_set", json.dumps({"mode": "photo"}))
+    expect(in_video and not film.get("recording") and not film.get("starting") and "phone" not in b._busy,
+           "the phone's video: the photo taken by itself does not watch, and its trigger starts no film")
+    d.call("calib_set", json.dumps({"auto": True}))
+    phone.photo_px = b.run().config.photo_px
+    for x in raw.iterdir():
+        if x.name not in had:
+            shutil.rmtree(x)
+    b._pending_cal.clear()
+
+
+def test_judged(d):
+    """The calibration judges its photos: never good with a board not flat, a phone that moved or automatic settings
+    (the worst first; a corner never reached only advice); each photo checked against the camera's settings of the
+    first one kept; every pose taken but a corner of the photo without the board: that corner's pose once more, past
+    the plan; the camera app left in its mode for a calibration photo (no intent to it)."""
+    import calib_guide
+    b = d.backend
+    raw = b.roots.calib_raw
+    had = {x.name for x in raw.iterdir()} if raw.is_dir() else set()
+    d.call("calib_set", json.dumps({"mode": "photo", "plan": "quick", "kind": "calibration", "auto": False}))
+    base = {"K": [[3000.0, 0, 2039.5], [0, 3000.0, 1535.5], [0, 0, 1]], "dist": [0.0] * 5, "image_size": [4080, 3072],
+            "rms_px": 0.3, "n_views": 15, "std": {k: 0.4 for k in ("fx", "fy", "cx", "cy")},
+            "per_view_rms_px": {"a.jpg": 0.3}, "plan": "quick", "mode": "photo"}
+    said = {}
+    for tag, issues in (("clean", []), ("corner", ["corners_missing"]),
+                        ("bad", ["corners_missing", "camera_settings", "board_not_flat", "phone_not_still"])):
+        b._pending_cal["photo"] = {**base, "issues": issues, "shape": {"flat": "board_not_flat" not in issues, "sag_mm": 2.6},
+                                   "centre": {"still": "phone_not_still" not in issues, "spread_px": 25.0},
+                                   "coverage": {"missing_corners": ["top_right"] if issues else [], "reach": 0.7},
+                                   "settings": {"a.jpg": ["exposure_auto"]} if "camera_settings" in issues else {}}
+        said[tag] = d.call("calib_state")["result"]
+    bad = said["bad"]
+    expect(said["clean"]["verdict"] == "good" and said["corner"]["verdict"] == "good" and not said["corner"]["not_good"]
+           and said["corner"]["missing_corners"] == ["top_right"] and bad["verdict"] == "poor"
+           and bad["issues"] == list(ig.ISSUE_ORDER) and bad["sag_mm"] == 2.6 and bad["settings"] == ["exposure_auto"]
+           and not ig.Backend._good({**base, "issues": ["phone_not_still"]}) and ig.Backend._good(base),
+           f"the verdict: good with a corner never reached (advice), not good with {bad['not_good']}, the worst first "
+           f"({bad['issues']})")
+    b._pending_cal.clear()
+    # a photo checked against the camera's settings of the first photo kept in its series
+    folder = raw / "20990101_judged_photo"
+    folder.mkdir(parents=True)
+    for k, name in enumerate(("a.jpg", "b.jpg")):
+        (folder / name).write_bytes(b"x")
+        os.utime(folder / name, (1e9 + k, 1e9 + k))
+    first = {"known": True, "program": 1, "white_balance": 1, "iso": 100.0, "exposure_s": 0.02, "problems": []}
+    b._write_checks(folder, {"a.jpg": {"ok": True, "why": "", "size": [4080, 3072], "settings": first, "seq": 1}})
+    got, real = {}, calibrate_charuco.check_photo
+
+    def fake(path, board, size=None, first=None):
+        got.update(name=Path(path).name, size=size, first=first)
+        return {"ok": True, "why": "", "corners": 50, "of": 70, "blur_px": 1.0, "size": [4080, 3072], "points": [],
+                "coverage": None, "settings": {"known": False, "problems": []}}
+    calibrate_charuco.check_photo = fake
+    try:
+        b._queue_checks(folder, [folder / "b.jpg"])
+        d.wait(lambda: "b.jpg" in b._photo_checks(folder), 20)
+    finally:
+        calibrate_charuco.check_photo = real
+    expect(got.get("name") == "b.jpg" and got.get("first") == first and got.get("size") == [4080, 3072],
+           f"a photo checked against the settings of the first one kept ({got.get('first')})")
+    # every pose of the plan taken, the board never in the top right corner: that corner's pose again, past the plan
+    d.call("calib_series_new")
+    plan = calib_guide.PLANS["quick"]
+    b._poses_taken = lambda *a: set(range(len(plan)))
+    try:
+        b._missing_corners = lambda *a: ["top_right"]
+        s = d.call("calib_state")
+        b._missing_corners = lambda *a: []
+        done = d.call("calib_state")
+    finally:
+        del b._poses_taken
+        b.__dict__.pop("_missing_corners", None)
+    i = next(j for j, p in enumerate(plan) if p.get("corner") == "top_right")
+    expect(s["next"] and s["next"]["extra"] == "top_right" and s["next"]["n"] == i and done["next"] is None,
+           f"every pose taken, no board yet in the top right corner: its pose ({i + 1}) once more; none once reached")
+    # a calibration photo leaves the camera app in its mode (Pro): no intent to it
+    phone, seen = b.phone(), {}
+    real_take = phone.take
+
+    def take(timeout=None, pressed=None, keep_mode=False):
+        seen["keep_mode"] = keep_mode
+        return real_take(pressed=pressed, keep_mode=keep_mode)
+    phone.take = take
+    try:
+        n = len(d.events)
+        b._shoot_into(folder, check=False)
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("name") for x in d.events[n:]), 30)
+    finally:
+        del phone.take
+    expect(seen.get("keep_mode") is True, f"a calibration photo: the camera app kept in its mode ({seen})")
+    for x in raw.iterdir():
+        if x.name not in had:
+            shutil.rmtree(x)
 
 
 def test_midnight(d):
@@ -782,7 +1160,7 @@ def test_series(d):
         n = len(d.events)
         a = d.call("calib_take")
         e = d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n:]), 60)
-        return a, next((x for x in d.events[n:] if x["type"] == "calib_photo"), None) if e else None
+        return a, next((x for x in d.events[n:] if x["type"] == "calib_photo" and x.get("check")), None) if e else None
     a, e = take()
     s = d.call("calib_state")
     first = s["series"]
@@ -826,30 +1204,38 @@ def test_series(d):
                f"retake ({e and e['check']['why']}, blur {e and e['check']['blur_px']} px), put aside in rejected/, "
                f"the same pose asked again")
     del b._sim_scene
-    # the rest of the plan: enough at 12, full at 15
+    # the rest of the plan: enough at 12, full at 15, past it a photo for each corner of the photo the board has not
+    # reached yet (at most ig.EXTRA_MAX), then full
     for _ in range(14):
         take()
+    extras = 0
+    while extras < ig.EXTRA_MAX and (d.call("calib_state")["next"] or {}).get("extra"):
+        take()
+        extras += 1
     s = d.call("calib_state")
+    n_full = s["count"]
     full = d.call("calib_take")
-    expect(s["count"] == 15 and s["next"] is None and full.get("error") == "calib_full",
-           f"the plan full at 15 photos ({s['count']}): no more taken")
+    expect(n_full == 15 + extras and s["next"] is None and full.get("error") == "calib_full",
+           f"the plan full at 15 photos and {extras} for the corners of the photo ({s['count']}): no more taken")
     # a board changed after photos: the series is not of it, the next photo starts a new one
     d.call("board_area", area(1100, 820))
     s = d.call("calib_state")
-    expect(s["series"]["n"] == 15 and not s["series"]["same"] and s["count"] == 0,
+    expect(s["series"]["n"] == n_full and not s["series"]["same"] and s["count"] == 0,
            "board laid out anew after the photos: the series is not of it, the count starts again")
     d.call("board_area", area(1500, 820))
     s = d.call("calib_state")
-    expect(s["series"]["same"] and s["count"] == 15, "the board of the photos back (held while it fits): the series again")
+    expect(s["series"]["same"] and s["count"] == n_full,
+           "the board of the photos back (held while it fits): the series again")
     # the calibration: errors per photo and over the board, the intrinsics in plain units
     d.call("calib_run", "[]")
     e = d.wait_event("calib", timeout=600)
     s = d.call("calib_state")
     r = s["result"]
-    expect(e and e["ok"] and r and not r["saved"] and r["verdict"] == "good" and r["n_views"] >= 14 and len(r["photos"]) == 15
+    expect(e and e["ok"] and r and not r["saved"] and r["verdict"] == "good" and r["n_views"] >= 14
+           and len(r["photos"]) == n_full
            and r["residuals"]["corners"] and r["grid"] and abs(r["plain"]["fx"] / (3071.4 * 2040 / 4080) - 1) < 0.003
            and r["focal_ok"],
-           f"calibration: {r and r['verdict']}, RMS {r and r['rms_px']} px on {r and r['n_views']} of 15 photos, "
+           f"calibration: {r and r['verdict']}, RMS {r and r['rms_px']} px on {r and r['n_views']} of {n_full} photos, "
            f"focal {r and round(r['plain']['fx'], 1)} px (true {3071.4 * 2040 / 4080:.1f}, +/- "
            f"{r and r['plain']['f_std'] is not None and round(r['plain']['f_std'], 2)} px), field of view "
            f"{r and round(r['plain']['fov_x'], 1)} deg, lens bend {r and round(r['plain']['bend_px'], 1)} px, "
@@ -874,7 +1260,7 @@ def test_series(d):
     r2 = d.call("calib_state")["result"]
     st = {p["name"]: p["state"] for p in r2["photos"]}
     expect(st[worst] == "excluded" and r2["n_views"] == r["n_views"] - (0 if worst in r.get("dropped", []) else 1)
-           and len(r2["photos"]) == 15,
+           and len(r2["photos"]) == n_full,
            f"the photo with the largest error left out by hand, calibrated again: {r2['n_views']} photos, RMS "
            f"{r2['rms_px']} px; the photo still shown, as left out")
     sv = d.call("calib_save")
@@ -918,6 +1304,7 @@ def test_series(d):
     d.call("calib_stream", False)
     s = d.call("calib_state")
     expect(not s["live"]["running"], "the Photos step left: the live video stops")
+    test_film(d, raw)
     d.call("calib_set", json.dumps({"mode": "photo"}))
     phone.photo_px = b.run().config.photo_px
     for x in raw.iterdir():          # the series of this test go
@@ -925,6 +1312,68 @@ def test_series(d):
             shutil.rmtree(x)
     b._pending_cal.clear()
     (b.roots.calib_out / "intrinsics_photo.json").unlink(missing_ok=True)
+    (b.roots.calib_out / "intrinsics_video.json").unlink(missing_ok=True)
+
+
+def test_film(d, raw):
+    """The video mode: a film of the camera app, the simulated phone filming the board through the poses of the plan.
+    Film and Stop on the same button, the camera busy while it films; the frames chosen by themselves (still, sharp,
+    of different poses) and calibrated; saved as the video mode's own calibration, the photos' left as it was; a film
+    added by hand goes the same way, in a series of its own."""
+    import calib_video
+    b = d.backend
+    photo_sha = sha(b.roots.calib_out / "intrinsics_photo.json")
+    d.call("calib_set", json.dumps({"mode": "video", "plan": "quick"}))
+    n0 = len(d.events)
+    started = d.call("calib_take")
+    rec = d.wait(lambda: any(x["type"] == "calib_film" and x.get("action") == "recording" for x in d.events[n0:]), 20)
+    s = d.call("calib_state")
+    other = d.call("calib_stream", True)        # the camera films: the live video waits
+    d.call("calib_stream", False)
+    stopped = d.call("calib_take")
+
+    def ended(n):
+        return any((x["type"] == "calib" and x.get("mode") == "video") or x["type"] == "acquire_failed"
+                   for x in d.events[n:])
+    done = d.wait(lambda: ended(n0), 300)
+    v = d.call("calib_state")
+    folder = raw / v["series"]["name"] if v["series"] else None
+    films = sorted((folder / calib_video.FILM_DIR).glob("*.mp4")) if folder else []
+    r = v["result"] or {}
+    chosen = next((x for x in d.events[n0:] if x["type"] == "calib_film" and x.get("action") == "chosen"), {})
+    failed = next((x for x in d.events[n0:] if x["type"] == "acquire_failed"), None)
+    expect(started.get("film") == "starting" and rec and s["film"]["recording"] and other.get("error") == "busy"
+           and stopped.get("film") == "stopping" and done and not failed and folder and folder.name.endswith("_video")
+           and len(films) == 1 and v["count"] == chosen.get("n") and v["count"] >= 12 and v["next"] is None
+           and r.get("verdict") == "good" and r.get("cropped") is False,
+           f"video mode: Film, the camera busy while it films, Stop; {chosen.get('n')} frames chosen by themselves "
+           f"from {chosen.get('seconds')} s ({chosen.get('counts')}), calibrated: {r.get('verdict')}, RMS "
+           f"{r.get('rms_px')} px, field {r.get('narrower')} narrower than the photos{'; ' + str(failed) if failed else ''}")
+    d.call("calib_save")
+    vid = json.loads((b.roots.calib_out / "intrinsics_video.json").read_text(encoding="utf-8"))
+    expect(vid.get("mode") == "video" and vid["image_size"] == list(ig.FILM_SIM_SIZE) and films
+           and (vid.get("film") or {}).get("video") == films[0].name
+           and sha(b.roots.calib_out / "intrinsics_photo.json") == photo_sha,
+           "saved as intrinsics_video.json, with its mode, its size and its film; the photos' calibration untouched")
+    hand = Path(b.roots.local) / "film_by_hand.mp4"
+    shutil.copy2(films[0], hand)
+
+    class Dialog:
+        @staticmethod
+        def getOpenFileName(*_):
+            return str(hand), ""
+    real_dialog, ig.QFileDialog = ig.QFileDialog, Dialog
+    n1 = len(d.events)
+    try:
+        added = d.call("calib_import", "")
+    finally:
+        ig.QFileDialog = real_dialog
+    again = d.wait(lambda: ended(n1), 120)
+    w = d.call("calib_state")
+    expect(added.get("film") == "copying" and again and w["series"]["name"] != v["series"]["name"]
+           and w["count"] == v["count"],
+           f"a film added by hand: a series of its own ({w['series']['name']}), the same {w['count']} frames chosen")
+    hand.unlink(missing_ok=True)
 
 
 def test_link(d):
@@ -1133,7 +1582,8 @@ window.__fit = function () {
     + ' .toggle, .sl-l, .sl-v, .rp-title, .rp-sub, .home-hd, .home-sub, .choice-name, .choice-line, .stcell-l, .stcell-v,'
     + ' .fold-name, .tile-l, .tile-v, .tile-c, .live-light span, .trial-sub, .now-n, .ct-fname, .covl div, .lk-word,'
     + ' .czoom, .seq-n, .seq-v, .seq-t, .tool-group .btn, .trial-id, .count-of, .count-say, .guide-n, .guide-w,'
-    + ' .guide-side-l, .guide-key span, .ph-last-t, .bd-ask-hd, .bd-steps-hd, .bd-step-n, .fig-note, .bd-tool, .guide-d';
+    + ' .guide-side-l, .guide-key span, .guide-leg-l, .ph-last-t, .bd-ask-hd, .bd-steps-hd, .bd-step-n, .fig-note, .bd-tool, .guide-d,'
+    + ' .mg, .ml';
   const SKIP = '.log, .note-path, textarea, .combopop, .pickerpop, .toast';
   const shown = function (el) { return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'; };
   const name = function (el) {
@@ -1174,6 +1624,219 @@ window.__fit = function () {
 };
 """
 
+# The viewer navigated as Blender's, in the twin: the whole bench framed at the opening; the middle button turning
+# as Blender's turntable (about Z, on past the pole), Shift moving, Ctrl zooming, the wheel zooming to the centre,
+# Alt + left for a touchpad; the keypad's views (1 3 7, with Ctrl), 9, 8 and 4 by 15 degrees, 5, +, 0, Home; a click
+# selecting a part with its outline and its name, Alt+A and a click on nothing selecting nothing; the gizmo's letters,
+# a click on its Z looking from the top, its hand and lens.
+NAV = r"""
+(function (v) {
+  const out = {}, c = v.canvas, b = c.getBoundingClientRect();
+  const settle = function () { v.shown.q.copy(v.goal.q); v.shown.dist = v.goal.dist; v.shown.at.copy(v.goal.at); v.place(v.shown); };
+  const back = function () { return new THREE.Vector3(0, 0, 1).applyQuaternion(v.goal.q); };
+  const elev = function () { return Math.asin(Math.max(-1, Math.min(1, back().dot(v.U)))) * 180 / Math.PI; };
+  const azim = function () { const d = back(); return Math.atan2(d.dot(v.F), d.dot(v.R)) * 180 / Math.PI; };
+  const ev = function (type, x, y, o) {
+    const e = new PointerEvent(type, Object.assign({ pointerId: 7, bubbles: true, cancelable: true, clientX: b.left + x,
+                                                     clientY: b.top + y, pointerType: 'mouse' }, o || {}));
+    c.dispatchEvent(e);
+  };
+  const drag = function (x, y, dx, dy, o) {
+    ev('pointerdown', x, y, o); ev('pointermove', x + dx / 2, y + dy / 2, o); ev('pointermove', x + dx, y + dy, o);
+    ev('pointerup', x + dx, y + dy, o);
+    settle();
+  };
+  const key = function (code, o) {
+    window.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ code: code, bubbles: true, cancelable: true }, o || {})));
+    settle();
+  };
+  const near = function (a, b2, tol) { return Math.abs(a - b2) < (tol || 0.5); };
+  const W = v.w, H = v.h;
+  settle();
+  // where the model falls on the screen: its farthest point from the centre (1: the edge) and the centre of its extent
+  const extent = function () {
+    v.eye.updateMatrixWorld();
+    let x0 = 9, x1 = -9, y0 = 9, y1 = -9;
+    v.points().forEach(function (p) {
+      const n = new THREE.Vector3(p[0], p[1], p[2]).project(v.eye);
+      x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y);
+    });
+    return { reach: Math.max(-x0, x1, -y0, y1), cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+  };
+  const framedNow = function () {
+    const e = extent();
+    return e.reach <= 1.0001 && e.reach > 0.85 && (Math.abs(e.cx) < 0.02 || Math.abs(e.cy) < 0.02);
+  };
+  // 1. the whole model framed (what is drawn centred and filling the view), turning about the model's middle
+  const box = v.bounds;
+  out.framed = framedNow() && v.goal.at.distanceTo(box.getCenter(new THREE.Vector3())) < v.radius * 0.3;
+  out.reach = Math.round(extent().reach * 1000) / 1000;
+  // 2. middle button: turntable about Z, on past the pole
+  let e0 = elev(), a0 = azim();
+  drag(W / 2, H / 2, 120, 0, { button: 1, buttons: 4 });
+  out.turn_across = near(elev(), e0) && !near(azim(), a0, 5);
+  e0 = elev();
+  drag(W / 2, H / 2, 0, -Math.min(W, H) * 0.6, { button: 1, buttons: 4 });
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(v.goal.q);
+  out.turn_up = elev() < e0 - 30;
+  drag(W / 2, H / 2, 0, Math.min(W, H) * 1.4, { button: 1, buttons: 4 });
+  const up2 = new THREE.Vector3(0, 1, 0).applyQuaternion(v.goal.q);
+  out.past_pole = up2.dot(v.U) < 0 || up.dot(v.U) < 0 || elev() > 80;     // the view goes over the top, no stop
+  key('Home');
+  // 3. Shift + middle moves, Ctrl + middle zooms, the wheel zooms to the centre
+  let q0 = v.goal.q.clone(), at0 = v.goal.at.clone(), d0 = v.goal.dist;
+  drag(W / 2, H / 2, 80, 40, { button: 1, buttons: 4, shiftKey: true });
+  out.shift_moves = v.goal.q.angleTo(q0) < 1e-5 && v.goal.at.distanceTo(at0) > 0 && near(v.goal.dist, d0, 1e-9);
+  at0 = v.goal.at.clone(); d0 = v.goal.dist;
+  drag(W / 2, H / 2, 0, -80, { button: 1, buttons: 4, ctrlKey: true });
+  out.ctrl_zooms_in = v.goal.dist < d0 * 0.8 && v.goal.at.distanceTo(at0) < 1e-9;
+  d0 = v.goal.dist;
+  c.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, clientX: b.left + 20, clientY: b.top + 20, bubbles: true, cancelable: true }));
+  settle();
+  out.wheel_zooms_centre = v.goal.dist > d0 * 1.05 && v.goal.at.distanceTo(at0) < 1e-9;
+  // 4. Alt + left as the middle button (a touchpad); Shift + Alt + left moves
+  e0 = elev(); a0 = azim();
+  drag(W / 2, H / 2, 120, 0, { button: 0, buttons: 1, altKey: true });
+  out.alt_left_turns = near(elev(), e0) && !near(azim(), a0, 5);
+  at0 = v.goal.at.clone(); q0 = v.goal.q.clone();
+  drag(W / 2, H / 2, 60, 0, { button: 0, buttons: 1, altKey: true, shiftKey: true });
+  out.shift_alt_left_moves = v.goal.q.angleTo(q0) < 1e-5 && v.goal.at.distanceTo(at0) > 0;
+  // 5. the keypad and Home
+  v.hot = true;
+  const views = {};
+  [['Numpad1', {}, 'front'], ['Numpad1', { ctrlKey: true }, 'back'], ['Numpad3', {}, 'right'], ['Numpad3', { ctrlKey: true }, 'left'],
+   ['Numpad7', {}, 'top'], ['Numpad7', { ctrlKey: true }, 'bottom']].forEach(function (k) {
+    key(k[0], k[1]);
+    const d = back();
+    views[k[2]] = [Math.round(d.dot(v.R) * 1000) / 1000, Math.round(d.dot(v.F) * 1000) / 1000, Math.round(d.dot(v.U) * 1000) / 1000];
+  });
+  out.views = views;
+  out.keypad_views = views.front[1] === -1 && views.back[1] === 1 && views.right[0] === 1 && views.left[0] === -1
+    && views.top[2] === 1 && views.bottom[2] === -1;
+  key('Numpad1');
+  key('Numpad9');
+  out.opposite = Math.round(back().dot(v.F) * 1000) / 1000 === 1;
+  key('Numpad1');
+  e0 = elev();
+  key('Numpad8');
+  out.step_up = near(elev(), e0 + 15, 0.01);
+  a0 = azim();
+  key('Numpad4');
+  out.step_side = near(Math.abs(azim() - a0), 15, 0.01);
+  key('Numpad5');
+  out.ortho = v.ortho && v.eye.isOrthographicCamera;
+  key('Numpad5');
+  out.persp = !v.ortho && v.eye.isPerspectiveCamera;
+  d0 = v.goal.dist;
+  key('NumpadAdd');
+  out.plus = near(v.goal.dist, d0 / 1.2, 1e-6);
+  key('Home');
+  out.home = framedNow();
+  // 6. a click selects a part, its outline and its name; Alt+A and a click on nothing select nothing
+  const t = new THREE.Vector3().fromArray(TWIN.extras.target || [0, 0, 0]).project(v.eye);
+  const tx = (t.x + 1) / 2 * W, ty = (1 - t.y) / 2 * H;
+  ev('pointerdown', tx, ty, { button: 0, buttons: 1 }); ev('pointerup', tx, ty, { button: 0 });
+  out.selected = v.sel ? v.sel.name : '';
+  out.label = v.label.style.display !== 'none' && v.label.textContent === PARTS.name(out.selected)
+    && PARTS.known(out.selected);
+  out.outline_meshes = v.sel ? v.sel.parts.length : 0;
+  key('KeyA', { altKey: true });
+  out.alt_a = !v.sel;
+  ev('pointerdown', tx, ty, { button: 0, buttons: 1 }); ev('pointerup', tx, ty, { button: 0 });
+  const had = !!v.sel;
+  ev('pointerdown', 3, H - 3, { button: 0, buttons: 1 }); ev('pointerup', 3, H - 3, { button: 0 });
+  out.click_nothing = had && !v.sel;
+  // 7. the gizmo: a click on Z looks from the top; its letters; the hand and the lens there
+  const z = v.gz.axes.find(function (a) { return a.axis === 2 && a.sign > 0; });
+  out.letters = v.gz.axes.filter(function (a) { return a.sign > 0; }).map(function (a) { return a.letter; }).join('');
+  const zb = z.fill.getBoundingClientRect(), zx = zb.left + zb.width / 2, zy = zb.top + zb.height / 2;
+  const pe = function (type, el, x, y) { el.dispatchEvent(new PointerEvent(type, { pointerId: 9, bubbles: true, clientX: x, clientY: y, button: 0 })); };
+  pe('pointermove', v.gz.disc, zx, zy);
+  pe('pointerdown', v.gz.disc, zx, zy);
+  pe('pointerup', v.gz.disc, zx, zy);
+  settle();
+  out.gizmo_top = Math.round(back().dot(v.U) * 1000) / 1000 === 1;
+  out.tools = v.gz.tools.map(function (t) { return t.name; }).join() === 'zoom,pan,camera,persp';
+  // 8. the keypad's 0: the phone's view
+  key('Numpad0');
+  out.camera = TWIN.view;
+  key('Home');
+  return JSON.stringify(out);
+})(TWIN.viewer)
+"""
+# The phone's link said by ear: nothing for the first state the page hears (the start), the phone gone and come back
+# after it. The sounds are caught, never played; the page's phone put back as it was.
+SOUND_PHONE = r"""
+(function () {
+  const real = PHONE, heard = phoneHeard, play = window.playSound, got = [];
+  window.playSound = function (n) { got.push(n); return true; };
+  try {
+    phoneHeard = false;
+    PHONE = { ok: false, cause: 'unknown', link: 'usb' };
+    const ev = function (ok) { onEvent(JSON.stringify(Object.assign({}, real, { type: 'phone', ok: ok }))); };
+    ev(true);
+    const start = got.slice();
+    ev(false);
+    ev(true);
+    return JSON.stringify([start, got]);
+  } finally {
+    window.playSound = play;
+    PHONE = real;
+    phoneHeard = heard;
+    showPhone();
+  }
+})()
+"""
+# The plate in 3D on the board step: the board's kind, its model loaded, its box shown, no GL context to be had.
+PLATE_SHOWN = ("JSON.stringify([BOARD.state.kind, !!PLATE3D.model, !$('bd3d').classList.contains('hidden'),"
+               " !!PLATE3D.failed])")
+# The plate's viewer (glTF's Y up): framed at the opening, the keypad's 7 from its top, 1 from its front, Home.
+PLATE_NAV = r"""
+(function (v) {
+  const back = function () { return new THREE.Vector3(0, 0, 1).applyQuaternion(v.goal.q); };
+  const settle = function () { v.shown.q.copy(v.goal.q); v.shown.dist = v.goal.dist; v.shown.at.copy(v.goal.at); v.place(v.shown); };
+  const reach = function () {
+    v.eye.updateMatrixWorld();
+    return Math.max.apply(null, v.points().map(function (p) {
+      const n = new THREE.Vector3(p[0], p[1], p[2]).project(v.eye); return Math.max(Math.abs(n.x), Math.abs(n.y)); }));
+  };
+  const key = function (code) { window.dispatchEvent(new KeyboardEvent('keydown', { code: code, bubbles: true, cancelable: true })); settle(); };
+  settle();
+  const r0 = reach();
+  v.hot = true;
+  key('Numpad7'); const top = Math.round(back().dot(v.U) * 1000) / 1000;
+  key('Numpad1'); const front = Math.round(back().dot(v.F) * 1000) / 1000;
+  key('Home'); const r1 = reach();
+  v.hot = false;
+  return JSON.stringify({ framed: r0 <= 1.0001 && r0 > 0.85, top: top, front: front, home: r1 <= 1.0001 && r1 > 0.85 });
+})(PLATE3D.viewer)
+"""
+# The twin through the trial's steps: each with its pose (the arm, the pendulum, the drape, the marker after the
+# impact), the scroller's buttons and the arrows; then back at the step the trial is at. Every part's name in words.
+TWIN_STEPS = r"""
+(function () {
+  const out = { poses: [] }, back = TWIN.entry;
+  for (let i = 0; i < TWIN.entries.length; i++) {
+    TWIN.goEntry(i);
+    const p = TWIN.probe();
+    out.poses.push([p.pose.key, p.pose.sub, p.armAz, p.swing, p.drape, p.pose.after, p.sweeping, p.stepTitle]);
+  }
+  TWIN.goEntry(0);
+  $('twNext').click(); out.next = TWIN.entry === 1;
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+  out.arrow = TWIN.entry === 2;
+  $('twPrev').click(); out.prev = TWIN.entry === 1;
+  TWIN.goEntry(back);
+  out.steps = TWIN.steps.length; out.entries = TWIN.entries.length; out.angle = Number(TWIN.state.trial.angle_deg);
+  out.drapeTrial = !!TWIN.state.trial.drape; out.cameraDeg = TWIN.extras.arm.camera_deg;
+  const names = {};
+  TWIN.model.traverse(function (m) { (m.userData.objects || []).forEach(function (o) { names[o[0]] = 1; }); });
+  out.unnamed = Object.keys(names).filter(function (n) { return !PARTS.known(n); });
+  return JSON.stringify(out);
+})()
+"""
+
+
 # The sweep: home, every step of every module, its Advanced part open, every kind of step of a trial, the Phone
 # panel (on the cable, Advanced, pairing on Wi-Fi), at the smallest window and at the largest of this screen, in
 # the six languages. (name, script, wait ms, picture).
@@ -1188,6 +1851,9 @@ SWEEP = [
                 "setTimeout(function () { BOARD.render(Object.assign({}, BOARD.state, {chosen: false})); }, 600)",
      1500, True),
     ("cal_board", "BOARD.set({kind: 'screen'})", 1600, True),
+    # a monitor with a long name, whatever this computer has (the Philips 40" of the bench, as Windows names it)
+    ("cal_board_long", "BOARD.render(Object.assign({}, BOARD.state, {mon: Object.assign({}, BOARD.state.mon,"
+                       " {label: 'PHI PHL BDM4037U', diag_in: 40.0})}))", 600, False),
     ("cal_board_ruler", "__adv('calBdRuler', true); BOARDVIEW.label()", 900, True),
     ("cal_plate", "__adv('calBdRuler', false); BOARD.set({kind: 'plate'})", 2200, True),
     ("cal_plate_short", "__adv('calBdShort', true)", 900, True),
@@ -1196,6 +1862,7 @@ SWEEP = [
     ("cal_photos", "BOARD.set({kind: 'screen'}); go('calibration', 'photos')", 1800, True),
     ("cal_photos_adv", "__adv('calPhAdv', true)", 900, True),
     ("cal_stream", "__adv('calPhAdv', false); CAL.set({mode: 'stream'})", 5000, True),
+    ("cal_video", "CAL.set({mode: 'video'})", 1800, True),
     ("cal_photo_mode", "CAL.set({mode: 'photo'})", 1500, False),
     ("cal_result", "go('calibration', 'result')", 1300, True),
     ("cal_result_adv", "__adv('calResAdv', true)", 700, False),
@@ -1220,19 +1887,96 @@ SWEEP = [
     ("log", "go('trials', 'log'); __adv('lgAdv', true)", 1300, True),
     ("sequence", "__closeAdv(); go('trials', 'sequence')", 1300, True),
     ("config", "go('trials', 'config'); __adv('cfgAdv', true)", 1300, True),
+    ("twin", "__closeAdv(); go('trials', 'guide'); setTimeout(function () { TWIN.open('trials'); }, 300)", 1500, True),
+    ("twin_adv", "__adv('twAdv', true)", 900, False),
     ("results", "__closeAdv(); go('results', 'scans')", 900, True),
 ]
 SIZES = (("min",) + ig.MIN_WINDOW, ("large", 1920, 1032))
 SHOTS = {("large", "en"), ("large", "it"), ("min", "en"), ("min", "de")}
 SIM_PHOTO = (2040, 1536)        # the simulated phone's photos in the window test: half the phone's, the same checks
-# the window at each display scaling, in Qt's pixels: as large as the 1920 x 1080 screen holds (1750 x 1000 and
-# 1860 x 1020 physical), so the board fits beside the panel
-SCALE_WINDOW = {"1.25": (1400, 800), "1.5": (1240, 680)}
+# the window at each display scaling, in physical pixels (Qt's are these over the scaling): as large as a 1920 x 1080
+# screen holds, so the board fits beside the panel; less on a screen that has less room
+SCALE_WINDOW = {"1.25": (1750, 1000), "1.5": (1860, 1020)}
+SCALES = ("1.25", "1.5")
+FIT_AGAIN_MS = 450      # the words of a view measured twice this far apart: only what stays wrong in both counts
+AWAY_GAP = 64           # the window under test lies this far right of every screen, out of the way of the computer's user
+# Chromium in the window test: WebGL given back after a loss of the GPU's process (grabbing the window can cause one),
+# never blocked for the page for a while after it, nor the GPU given up after a few losses
+TEST_CHROMIUM = "--disable-domain-blocking-for-3d-apis --disable-gpu-process-crash-limit"
 
 
 def Qt_key(name):
     from slantui.shell.qt import Qt
     return getattr(Qt.Key, "Key_" + name)
+
+
+def safe_output():
+    """Printing never stops the test: a console that cannot write a sign (cp1252 and the inch sign, a Chinese word)
+    writes it as an escape instead of raising UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except (AttributeError, ValueError):
+                pass
+
+
+def build_window(argv):
+    """The app's window for the window tests: Chromium as TEST_CHROMIUM has it, and the focus given back to the window
+    that had it (the computer may be in use: what is typed there never reaches the app under test)."""
+    import ctypes
+    real = ig.Application
+    user32 = ctypes.windll.user32 if os.name == "nt" else None
+    before = user32.GetForegroundWindow() if user32 else None
+
+    def application(*a, **kw):
+        kw["chromium"] = (kw.get("chromium", "") + " " + TEST_CHROMIUM).strip()
+        return real(*a, **kw)
+    ig.Application = application
+    try:
+        app, win, backend = ig.build(ig.parse(argv))
+    finally:
+        ig.Application = real
+    if user32 and before:
+        user32.SetForegroundWindow(before)
+    return app, win, backend
+
+
+def one_window_test(wait_s=2700):
+    """One window test at a time on this computer (two would grab each other's windows and screens): a named mutex,
+    waited for up to wait_s, held until this process ends. Returns whether it is held."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    k = ctypes.windll.kernel32
+    k.CreateMutexW.restype = ctypes.c_void_p
+    k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    h = k.CreateMutexW(None, 0, "Local\\ImpactGuideWindowTest")
+    if not h:
+        return False
+    t0, said = time.monotonic(), False
+    while time.monotonic() - t0 < wait_s:
+        if k.WaitForSingleObject(h, 5000) in (0, 0x80):     # WAIT_OBJECT_0, WAIT_ABANDONED (its holder ended)
+            globals()["_WINDOW_TEST_MUTEX"] = h
+            return True
+        if not said:
+            said = True
+            print("waiting for another window test of ImpactGuide to end", flush=True)
+    return False
+
+
+def away_origin(app):
+    """Where the window under test lies: right of every screen, at the top of the first one."""
+    vg = app.primaryScreen().virtualGeometry()
+    return vg.x() + vg.width() + AWAY_GAP, vg.y()
+
+
+def native_scale(app):
+    """The display scaling of the screen at the top left of the desktop, as Windows has it (Qt's own factor, if one
+    is set in the environment, taken out)."""
+    screen = next((s for s in app.screens() if s.geometry().contains(0, 0)), None) or app.primaryScreen()
+    return screen.devicePixelRatio() / float(os.environ.get("QT_SCALE_FACTOR") or 1.0)
 
 
 def grab_screen(screen):
@@ -1377,16 +2121,35 @@ def board_on_screen(app, win, backend, out=None, seen=None):
 
 def test_ui(work, shots):
     from slantui.shell.qt import QTimer
+    import twin
     shots.mkdir(parents=True, exist_ok=True)
-    app, win, backend = ig.build(ig.parse(["--simulate", str(work), "--lang", "en"]))
-    win.setGeometry(0, 0, 1440, 900)        # on the monitor, whole: the board must lie on one monitor
+    # the twin's model for the page: the app's own (a simulation takes it), else made now from the bench scene
+    tw = twin.Watcher(work / "twin", seed=twin.CACHE)
+    if tw.current() is None and tw.can_export() and tw.scene.exists():
+        tw.run()
+    twin_model = tw.current() is not None
+    app, win, backend = build_window(["--simulate", str(work), "--lang", "en"])
+    away = away_origin(app)
+
+    def place(w, h, on=False):
+        """The window w x h (Qt's pixels) right of every screen, out of the way; or (on) whole on the first screen,
+        for a grab of the screen itself. A window minimised meanwhile is put back first."""
+        if win.isMinimized():
+            win.showNormal()
+        win.setGeometry(*((0, 0) if on else away), w, h)
+    place(1440, 900)
     log = []
     taken = set()
     misfits = []       # (size, language, state, what) for every word that does not fit
     board = {"grabs": []}
 
     def grab_board(name):
-        same, found, corners, where = board_on_screen(app, win, backend, shots / f"{name}.png")
+        # the board as the screen shows it: the window on the screen for this moment only, then back out of the way
+        place(win.width(), win.height(), on=True)
+        try:
+            same, found, corners, where = board_on_screen(app, win, backend, shots / f"{name}.png")
+        finally:
+            place(win.width(), win.height())
         lay = backend._lay
         board["grabs"].append((name, same, found, corners, lay and lay["squares"], lay and round(lay["square_mm"], 3),
                                where))
@@ -1483,6 +2246,19 @@ def test_ui(work, shots):
             ("ui_06_log", "go('trials', 'log')", 1200, None),
             ("ui_07_sequence", "go('trials', 'sequence')", 1200, None),
             ("ui_08_config", "go('trials', 'config')", 1200, None),
+            # the twin of the bench: from the trial's page, its ready views, the trial after its scans
+            ("ui_08t_twin", "go('trials', 'guide'); setTimeout(function () { $('gTwin').click(); }, 700)", 3200,
+             ("twin_open", "JSON.stringify(TWIN.probe())")),
+            ("-twin_nav", "", 300, ("twin_nav", NAV)),
+            ("-twin_steps", "", 300, ("twin_steps", TWIN_STEPS)),
+            ("ui_08t2_twin_selected", "(function () { const v = TWIN.viewer, t = new THREE.Vector3().fromArray("
+                                      "TWIN.extras.target).project(v.eye); v.select(v.pick((t.x + 1) / 2 * v.w,"
+                                      " (1 - t.y) / 2 * v.h)); })()", 900, None),
+            ("ui_08u_twin_top", "TWIN.look('top')", 1200, ("twin_top", "JSON.stringify(TWIN.probe())")),
+            ("-twin_phone", "TWIN.look('phone2')", 1000, ("twin_phone", "JSON.stringify(TWIN.probe())")),
+            ("ui_08v_twin_scans", "go('results', 'scans')", 2500, ("twin_scans", "JSON.stringify(TWIN.probe())")),
+            ("ui_08w_twin_gain", "$('twGain').value = '12'; $('twGain').dispatchEvent(new Event('input'))", 1000,
+             ("twin_gain", "JSON.stringify(TWIN.probe())")),
             ("ui_08b_home", "document.querySelector('.tbar-logo-btn').click()", 1200,
              ("home", "JSON.stringify([page, !!document.querySelector('.tbar-logo-btn'),"
                       " document.querySelector('.app').classList.contains('at-home'),"
@@ -1500,7 +2276,7 @@ def test_ui(work, shots):
                         " BOARDVIEW.canvas.width, BOARDVIEW.canvas.height, BOARDVIEW.dev])")),
             ("board_10_screen", "", 300, None),
             # the window resized: laid out again for the new area, still pixel for pixel; nothing moved the window
-            ("-resize", lambda: win.setGeometry(0, 0, 1700, 960), 2500, None),
+            ("-resize", lambda: place(1700, 960), 2500, None),
             ("board_11_resized", "", 300,
              ("resized", "JSON.stringify([BOARD.state.layout && BOARD.state.layout.squares, BOARDVIEW.key])")),
             ("-geo", lambda: board.update(geo=[win.x(), win.y(), win.width(), win.height()]), 200, None),
@@ -1511,18 +2287,41 @@ def test_ui(work, shots):
             ("-ruler_forget", "BOARD.set({forget: true}); setFold($('calBdRuler'), false)", 1200, None),
             # physical: the plate in 3D beside what to do; its three readings
             ("cal_13b_plate", "document.querySelector('#calBdKinds .mitem[data-kind=physical]').click()", 3000,
-             ("plate", "JSON.stringify([BOARD.state.kind, !!PLATE3D.model, !$('bd3d').classList.contains('hidden')])")),
+             ("plate", PLATE_SHOWN)),
+            # no GL context (Chromium lost its GPU's process, which grabbing the window can cause): asked once more
+            ("-plate_again", "if (PLATE3D.failed) { PLATE3D.failed = false; PLATE3D.viewer = null; PLATE3D.show(); }",
+             2500, ("plate_again", PLATE_SHOWN)),
+            ("-plate_nav", "", 300, ("plate_nav", PLATE_NAV)),
             ("cal_13c_readings", "var i = $('calBdLong').querySelectorAll('input'); i[0].value = '220.05';"
                                  " i[1].value = '220.02'; i[2].value = '220.11'; i[2].dispatchEvent(new Event('change'))", 1500,
              ("readings", "JSON.stringify(BOARD.state.physical.plate.long)")),
             ("cal_13d_turned", lambda: turn_plate(), 1200, None),
             ("cal_13e_sheet", "document.querySelector('#calBdWhich .mitem[data-kind=sheet]').click()", 1500, None),
             ("-back_screen", "document.querySelector('#calBdKinds .mitem[data-kind=screen]').click()", 2000, None),
-            # the photos, one after the other with the guide, each checked; then the calibration
+            # the photos, one after the other with the guide, each checked; then the calibration (the photo taken by
+            # itself off here, so that the count is the page's own; under the calibration's least, Calibrate says so)
+            ("-run_few", "CAL.set({auto: false}); go('calibration', 'result')", 1500,
+             ("run_few", "JSON.stringify([CAL.state.count, $('calRunL').textContent, $('calRun').disabled,"
+                         " CAL.state.min_views])")),
             ("cal_14_photos", "go('calibration', 'photos')", 2500,
              ("photos_board", "JSON.stringify([BOARDVIEW.host && BOARDVIEW.host.id, BOARDVIEW.key])")),
             ("board_14_photos", "", 300, None),
             ("-take", lambda: None, 0, ("take", 12)),
+            # the space bar takes the next photo at once: the guide flashes and moves on
+            ("-space", "window.__n0 = CAL.state.count; window.__g0 = CAL.state.next && CAL.state.next.n;"
+                       " document.body.dispatchEvent(new KeyboardEvent('keydown', {key: ' ', bubbles: true}));"
+                       " document.body.dispatchEvent(new KeyboardEvent('keyup', {key: ' ', bubbles: true}))", 600,
+             ("space_flash", "JSON.stringify([$('phGuide').classList.contains('shot'), $('cpCard').classList.contains('shot')])")),
+            ("cal_14b_space", "", 2500,
+             ("space", "JSON.stringify([window.__n0, CAL.state.count, window.__g0, CAL.state.next && CAL.state.next.n,"
+                       " $('calAutoSay').textContent, (CAL.state.series.shots || []).length])")),
+            # the phone's video: the space bar never starts or stops a film, and nothing is taken by itself
+            ("-space_video", "CAL.set({mode: 'video'}); setTimeout(function () { document.body.dispatchEvent("
+                             "new KeyboardEvent('keydown', {key: ' ', bubbles: true})); }, 900)", 2600,
+             ("space_video", "JSON.stringify([CAL.state.mode, !!(CAL.state.film && (CAL.state.film.recording"
+                             " || CAL.state.film.starting)), $('calAutoRow').classList.contains('hidden'),"
+                             " CAL.state.busy.indexOf('phone') >= 0])")),
+            ("-space_photo", "CAL.set({mode: 'photo'})", 1500, None),
             ("cal_15_enough", "", 600, None),
             ("cal_16_result", "go('calibration', 'result'); setTimeout(function () { $('calRun').click(); }, 800)", 0,
              ("calib", "first")),
@@ -1534,6 +2333,10 @@ def test_ui(work, shots):
              ("leave", "JSON.stringify([$('calRun').dataset.what, CAL.exclude])")),
             ("-again", "$('calRun').click()", 0, ("calib", "again")),
             ("cal_19_again", "", 600, None),
+            # a calibration that is not good enough is saved only with a second press, the button saying so
+            ("-save_poor", "window.__verdict = CAL.state.result.verdict; CAL.state.result.verdict = 'poor';"
+                           " $('calRun').click(); CAL.state.result.verdict = window.__verdict", 500,
+             ("save_poor", "JSON.stringify([$('calRunL').textContent, CAL.state.result.saved, !!$('calRun')._armed])")),
             ("cal_20_saved", "$('calRun').click()", 1800,
              ("saved", "JSON.stringify([CAL.state.result && CAL.state.result.saved,"
                        " CAL.state.result && CAL.state.result.photos.filter(function (p) { return p.state === 'excluded'; })"
@@ -1570,31 +2373,54 @@ def test_ui(work, shots):
             ("ui_27_phone_in_module", "go('trials', 'guide'); LINK.show()", 1500, None),
             ("ui_28_phone_closed", "LINK.hide()", 900,
              ("back", "JSON.stringify([LINK.open, document.querySelector('.rp-page.show').dataset.panel])")),
+            ("-sound_phone", "", 200, ("sound_phone", SOUND_PHONE)),
             ("ui_29_results", "go('results', 'analysis')", 1200, None),
         ]
         # the sweep of every module and panel, at two sizes and in six languages
         for size, w, h in SIZES:
-            steps.append((f"-size_{size}", (lambda w=w, h=h: win.setGeometry(0, 0, w, h)), 1200, None))
+            steps.append((f"-size_{size}", (lambda w=w, h=h: place(w, h)), 1200, None))
             for code in ig.LANGS:
                 steps.append((f"-lang_{size}_{code}", lang(code), 1500, None))
                 for n, (state, script, wait, pic) in enumerate(SWEEP):
                     shot = pic and (size, code) in SHOTS
                     steps.append(((f"{size}_{code}_{n:02d}_{state}" if shot else f"-{size}_{code}_{state}"), script, wait,
                                   ("fit", "__fit()", size, code, state)))
-        steps.append(("-restore", lambda: win.setGeometry(0, 0, 1440, 900), 800, None))
+        steps.append(("-restore", lambda: place(1440, 900), 800, None))
 
         def turn_plate():
-            js("PLATE3D.turned = true; PLATE3D.view.az += 0.9; PLATE3D.view.el = 0.6; PLATE3D.draw();")
+            js("if (PLATE3D.viewer) PLATE3D.viewer.turn(0.9, -0.3);")
 
-        def measured(what, v):
+        size_of = {name: (w, h) for name, w, h in SIZES}
+
+        def measured(what, v, again=None):
             if what[0] == "fit":
                 try:
-                    for m in json.loads(v):
-                        misfits.append((what[2], what[3], what[4], m))
+                    found = json.loads(v)
+                    later = json.loads(again) if again is not None else None
                 except (TypeError, ValueError):
-                    misfits.append((what[2], what[3], what[4], f"no answer ({v})"))
+                    misfits.append((what[2], what[3], what[4], f"no answer ({v}, {again})"))
+                    return
+                for m in found:
+                    if later is None or m in later:     # still wrong a moment later: not a view that was settling
+                        misfits.append((what[2], what[3], what[4], m))
             else:
                 log.append(what[0] + " " + str(v))
+
+        def fit(what, then, tries=0):
+            """The words of the view measured twice, FIT_AGAIN_MS apart, with the window at the size of this pass: a
+            window that is not (minimised, moved or resized from outside the test) is put back and measured again."""
+            want = size_of[what[2]]
+            if (win.width(), win.height()) != want or win.isMinimized():
+                if tries < 2:
+                    place(*want)
+                    QTimer.singleShot(1500, lambda: fit(what, then, tries + 1))
+                    return
+                misfits.append((what[2], what[3], what[4], f"window at {win.width()} x {win.height()}, not "
+                                                           f"{want[0]} x {want[1]}"))
+                then()
+                return
+            js(what[1], lambda v: QTimer.singleShot(
+                FIT_AGAIN_MS, lambda: js(what[1], lambda v2: (measured(what, v, v2), then()))))
 
         def nxt():
             if not steps:
@@ -1618,6 +2444,8 @@ def test_ui(work, shots):
                     take_photos(what[1], nxt)
                 elif what[0] == "calib":
                     wait_calib(lambda: (grab(name) if not name.startswith("-") else None, nxt()), "calib_" + what[1])
+                elif what[0] == "fit":
+                    fit(what, nxt)
                 else:
                     js(what[1], lambda v: (measured(what, v), nxt()))
             if what is not None and what[0] == "calib":
@@ -1683,21 +2511,43 @@ def test_ui(work, shots):
            f"stream and beside the live view: the page's image pixel for pixel, every corner found in the grab "
            f"({grabs})")
     resized = read("resized")
-    expect(resized and grabs[0][4] != grabs[1][4] and board.get("geo") == [0, 0, 1700, 960],
+    expect(resized and grabs[0][4] != grabs[1][4] and board.get("geo") == [*away, 1700, 960],
            f"window: the window resized by hand, the board laid out again for its new area ({grabs[0][4]} -> "
            f"{grabs[1][4]}); nothing moved or resized the window ({board.get('geo')})")
     ruler = read("ruler")
     expect(ruler == "ruler", f"window: the ruler check typed in the page corrected the size ({ruler})")
-    plate, readings = read("plate"), read("readings")
-    expect(plate == ["plate", True, True] and readings and abs(readings["mean_mm"] - 220.06) < 1e-6
+    plate, plate2, readings = read("plate"), read("plate_again"), read("readings")
+    shown = any(p and p[:3] == ["plate", True, True] for p in (plate, plate2))
+    no_gl = bool(plate and plate[3] and plate2 and plate2[3])     # no GL context, asked twice
+    if no_gl and not shown:
+        print("skip  window: the plate in 3D, no GL context twice (WebGL taken away after a loss of the GPU's "
+              "process); its readings checked", flush=True)
+    expect((shown or no_gl) and plate and plate[0] == "plate" and readings and abs(readings["mean_mm"] - 220.06) < 1e-6
            and abs(readings["spread_mm"] - 0.09) < 1e-6,
            f"window: the physical board, the 3D-printed plate in 3D, three caliper readings with their mean and spread "
-           f"({plate}, {readings})")
+           f"({plate}, {plate2}, {readings})")
     photos = read("photos")
     expect(photos and photos["n"] >= 12 and photos["last"],
            f"window: photos taken with the page's Take button, each checked as it came ({photos})")
+    few, flash, space = read("run_few"), read("space_flash"), read("space")
+    space_video = read("space_video")
+    expect(space_video == ["video", False, True, False],
+           f"window: in the phone's video the space bar starts no film and the photo taken by itself is not offered "
+           f"({space_video})")
+    expect(few and few[0] < few[3] and few[2] and few[1] == "At least 8 photos",
+           f"window: under the calibration's least, Calibrate says how many it takes ({few})")
+    expect(flash == [True, True] and space and space[1] == space[0] + 1 and space[3] != space[2]
+           and space[4] == "Space bar or Enter: take" and space[5] >= 12,
+           f"window: the space bar takes the photo at once, the guide and the counter flash ({flash}), the guide moves "
+           f"on, the strip shows the photos ({space})")
     c1, c2 = read("calib_first"), read("calib_again")
     leave, saved = read("leave"), read("saved")
+    sound_phone = read("sound_phone")
+    expect(sound_phone == [[], ["off", "on"]],
+           f"window: the phone's link by ear: no sound for the state at the start, then gone and back ({sound_phone})")
+    poor = read("save_poor")
+    expect(poor == ["Not good enough: save anyway?", False, True],
+           f"window: a calibration not good enough is not saved at the first press, the button asks ({poor})")
     expect(c1 and c1["r"] and c1["r"]["verdict"] == "good" and leave and leave[0] == "again" and c2 and c2["r"]
            and c2["r"]["left"] == 1 and saved and saved[0] and saved[1] == [saved[2]],
            f"window: calibrated ({c1 and c1['r']}), the worst photo left out with a press on its bar, calibrated again "
@@ -1724,6 +2574,62 @@ def test_ui(work, shots):
     expect(not misfits, f"window: every word fits, nothing over the page, on {len(SWEEP)} views, at "
                         f"{SIZES[0][1]} x {SIZES[0][2]} and {SIZES[1][1]} x {SIZES[1][2]}, in the six languages "
                         f"({checked} views, {len(misfits)} words that do not fit)")
+    t_open, t_top, t_phone, t_scans, t_gain = (read(k) for k in ("twin_open", "twin_top", "twin_phone", "twin_scans",
+                                                                  "twin_gain"))
+    if not twin_model:
+        print("skip  window: the twin, no model of the bench (no Blender, no scene)", flush=True)
+    else:
+        moving = {"marker", "marker_a", "holder_a", "holder_b", "pendulum", "pendulum_swing", "arm"}
+        if t_open and t_open.get("noGl"):
+            # Chromium takes WebGL away for a while after it lost its GPU process, which grabbing the window can cause
+            print("skip  window: the twin had no GL context (WebGL taken away after a loss of the GPU's process); "
+                  "the rest of its opening checked", flush=True)
+            t_open = {**t_open, "drawn": True}
+        expect(t_open and t_open["loaded"] and t_open["drawn"] and t_open["view"] == ""
+               and moving <= set(t_open["nodes"]) and 0 < t_open["openMs"] < 1000 and t_open["loadMs"] < 1000
+               and t_open["holderA"] != t_open["holderB"],
+               f"window: the twin from the trial's page, the whole bench framed, one holder shown, the model "
+               f"loaded in {t_open and t_open['loadMs']} ms, open in {t_open and t_open['openMs']} ms")
+        expect(t_top and t_top["view"] == "top" and t_top["fov"] == 30 and t_phone and t_phone["view"] == "phone2"
+               and t_phone["armAz"] == 70 and t_phone["fov"] > 40,
+               f"window: the twin from above, and from the phone at 70° with the phone's field of view "
+               f"({t_phone and t_phone['fov']}°)")
+        size = lambda p: sum(x * x for x in (p or {}).get("marker") or [0]) ** 0.5  # noqa: E731
+        expect(t_scans and t_scans["mode"] == "results" and t_scans["points"] == 7 and t_gain and t_gain["ghost"]
+               and t_gain["gain"] == 12 and size(t_gain) > 5 * size(t_scans) > 0,
+               f"window: the twin in Scans and results, the marker moved as the scans say, its place before as a "
+               f"ghost, the 7 targets in colour; enlarged 12 times ({size(t_scans):.3f} -> {size(t_gain):.3f} mm)")
+        nav = read("twin_nav") or {}
+        bad = sorted(k for k, x in nav.items() if x is False)
+        expect(nav and not bad and nav.get("selected") and nav.get("outline_meshes", 0) > 0
+               and nav.get("letters") == "XYZ" and nav.get("camera", "").startswith("phone"),
+               f"window: the twin navigated as Blender's (turntable, Shift, Ctrl, wheel, Alt + left, keypad, Home, "
+               f"a part selected with its outline and name: {nav.get('selected')}, gizmo); not as it should: "
+               f"{bad or 'none'}")
+        st = read("twin_steps") or {}
+        poses = st.get("poses") or []
+        rel = [p for p in poses if p[0] == "release"]
+        at = {p[0]: p for p in poses}
+        photos = [p for p in poses if p[0].startswith("photo_az")]
+        first_after = next((i for i, p in enumerate(poses) if p[5]), len(poses))
+        expect(st and st["entries"] == st["steps"] + 1 and [p[1] for p in rel] == ["raised", "impact"]
+               and abs(rel[0][3] - st["angle"]) < 0.2 and abs(rel[1][3]) < 0.2
+               and all(p[2] == int(p[0].rsplit("az", 1)[1]) for p in photos) and photos
+               and at.get("video", [0] * 7)[6] and not any(p[5] for p in poses[:first_after])
+               and poses[first_after - 1][0] == "release" and all(p[5] for p in poses[first_after:])
+               and (st["drapeTrial"] or not any(p[4] for p in poses)) and all(p[7] for p in poses)
+               and st["next"] and st["arrow"] and st["prev"] and not st["unnamed"],
+               f"window: the twin through the {st.get('steps')} steps of the trial (the pendulum raised at "
+               f"{st.get('angle')}° then hanging at the impact, the arm at each photo, the video's sweep, the marker "
+               f"moved only after the impact, the drape only with it), its buttons and arrows; every part's name in "
+               f"words (unknown: {st.get('unnamed')})")
+    pnav = read("plate_nav") or {}
+    if no_gl and not shown:
+        print("skip  window: the plate's viewer navigated, no GL context (see above)", flush=True)
+    else:
+        expect(pnav.get("framed") and pnav.get("top") == 1 and pnav.get("front") == -1 and pnav.get("home"),
+               f"window: the plate's viewer framed at the opening, the keypad's 7 from its top and 1 from its front, "
+               f"Home ({pnav})")
     expect(len(taken) >= 10, f"window: {len(taken)} pictures in {shots}")
     print("page actions: " + ", ".join(x for x in log if not x.startswith(("confirm", "shoot", "record", "stop",
                                                                             "recording", "waiting", "disabled"))),
@@ -1735,9 +2641,12 @@ def scale_check(work, scale, out):
     before Qt starts): the window put at whole physical pixels, the board as the screen shows it against the page's
     image, pixel for pixel. Prints one JSON line."""
     from slantui.shell.qt import QTimer
-    app, win, backend = ig.build(ig.parse(["--simulate", str(work), "--lang", "en"]))
+    app, win, backend = build_window(["--simulate", str(work), "--lang", "en"])
     f = float(scale)
-    win.setGeometry(0, 0, *SCALE_WINDOW[scale])
+    # SCALE_WINDOW's physical pixels in Qt's, at most the room the screen has
+    dpr, room = win.screen().devicePixelRatio(), win.screen().availableGeometry()
+    pw, ph = SCALE_WINDOW[scale]
+    win.setGeometry(0, 0, min(round(pw / dpr), room.width()), min(round(ph / dpr), room.height()))
     res = {}
 
     def go():
@@ -1768,16 +2677,24 @@ def scale_check(work, scale, out):
 
 def test_scales(work, shots):
     """The board pixel for pixel at 125 and 150 % (scale_check in a process of its own, Qt's scaling being set before
-    it starts)."""
+    it starts). Qt's factor is the scaling wanted over the screen's own: on a screen at 150 % the check at 150 % runs
+    at the screen's own scaling and the one at 125 % with a factor of 0.83; on one at 100 %, 1.25 and 1.5."""
     import subprocess
-    for scale in ("1.25", "1.5"):
-        env = dict(os.environ, QT_SCALE_FACTOR=scale)
+    from slantui.shell.qt import QApplication
+    app = QApplication.instance()
+    native = native_scale(app) if app is not None else 1.0
+    for scale in SCALES:
+        factor = float(scale) / native
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env.pop("QT_SCALE_FACTOR", None)
+        if abs(factor - 1.0) > 1e-6:
+            env["QT_SCALE_FACTOR"] = f"{factor:.6f}"
         runs = 0
         while runs < 2:         # once more if the screen was not the app's (the computer in use meanwhile)
             runs += 1
             r = subprocess.run([sys.executable, str(Path(__file__)), "--scale-check", scale, "--work",
                                 str(work / f"scale_{scale}"), "--ui", str(shots)], capture_output=True, text=True,
-                               env=env, timeout=180, check=False)
+                               encoding="utf-8", errors="replace", env=env, timeout=180, check=False)
             line = next((x for x in r.stdout.splitlines() if x.startswith("{")), "")
             if not line:        # no answer: what the check said instead, to see why
                 said = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [""])[-1]
@@ -1785,9 +2702,11 @@ def test_scales(work, shots):
             d = json.loads(line)
             if d.get("identical") and d.get("corners_found") == d.get("corners"):
                 break
-        expect(d.get("identical") and d.get("corners_found") == d.get("corners") and d.get("dpr") == float(scale),
-               f"window at {int(float(scale) * 100)} % display scaling: the board on the screen as the page drew it, "
-               f"pixel for pixel, every corner found ({line}{', second run' if runs > 1 else ''})")
+        expect(d.get("identical") and d.get("corners_found") == d.get("corners")
+               and abs(float(d.get("dpr") or 0) - float(scale)) < 1e-3,
+               f"window at {int(float(scale) * 100)} % display scaling (the screen at {native * 100:.0f} %, Qt's "
+               f"factor {factor:.4g}): the board on the screen as the page drew it, pixel for pixel, every corner "
+               f"found ({line}{', second run' if runs > 1 else ''})")
 
 
 def main():
@@ -1797,6 +2716,8 @@ def main():
     p.add_argument("--no-calibration", action="store_true")
     p.add_argument("--scale-check", help=argparse.SUPPRESS)
     args = p.parse_args()
+    safe_output()
+    os.environ.setdefault("IMPACTGUIDE_TWIN_AUTO", "0")     # the twin's model is never made by the tests' backends
     if not prepare_work(args.work):
         print(f"{args.work} is not empty and is not a work folder of this test: nothing deleted. Choose another "
               f"--work, or empty it by hand.", flush=True)
@@ -1804,6 +2725,8 @@ def main():
     if args.scale_check:
         return scale_check(args.work, args.scale_check, args.ui or args.work)
     if args.ui:
+        if not one_window_test():
+            print("another window test of ImpactGuide still runs: this one runs all the same", flush=True)
         test_ui(args.work / "ui", args.ui)
         test_scales(args.work, args.ui)
     else:

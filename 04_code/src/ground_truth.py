@@ -24,9 +24,14 @@ A result file holds both registrations, "T_M_mandible" and "T_M_B" (the one the 
 two names existed hold the mandible frame under "T_M_B", and load_result() reads them as such.
 
 One call per scan for the app: measure(cloud, reference) returns centres, residuals and the displacement from the
-reference scan. synthetic_scan() simulates an EinScan-SP scan of the two rigs.
+reference scan. It fits each sphere with its calibrated radius: the scanner sees the spheres only in part, where a
+free radius trades off against the depth of the centre and the error at the targets about doubles. The radii, and
+the rig templates, are measured once (calibrate: three scans or more without an impact, the bench turned between them)
+and saved in CALIBRATION_JSON, which every measure() reads; without it measure() says so in its warnings.
+synthetic_scan() simulates an EinScan-SP scan of the two rigs.
 
 Usage:
+    python ground_truth.py calibrate scan1.ply scan2.ply scan3.ply [--out rig_calibration.json]
     python ground_truth.py measure scan.ply [scan2.ply] [--reference ref.json] [--out result.json]
     python ground_truth.py selftest [--trials 200] [--noise 0.05] [--fixed-radius] [--separate] [--dense]
     python ground_truth.py synth OUTDIR [--impacts 3]
@@ -57,6 +62,10 @@ RIGS = {
 TARGETS_DIR = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "targets"
 TARGETS_CSV = TARGETS_DIR / "mandible_targets.csv"
 FRAME_JSON = TARGETS_DIR / "mandible_frame.json"       # T_B_mandible
+# the rigs as measured (calibrate: templates and the radius of each sphere), what measure() uses by default
+CALIBRATION_JSON = TARGETS_DIR / "rig_calibration.json"
+CALIBRATED = "calibrated"       # measure(rigs=, radii=): the saved calibration, else the design and free radii
+MIN_CALIBRATION_SCANS = 3       # scans without impact that a calibration takes at least
 TARGET_ROLES = ("proposed",)                           # the targets of the TRE; the table also has optional ones
 TARGETS_MANDIBLE = {
     "menton": (0.0, 94.0, -80.7),
@@ -107,6 +116,22 @@ def load_frame(path=FRAME_JSON):
     U, _, Vt = np.linalg.svd(T[:3, :3])
     T[:3, :3] = U @ np.diag([1.0, 1.0, np.linalg.det(U @ Vt)]) @ Vt
     return T
+
+
+def load_calibration(path=None):
+    """The rigs as calibrate() measured them, {"rigs": {name: 3 x 3}, "radii": {label: mm}, ...}, from path
+    (CALIBRATION_JSON if None); None when there is none. A file that does not hold the rigs of RIGS and a radius for
+    each of their spheres raises ValueError."""
+    path = Path(CALIBRATION_JSON if path is None else path)
+    if not path.is_file():
+        return None
+    c = json.loads(path.read_text(encoding="utf-8"))
+    rigs = {n: np.asarray(c["rigs"][n], np.float64) for n in RIGS if n in c.get("rigs", {})}
+    labels = [f"{n}_{s + 1}" for n in RIGS for s in range(3)]
+    radii = {k: float(v) for k, v in (c.get("radii") or {}).items()}
+    if set(rigs) != set(RIGS) or any(t.shape != (3, 3) for t in rigs.values()) or set(labels) - set(radii):
+        raise ValueError(f"{path.name}: not a rig calibration (the rigs {sorted(RIGS)} and a radius per sphere)")
+    return {**c, "rigs": rigs, "radii": radii}
 
 
 # ---------------------------------------------------------------- transforms
@@ -437,24 +462,38 @@ def labelled_spheres(cloud, rigs=RIGS, radius=SPHERE_D / 2, tol=0.6, radii=None,
     return out, info
 
 
-def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, targets=None, radius=SPHERE_D / 2,
-            tol=0.6, T_B_mandible=None, **find):
+def measure(scans, reference=None, X=None, Y=None, rigs=CALIBRATED, radii=CALIBRATED, targets=None,
+            radius=SPHERE_D / 2, tol=0.6, T_B_mandible=None, calibration=None, **find):
     """True registration from one scan and, with a reference, the displacement since then.
 
     scans: a cloud (N x 3), a path, or a list of them (views of the same scene, merged or in their own frames: each
     view is aligned to the first used view on the six centres). reference: a previous result, its JSON path, or its
-    T_M_mandible (4 x 4). X, Y: calibrated T_M_SM and T_SB_mandible (identity if None). rigs, radii: calibrated
-    templates and sphere radii (calibrate_rigs); design templates and free radii if not given. T_B_mandible: the head
-    frame B from the mandible frame (load_frame() if None).
+    T_M_mandible (4 x 4). X, Y: calibrated T_M_SM and T_SB_mandible (identity if None). rigs, radii: templates and
+    sphere radii; CALIBRATED (the default) takes those of the rig calibration (calibration, CALIBRATION_JSON if None:
+    calibrate()), and without one the design templates and free radii, said in the warnings: on the partial views
+    the scanner has of the spheres a free radius trades off against the depth of the centre, about twice the error
+    of a calibrated one. None: the design templates (rigs) or free radii (radii). T_B_mandible: the head frame B from
+    the mandible frame (load_frame() if None).
     Returns centres in the frame of the first used view (views_used: the indices of the views that were identified),
     residuals (sphere fits, rig fits, spread between views), G, T_M_mandible, T_M_B (None, with a warning, when
-    T_B_mandible is unknown) and, with a reference, the displacement (see displacement; dT_B: dT in B), plus warnings.
+    T_B_mandible is unknown) and, with a reference, the displacement (see displacement; dT_B: dT in B), plus warnings
+    and calibrated (whether the rig calibration was used).
     """
     t0 = time.perf_counter()
     if isinstance(scans, (str, Path)) or (isinstance(scans, np.ndarray) and scans.ndim == 2):
         scans = [scans]
     clouds = [load_cloud(s) if isinstance(s, (str, Path)) else np.asarray(s, np.float64) for s in scans]
     views, used, info, warnings = [], [], [], []
+    wants = [isinstance(x, str) and x == CALIBRATED for x in (rigs, radii)]
+    cal = load_calibration(calibration) if any(wants) else None
+    if any(wants) and cal is None:
+        warnings.append("no rig calibration (python ground_truth.py calibrate): design rigs and free sphere radii")
+    if wants[0]:
+        rigs = cal["rigs"] if cal else RIGS
+    elif rigs is None:
+        rigs = RIGS
+    if wants[1]:
+        radii = cal["radii"] if cal else None
     for v, cloud in enumerate(clouds):
         lab, inf = labelled_spheres(cloud, rigs, radius, tol, radii, **find)
         info.append(inf)
@@ -510,7 +549,7 @@ def measure(scans, reference=None, X=None, Y=None, rigs=RIGS, radii=None, target
         warnings.append(f"labelling margin {margin:.2f} mm: check the sphere labels")
     out = {"spheres": spheres, "rigs": poses, "G": G, "T_M_mandible": T_M_mandible, "T_M_B": T_M_B,
            "T_B_mandible": T_B_mandible, "views": info, "n_views_used": len(views), "views_used": used,
-           "warnings": warnings}
+           "warnings": warnings, "calibrated": cal is not None}
     if reference is not None:
         if isinstance(reference, (str, Path)):
             reference = load_result(reference)
@@ -540,6 +579,31 @@ def calibrate_rigs(results, rigs=RIGS):
                                  for r in results], tpl) for name, tpl in rigs.items()}
     radii = {n: float(np.mean([r["spheres"][n]["radius"] for r in results])) for n in results[0]["spheres"]}
     return {"rigs": templates, "radii": radii}
+
+
+def calibrate(scans, out=None, rigs=RIGS, **kw):
+    """The rig calibration, once, from MIN_CALIBRATION_SCANS or more scans of the bench without an impact between
+    them (the spheres in their seats, the bench moved or turned between scans so that each sphere is seen from other
+    sides): the radius of each sphere, the mean of its free fits, and the templates of the two rigs from the centres
+    fitted again with those radii. Written to out (CALIBRATION_JSON if None) with the scans it came from and the
+    spread of each radius; every measure() takes it from then on. Returns the calibration."""
+    from datetime import datetime
+    if len(scans) < MIN_CALIBRATION_SCANS:
+        raise ValueError(f"{len(scans)} scans: a calibration takes at least {MIN_CALIBRATION_SCANS}")
+    free = [measure(s, rigs=rigs, radii=None, **kw) for s in scans]
+    radii = calibrate_rigs(free, rigs)["radii"]
+    fixed = [measure(s, rigs=rigs, radii=radii, **kw) for s in scans]
+    cal = {"rigs": calibrate_rigs(fixed, rigs)["rigs"], "radii": radii,
+           "radius_sd_mm": {n: float(np.std([r["spheres"][n]["radius"] for r in free])) for n in radii},
+           "scans": [Path(s).name if isinstance(s, (str, Path)) else f"cloud {k}" for k, s in enumerate(scans)],
+           "date": datetime.now().astimezone().isoformat(timespec="seconds"),
+           "warnings": sorted({w for r in free + fixed for w in r["warnings"]})}
+    path = Path(CALIBRATION_JSON if out is None else out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    part.write_text(json.dumps(jsonable(cal), indent=1, allow_nan=False), encoding="utf-8")
+    part.replace(path)
+    return cal
 
 
 def jsonable(x):
@@ -788,7 +852,7 @@ def selftest(trials=200, noise=0.05, seed=0, merged=True, dense=False, radii=Non
         for TM in (T_W_M, T_W_M1):
             clouds, truth = synthetic_scan(TM, T_W_mandible, rng, noise=noise, merged=merged, dense=dense)
             try:
-                r = measure(clouds, radii=radii, T_B_mandible=frame)
+                r = measure(clouds, rigs=RIGS, radii=radii, T_B_mandible=frame)
             except ValueError:
                 fails += 1
                 break
@@ -871,7 +935,7 @@ def quick_test():
           "jsonable: non-finite values become null")
     T_W_mandible, T_W_M = scene_poses()
     clouds, _ = synthetic_scan(T_W_M, T_W_mandible, np.random.default_rng(0))
-    r = measure(clouds, T_B_mandible=frame)
+    r = measure(clouds, rigs=RIGS, radii=None, T_B_mandible=frame)
     true = inverse(T_W_M) @ T_W_mandible
     tg = np.array(list(load_targets().values()))
     err = float(np.linalg.norm(transform(r["T_M_mandible"], tg) - transform(true, tg), axis=1).max())
@@ -901,7 +965,7 @@ def quick_test():
         derived = T_B_mandible is None or np.allclose(back["T_M_B"] @ T_B_mandible, r["T_M_mandible"])
         check(np.allclose(back["T_M_mandible"], r["T_M_mandible"]) and derived,
               "older result file: its T_M_B read as T_M_mandible, T_M_B derived")
-        d = measure(clouds, reference=legacy, T_B_mandible=frame)["displacement"]
+        d = measure(clouds, reference=legacy, rigs=RIGS, radii=None, T_B_mandible=frame)["displacement"]
         check(d["rot_deg"] < 1e-6 and np.abs(d["trans_mm"]).max() < 1e-6 and np.allclose(d["dT_B"], np.eye(4)),
               "measure against an older reference file: no displacement on the same scan")
         bench = Path(tmp) / "bench.json"                    # a registration in B, as live_ar reads it
@@ -913,6 +977,31 @@ def quick_test():
             except ValueError:
                 refused.append(True)
         check(len(refused) == 2, "a registration in the bench frame is never taken as a result in the mandible frame")
+        # the rig calibration, once, from three scans without an impact (spheres 0.1 mm smaller than drawn): the
+        # radius of each sphere written and read back; from then on measure takes them, and says when there is none
+        crng = np.random.default_rng(1)
+        small = SPHERE_D / 2 - 0.1
+        cal_scans = [synthetic_scan(random_impact(T_W_M, T_W_mandible, crng, 3.0, 3.0), T_W_mandible, crng,
+                                    radius=small)[0] for _ in range(MIN_CALIBRATION_SCANS)]
+        cal_path = Path(tmp) / "rig_calibration.json"
+        calibrate(cal_scans, out=cal_path, T_B_mandible=frame)
+        got = load_calibration(cal_path)
+        off = max(abs(v - small) for v in got["radii"].values())
+        check(len(got["radii"]) == 6 and off < 0.03 and set(got["rigs"]) == set(RIGS),
+              f"calibrate: the radius of each of the six spheres ({off:.3f} mm off) and the two rigs, written and "
+              f"read back")
+        on = measure(cal_scans[0], T_B_mandible=frame, calibration=cal_path)
+        off_cal = measure(cal_scans[0], T_B_mandible=frame, calibration=Path(tmp) / "none.json")
+        said = [any("no rig calibration" in w for w in r["warnings"]) for r in (on, off_cal)]
+        check(on["calibrated"] and all(s["radius_fixed"] for s in on["spheres"].values()) and not off_cal["calibrated"]
+              and not any(s["radius_fixed"] for s in off_cal["spheres"].values()) and said == [False, True],
+              "measure: the calibrated radii by default; without a calibration free radii, and it says so")
+        try:
+            calibrate(cal_scans[:MIN_CALIBRATION_SCANS - 1], out=Path(tmp) / "few.json")
+            few = False
+        except ValueError:
+            few = not (Path(tmp) / "few.json").exists()
+        check(few, f"calibrate: refused with fewer than {MIN_CALIBRATION_SCANS} scans, nothing written")
     ok, stats, n_fail = selftest(trials=1, noise=5.0, verbose=False)
     check(not ok and n_fail == 1 and np.isnan(stats["centre"]["p95"]), "selftest: every trial failed gives FAIL, no crash")
     print(f"{len(fails)} failed" if fails else "all passed")
@@ -957,8 +1046,19 @@ def main(argv=None):
     y.add_argument("--impacts", type=int, default=3)
     y.add_argument("--seed", type=int, default=0)
     sub.add_parser("test", help="quick checks of the targets, the two head frames and the result files")
+    c = sub.add_parser("calibrate", help="the rig calibration, once: the radius of each sphere and the rig templates "
+                                         "from scans without an impact, the bench turned between them")
+    c.add_argument("scans", nargs="+")
+    c.add_argument("--out", help=f"default {CALIBRATION_JSON}")
     a = ap.parse_args(argv)
-    if a.cmd == "measure":
+    if a.cmd == "calibrate":
+        cal = calibrate(a.scans, out=a.out)
+        for n, r in cal["radii"].items():
+            print(f"{n:<12} radius {r:.3f} mm  sd {cal['radius_sd_mm'][n]:.3f} over {len(cal['scans'])} scans")
+        for w in cal["warnings"]:
+            print("warning:", w)
+        print(f"written: {a.out or CALIBRATION_JSON}")
+    elif a.cmd == "measure":
         r = measure(a.scans, reference=a.reference)
         print_result(r)
         if a.out:

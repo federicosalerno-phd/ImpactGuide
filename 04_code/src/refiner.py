@@ -31,7 +31,8 @@ registration are drawn on the fly around the true one (70% up to MAX_DEG and MAX
         a REGION_MM square around the true face centroid at the crop scale, RGB and observed mask.
     python 04_code/src/refiner.py train [--hours H] [--epochs N] [--workers N] [--resume]
         training with early stopping on the validation split: weights in MODELS (refiner.pt the best, refiner_last.pt
-        to resume), log in 05_results/training_log.csv.
+        to resume; refiner.json beside them: the scene fingerprint of the dataset, from index.json), log in
+        05_results/training_log.csv.
 
 Library: RefinerNet, Refiner(path).refine(sources, T_M_B0, mode, centre), make_source(...), optimize(...),
 observed_mask(sam, labels), ignore_mask(labels).
@@ -714,6 +715,12 @@ def cmd_train(a):
             best, best_epoch, since = v["val_tre_mean_mm"], epoch, 0
             torch.save({"model": net.state_dict(), "epoch": epoch, "val": v,
                         "config": {"crop_mm": CROP_MM, "crop_px": CROP_PX, "iters": ITERS}}, MODELS / "refiner.pt")
+            # beside the weights, the scene the dataset was rendered on (synth_data.py index): ImpactGuide says when
+            # the bench has changed since
+            index = json.loads((SYNTH / "index.json").read_text(encoding="utf-8")) if (SYNTH / "index.json").exists() else {}
+            (MODELS / "refiner.json").write_text(json.dumps({
+                "scene_print": index.get("scene_print", ""), "epoch": epoch, "val_tre_mean_mm": round(v["val_tre_mean_mm"], 4),
+                "saved": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1), encoding="utf-8")
         else:
             since += 1
         hours = (time.perf_counter() - t_start) / 3600

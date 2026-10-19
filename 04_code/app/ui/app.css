@@ -40,7 +40,7 @@
 .home-sub{font-size:var(--fs-lg);color:var(--text-3);margin-top:6px;white-space:nowrap;
           overflow:hidden;text-overflow:ellipsis}
 .home-choices{margin-top:28px}
-.home-cells{margin-top:var(--sp-2)}
+.home-cells{margin-top:var(--sp-3)}
 
 /* ── folds: Advanced, closed until asked for ───────────────────────────── */
 .stack>.fold{margin-top:16px}
@@ -64,6 +64,24 @@
 .say-hint:empty,.say-line:empty{display:none}
 .say .live-dot{width:13px;height:13px}
 .say .live-dot:not(.ok):not(.warn):not(.busy){display:none}
+/* the verdict of a calibration and the last photo: good and not good differ in shape too, a tick and a cross */
+#crDot,#phLastDot{position:relative;width:14px;height:14px}
+#crDot.ok::after,#phLastDot.ok::after{content:'';position:absolute;left:4.9px;top:2.4px;width:2.8px;height:6px;
+  border:solid var(--on-status);border-width:0 1.7px 1.7px 0;transform:rotate(45deg)}
+#crDot.warn::before,#crDot.warn::after,#phLastDot.warn::before,#phLastDot.warn::after{content:'';position:absolute;
+  left:6.15px;top:3px;width:1.7px;height:8px;border-radius:1px;background:var(--on-status);transform:rotate(45deg)}
+#crDot.warn::after,#phLastDot.warn::after{transform:rotate(-45deg)}
+/* what spoils a calibration: a row each, a cross before it (a mark when it is advice), the worst in full */
+.say-list{display:flex;flex-direction:column;gap:6px}
+.say-issue{display:flex;align-items:flex-start;gap:9px;font-size:var(--fs);color:var(--text-2);line-height:1.5}
+.say-issue.si-first{font-size:15px;color:var(--text-1)}
+.say-issue i{flex:none;position:relative;width:13px;height:13px;margin-top:4px;border-radius:50%;background:var(--warn)}
+.say-issue i::before,.say-issue i::after{content:'';position:absolute;left:5.65px;top:2.75px;width:1.7px;height:7.5px;
+  border-radius:1px;background:var(--on-status);transform:rotate(45deg)}
+.say-issue i::after{transform:rotate(-45deg)}
+.say-issue.si-advice i{background:var(--control-hover)}
+.say-issue.si-advice i::before{left:5.65px;top:2.4px;height:5.2px;transform:none;background:var(--text-1)}
+.say-issue.si-advice i::after{left:5.65px;top:8.6px;height:1.8px;transform:none;background:var(--text-1)}
 
 /* ── the photos of a calibration: the count against the plan's most, the
    mark of its least on the bar; it turns to the ok colour once there are
@@ -107,7 +125,36 @@
 .bd-3d{position:relative;flex:1;min-height:220px;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2)}
 .bd-3d canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
 .bd-3d canvas:active{cursor:grabbing}
-.bd-3d-hint{white-space:nowrap}
+.bd-3d-hint{max-width:calc(100% - 130px)}    /* clear of the navigation gizmo, on two lines when narrow */
+
+/* the twin of the bench: the bench in 3D filling the stage; in the panel its ready views, two by two, the scale of
+   the error at the targets with its values, each target in its colour (ui/18-twin.js) */
+/* the trial's head with the twin's button: its words never broken (Chinese would break anywhere), the button on a
+   line of its own when they need the room */
+.trial-head .trial-sub,.trial-head .chip{white-space:nowrap}
+#gTwin{flex:none}
+.view.tw-view{padding:12px 16px 16px;overflow:hidden}
+.view.tw-view.show{display:flex}
+.tw-3d{position:relative;flex:1;min-height:0;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2)}
+.tw-3d canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+.tw-3d canvas:active{cursor:grabbing}
+.tw-hint{max-width:calc(100% - 130px)}
+.tw-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+        text-align:center;font-size:var(--fs-lg);color:var(--text-3);pointer-events:none}
+.tw-views{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.tw-views .btn{min-width:0}
+.tw-step{display:flex;align-items:center;gap:8px}
+.tw-step .btn{flex:none}
+.tw-step-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.tw-step-n{display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap}
+.tw-step-name{font-size:var(--fs);color:var(--text-1);line-height:1.3;overflow-wrap:anywhere}
+.tw-ramp{height:10px;border-radius:5px}
+.tw-ticks{display:flex;justify-content:space-between;margin-top:4px;font-size:var(--fs-sm);color:var(--text-3);
+          white-space:nowrap}
+.tw-targets{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:4px 14px}
+.tw-tg{display:flex;align-items:center;gap:7px;min-width:0;font-size:var(--fs);color:var(--text-2);white-space:nowrap}
+.tw-tg-v{margin-left:auto;color:var(--text-1);font-variant-numeric:tabular-nums}
+.tw-dot{width:11px;height:11px;border-radius:50%;flex:none;box-shadow:0 0 0 1.5px var(--surface-0),0 0 0 2.5px var(--text-3)}
 .bd-sheet{flex:1;display:flex;align-items:center;justify-content:center;border-radius:var(--r-md);
           background:var(--surface-2);padding:16px}
 .bd-sheet .fig-svg{width:100%;max-width:640px;max-height:100%}
@@ -126,7 +173,8 @@
 }
 
 /* three readings side by side in the panel */
-.rd-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.rd-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;align-items:center;gap:6px}
+.rd-row>.input-unit{margin-left:2px}
 .rd-row .input{min-width:0;text-align:center;padding-left:4px;padding-right:4px}
 
 /* ── the photos: the board or the live picture, beside the guide ─────────── */
@@ -137,21 +185,60 @@
 .ph-guide>.ph-live{flex:none;aspect-ratio:4/3}
 .ph-guide{flex:0 0 min(330px,44%);min-width:0;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
 /* wide (no board beside it): the guide as large as the stage's height allows, the phone above its two side views;
-   on a short stage the phone beside them */
+   on a short stage the phone beside them; never so narrow that its words are cut (the column scrolls instead) */
 .ph-guide.wide{flex:1;align-items:center;justify-content:safe center;container-type:size;
-               --gw:min(760px,100%,calc((100cqh - 235px) * 1.26))}
+               --gw:min(760px,100%,max(420px,calc((100cqh - 305px) * 1.35)))}
 .ph-guide.wide .guide{width:var(--gw)}
 @container (max-height: 600px){
-  .ph-guide.wide>*{--gw:min(640px,100%,calc((100cqh - 262px) * 2.05))}
+  .ph-guide.wide>*{--gw:min(640px,100%,max(420px,calc((100cqh - 320px) * 2.15)))}
   .guide.big .guide-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);align-items:center;gap:16px}
   .guide.big .guide-sides{grid-template-columns:minmax(0,1fr)}
 }
-.ph-last{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-md);background:var(--surface-2)}
-.ph-guide.wide .ph-last{width:var(--gw)}
-.ph-cov{flex:none;width:80px}
+/* the last photo: how it went, the photo with the corners found in it, where the board has been in the photos kept */
+.ph-last{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:var(--r-md);background:var(--surface-2)}
+.ph-guide.wide .ph-last{width:var(--gw);flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;
+                        gap:10px 16px}
+.ph-last-figs{display:grid;grid-template-columns:repeat(2,minmax(0,170px));gap:10px}
+.ph-guide.wide .ph-last-figs{flex:none;grid-template-columns:repeat(2,150px)}
+@container (max-height: 600px){.ph-guide.wide .ph-last-figs{grid-template-columns:repeat(2,120px)}}
+.ph-last-fig{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ph-shot,.ph-cov{position:relative;aspect-ratio:4/3;border-radius:4px;overflow:hidden;background:var(--surface-0)}
+.ph-shot img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;opacity:.72}
+.ph-shot-pts{position:absolute;inset:0}
+.ph-shot .fig-svg,.ph-cov .fig-svg{width:100%;height:100%}
 .ph-last-w{display:flex;align-items:center;gap:8px;min-width:0}
 .ph-last-t{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
            text-overflow:ellipsis}
+/* the newest photos of the series: a small picture each with its pose, and its check when it comes: a pulsing dot
+   while it is checked, the dot and the border green once kept, amber and the picture faded when to be taken again */
+.ph-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
+.ph-guide.wide .ph-strip{width:var(--gw)}
+.ph-tile{position:relative;aspect-ratio:4/3;border-radius:4px;overflow:hidden;background:var(--surface-2)}
+.ph-tile::after{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none}
+.ph-tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.ph-tile-n{position:absolute;left:4px;top:2px;font-size:10px;font-weight:var(--w-strong);color:var(--text-1);
+           text-shadow:0 0 3px var(--surface-0),0 0 2px var(--surface-0)}
+.ph-tile-s{position:absolute;right:4px;bottom:4px;width:8px;height:8px;border-radius:50%;background:var(--text-4)}
+.ph-tile.checking .ph-tile-s{background:var(--accent);animation:pulse 1s infinite}
+.ph-tile.kept::after{box-shadow:inset 0 0 0 2px var(--ok)}
+.ph-tile.kept .ph-tile-s{background:var(--ok)}
+.ph-tile.retake::after{box-shadow:inset 0 0 0 2px var(--warn)}
+.ph-tile.retake img{opacity:.4}
+.ph-tile.retake .ph-tile-s{background:var(--warn)}
+/* kept and to be taken again differ in shape too, not only in colour: a tick, a cross */
+.ph-tile.kept .ph-tile-s,.ph-tile.retake .ph-tile-s{width:12px;height:12px;right:3px;bottom:3px}
+.ph-tile.kept .ph-tile-s::after{content:'';position:absolute;left:4.2px;top:2px;width:2.6px;height:5.4px;
+                                border:solid var(--on-status);border-width:0 1.6px 1.6px 0;transform:rotate(45deg)}
+.ph-tile.retake .ph-tile-s::before,.ph-tile.retake .ph-tile-s::after{content:'';position:absolute;left:5.2px;top:2.5px;
+                                width:1.6px;height:7px;border-radius:1px;background:var(--on-status);transform:rotate(45deg)}
+.ph-tile.retake .ph-tile-s::after{transform:rotate(-45deg)}
+/* the shutter went: the guide and the counter flash (never the board, which may be in the photo) */
+@keyframes shot{0%{box-shadow:0 0 0 3px var(--accent);filter:brightness(1.3)}100%{box-shadow:0 0 0 3px transparent;filter:none}}
+#phGuide.shot .guide,#cpCard.shot{animation:shot .55s ease-out}
+/* the photo taken by itself: its switch, and below it what it waits for */
+.auto-row{gap:4px}
+.auto-say{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:2px}
+.auto-say.near{color:var(--ok-text)}
 
 /* the guide of the next photo: the phone's screen as it should look, the phone from above and from the side */
 .guide{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--r-md);background:var(--surface-2)}
@@ -167,11 +254,13 @@
 .guide-side-c{display:flex;flex-direction:column;gap:2px;padding:6px 6px 4px;border-radius:var(--r-md);background:var(--surface-1)}
 .guide-side-l{font-size:var(--fs-sm);color:var(--text-3);text-align:center;white-space:nowrap;overflow:hidden;
               text-overflow:ellipsis}
-.guide-leg{display:flex;gap:14px;font-size:var(--fs-sm);color:var(--text-3)}
+.guide-leg{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;font-size:var(--fs-sm);color:var(--text-3)}
+.guide-leg-l{color:var(--text-2);white-space:nowrap}
 .guide-key{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.guide-key i{display:block;width:4px;height:12px;border-radius:2px}
+.guide-key i{display:block;width:12px;height:4px;border-radius:2px}
 .guide-key i.k-top{background:var(--accent)}
-.guide-key i.k-bottom{background:var(--text-3)}
+.guide-key i.k-left{background:var(--edge-left)}
+.guide-key i.k-right{background:var(--edge-right)}
 .guide.big{padding:18px 20px;gap:12px}
 .guide.big .guide-w{font-size:20px}
 .guide-done{font-size:var(--fs-lg);color:var(--text-2);padding:8px 2px}
@@ -183,22 +272,42 @@
 .g-shutter-in{fill:var(--text-4)}
 .g-board{fill:var(--text-1);fill-opacity:.92}
 .g-cell{fill:var(--surface-0)}
-.g-top{fill:var(--accent)}
-.g-bottom{fill:var(--text-3)}
-.g-lens{fill:var(--text-3)}
-.g-mid{stroke:var(--accent);stroke-width:1.5px;vector-effect:non-scaling-stroke;fill:none;opacity:.8}
-.g-wall{stroke:var(--text-2);stroke-width:3;stroke-linecap:round}
+.g-lens{fill:var(--surface-3);stroke:var(--text-3);stroke-width:1.2px;vector-effect:non-scaling-stroke}
+.g-lens-in{fill:var(--text-3)}
+.g-mid{stroke:var(--text-2);stroke-width:1.5px;vector-effect:non-scaling-stroke;fill:none;opacity:.7}
+/* the board's edges, the same colour on the screen and edge on: top yellow, left blue, right orange (never a red and
+   green pair: apart for eyes that confuse them, and in lightness too) */
+:root{--edge-left:#5AA9F0;--edge-right:#F07F3C}
+:root[data-palette$="-light"]{--edge-left:#1F68B5;--edge-right:#B5500F}
+.g-edge{stroke-width:2.6;stroke-linecap:round}
+.e-top{stroke:var(--accent)}
+.e-left{stroke:var(--edge-left)}
+.e-right{stroke:var(--edge-right)}
+.e-top-f{fill:var(--accent)}
+.e-left-f{fill:var(--edge-left)}
+.e-right-f{fill:var(--edge-right)}
+.g-turn-arc{fill:none;stroke:var(--text-1);stroke-width:1.6;stroke-linecap:butt}
+.g-turn-head{fill:var(--text-1)}
+/* the turn of a board moved by hand, drawn over it: a dark edge under each arc and head */
+.g-turn-arc.g-turn-u{stroke:var(--surface-0);stroke-width:3.8}
+.g-turn-head.g-turn-u{fill:var(--surface-0);stroke:var(--surface-0);stroke-width:2.2;stroke-linejoin:miter}
 .g-sight{stroke:var(--text-4);stroke-width:1px;stroke-dasharray:2 2.5;vector-effect:non-scaling-stroke}
-.g-slab{fill:var(--text-2)}
-.g-bar-k{fill:var(--surface-0);stroke:var(--text-2);stroke-width:1px;vector-effect:non-scaling-stroke}
-.g-bar-w{fill:var(--text-1)}
+.g-slab{fill:var(--text-3)}
+.g-bump{fill:var(--text-1)}
+.g-eye{fill:var(--surface-0)}
 .fig-t{font-size:10px;fill:var(--text-3)}
 .fig-t-s{font-size:9px}
 .fig-t-l{font-size:12px;fill:var(--text-1)}
-.cov-frame{fill:var(--surface-0);stroke:var(--text-4);stroke-width:1}
-.cov-old{fill:var(--text-4)}
-.cov-new{fill:var(--ok)}
-.cov-bad{fill:var(--warn)}
+.shot-ok{fill:var(--ok-text);stroke:var(--surface-0);stroke-width:1px;vector-effect:non-scaling-stroke}
+.shot-bad-u{fill:none;stroke:var(--surface-0);stroke-width:3.4px;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.shot-bad{fill:none;stroke:var(--warn-text);stroke-width:1.6px;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.cov-frame{fill:var(--surface-0)}
+.cov-grid{stroke:var(--control);stroke-width:1px;vector-effect:non-scaling-stroke;fill:none}
+.cov-area{fill:var(--accent);fill-opacity:.14}
+/* the corners of the photo: filled once the board reached them, a dashed outline while missing */
+.cov-corner.hit{fill:var(--accent);fill-opacity:.6}
+.cov-corner.miss{fill:none;stroke:var(--text-2);stroke-width:1.2px;stroke-dasharray:2.5 2;vector-effect:non-scaling-stroke}
+.cov-last{fill:none;stroke:var(--ok-text);stroke-width:1.5px;vector-effect:non-scaling-stroke;stroke-linejoin:round}
 
 /* the result: the error of each photo and over the board */
 .res-figs .card{gap:6px}
@@ -212,15 +321,17 @@
 .bar-out .bar-v{fill:var(--text-4)}
 .bar:hover .bar-v{opacity:.8}
 .bar:hover .bar-hit{fill:var(--control);fill-opacity:.35}
-.rmap-board{fill:var(--surface-2);stroke:var(--text-4);stroke-width:1}
-.rmap-sq{fill:var(--surface-1)}
+.rmap-board{fill:var(--surface-0)}
+.rmap-sq{fill:var(--control)}
+.rmap-edge{fill:none;stroke:var(--text-4);stroke-width:1px;vector-effect:non-scaling-stroke}
 .rmap-dot{fill:var(--accent)}
 .rmap-hit{fill:transparent}
 .sh-page{fill:var(--text-1)}
 .sh-sq{fill:var(--surface-0)}
 .sh-bit{fill:var(--text-1)}
 .sh-ext{stroke:var(--accent-text);stroke-width:.7;fill:none}
-.sh-dim{stroke:var(--accent-text);stroke-width:1.2;fill:none;stroke-linejoin:round;stroke-linecap:round}
+.sh-dim{stroke:var(--accent-text);stroke-width:1.2;fill:none;stroke-linecap:butt}
+.sh-head{fill:var(--accent-text)}
 .sh-len{font-size:10px;fill:var(--text-1)}
 
 /* ── the trial in progress ────────────────────────────────────────────────── */
@@ -291,10 +402,6 @@
 .stack>.sec-lbl{margin-top:16px}
 .stack>.sec-lbl:first-child{margin-top:4px}
 
-/* Two short fields side by side in the panel. */
-.cfg-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.cfg-pair>.col>*+*{margin-top:4px}
-
 /* ── the live view ────────────────────────────────────────────────────────
    The stream fills the stage at its own shape (4:3 across, 3:4 upright); what is not real yet, the light
    and the pace sit on it on the overlay role, as SlantUI's on-stage chrome. */
@@ -322,6 +429,23 @@
 .live-dot.busy{background:var(--accent);animation:pulse 1s infinite}
 .live-idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
 .live-idle .say{max-width:560px}
+/* What the view draws, in its panel: SlantUI's metric rows, a heading per group and a row per element; a shown row
+   carries the bar in the element's own colour (--gc), its name in full and the open eye, a hidden one only the eye
+   struck through. A list that grows with the holograms, one line each. */
+.lyr-list{display:flex;flex-direction:column;gap:2px}
+.lyr-list>.mg{color:var(--text-4);padding:8px 4px 3px}
+.lyr-list>.mg:first-child{padding-top:2px}
+.lyr .ml{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lyr.active .ml{color:var(--text-1)}
+.lyr-eye{display:flex;flex:none;color:var(--text-4)}
+.lyr.active .lyr-eye{color:var(--text-2)}
+.lyr-eye svg{width:16px;height:16px}
+.lyr[data-layer=face]{--gc:var(--accent)}
+.lyr[data-layer=mandible]{--gc:var(--text-1)}
+.lyr[data-layer=axes]{--gc:var(--text-3)}
+/* the view on the phone's screen, in the view's panel: the state of the Phone panel, one size smaller */
+.live-state.slim{padding:6px 10px;font-size:var(--fs);font-weight:500}
+.live-state.slim .live-dot{width:11px;height:11px}
 
 /* ── the Phone panel: in the panel down the right, in place of the step's ──
    Its head is the panel's (one block tall) with a close button in its corner.
@@ -334,6 +458,8 @@
 .lk-word{min-width:0}
 .lk-step{display:flex;align-items:flex-start;gap:9px;font-size:var(--fs);line-height:var(--lh);color:var(--text-2)}
 .lk-step .tn{margin:1px 0 0}
+/* a '›' of the words drawn as the app's arrowhead (putWords, ui/00-strings.js), centred on the lower-case letters */
+.t-arrow{display:inline-block;width:.56em;height:.39em;margin:0 .06em;vertical-align:.055em}
 /* A QR code is read dark on light: the tile is the lightest text role, the modules the deepest surface. */
 .lk-qr{width:100%;max-width:200px;aspect-ratio:1;padding:6px;background:var(--text-1);color:var(--surface-0);
        border-radius:var(--r-md)}

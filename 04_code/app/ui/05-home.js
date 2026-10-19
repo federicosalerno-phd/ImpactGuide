@@ -1,11 +1,13 @@
 // ImpactGuide · home: the start. Four large choices, one per module, each with
-// one short line, and the state of the bench under them in three cells
-// (SlantUI's .choices and .stcells): the phone, the calibration, the next trial.
-// The language is chosen here (ui/90-boot.js fills the picker). No rail, no
-// toolbar, no panel: only the Phone panel, from the phone cell.
+// one short line, and the state of the bench under them as one quiet line
+// (SlantUI's .choices and .stcells.line): the phone, the calibration, the next
+// trial, each a word and a short value, and each a way in: the phone to its
+// panel, the other two to their module. The language is chosen here
+// (ui/90-boot.js fills the picker). No rail, no toolbar, no panel: only the
+// Phone panel, from the phone's state.
 'use strict';
 
-/** Home: its choices and the three cells of the bench's state. */
+/** Home: its choices and the line of the bench's state. */
 const HOME = {
   enter: function () {
     HOME.phone();
@@ -16,8 +18,10 @@ const HOME = {
 
   // how the phone is linked, found by itself: cable, Wi-Fi, or no phone
   phone: function () {
-    setStcell($('hsPhone'), PHONE.ok ? 'ok' : PHONE.state === 'reconnecting' || PHONE.state === 'connecting' ? 'busy' : 'warn',
-              PHONE.ok ? T(PHONE.link === 'wifi' ? 'link.on.wifi' : 'link.on.usb') : Tcode('link.state.', PHONE.state, 'none'));
+    const busy = PHONE.state === 'reconnecting' || PHONE.state === 'connecting';
+    const word = PHONE.ok ? (PHONE.link === 'wifi' ? 'home.ph.wifi' : 'home.ph.usb')
+      : busy ? 'home.ph.busy' : 'home.ph.off';
+    setStcell($('hsPhone'), PHONE.ok ? 'ok' : busy ? 'busy' : 'warn', T(word));
   },
 
   // the intrinsics stored for the two camera modes
@@ -37,6 +41,7 @@ const HOME = {
 
   wire: function () {
     document.querySelectorAll('.choice[data-go]').forEach(function (b) {
+      b.setAttribute('data-sound', 'forward');      // SlantUI's voice, on the press
       b.onclick = function () {
         if (b.disabled) return;
         const m = b.dataset.go;
@@ -44,5 +49,9 @@ const HOME = {
       };
     });
     $('hsPhone').onclick = function () { if (!LINK.open) LINK.show(); };
+    $('hsCal').onclick = function () { go('calibration', MODULES.calibration.start); };
+    $('hsTrial').onclick = function () { go('trials', MODULES.trials.start); };
+    $('hsCal').setAttribute('data-sound', 'forward');
+    $('hsTrial').setAttribute('data-sound', 'forward');
   },
 };

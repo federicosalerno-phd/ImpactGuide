@@ -9,14 +9,23 @@ A plan is a list of poses of the phone relative to the board. A pose says
     dist    near, mid or far: the distance of the board's centre (distances(): the board spans SPAN of the frame at
             mid, within RANGE_MM of the camera mode; the photo mode keeps to 25-40 cm, where the focus is locked),
     roll    degrees the phone is turned about its line of sight (clockwise as the operator sees the screen); never more
-            than MAX_ROLL, so the phone's own orientation (and so the photo's size) never flips.
+            than MAX_ROLL, so the phone's own orientation (and so the photo's size) never flips;
+    corner  (a pose for a corner of the photo only) top_left, top_right, bottom_right or bottom_left: `at` is then worked
+            out for each board (placed) so that the board's own corner falls just inside that corner of the photo
+            (REACH): its corners then reach as near the corner of the image as they can be found (the corner nearest
+            needs the markers of the board's edge whole in the photo), where a lens model is least sure
+            (calibrate_charuco.coverage). The phone looks from the opposite side, so that the board's corner in the
+            corner of the photo is the far one, its squares the smallest.
 The phone is held across (landscape) with its top to the left for every photo: a photo turned the other way has another
-size and would not calibrate with the rest (calibrate_charuco.detect), so the check of each photo says so.
+size and would not calibrate with the rest (calibrate_charuco.detect), so the check of each photo says so. A pose is
+where the phone is relative to the board: with the phone still on a stand the board is moved and turned instead (the
+page draws it so for a physical board).
 
-PLANS: quick (15 poses: the five views at 40 degrees, the four corners, two turns, the edges at two distances), accurate
-(40: eight directions at 25 and 40 degrees, the nine places of the screen, turns, near views, as the calibration
-protocol asks), check (10: the session check). Each plan covers tilts in every direction, the whole image and the three
-distances.
+PLANS: quick (15 poses: the five views at 35 degrees, the four corners of the photo, two turns, the edges at two
+distances), accurate (40: eight directions at 25 and 35 degrees, the nine places of the screen, turns, the four corners
+of the photo, near views, as the calibration protocol asks), check (10: the session check). Each plan covers tilts in
+every direction, the whole image and its four corners, and the three distances. No pose is tilted more than MAX_TILT:
+past it the board is deep enough to leave the depth of field of the phone's f/1.5 lens at 30-40 cm.
 
 camera_pose(pose, board) gives T_C_M for a board (squares, square_mm) with the nominal camera of the mode (CAMERAS);
 guide(pose, board) what the page draws: the board as the phone's screen shows it (outline and black squares, in
@@ -58,6 +67,11 @@ RANGE_MM = {"photo": (250.0, 400.0), "stream": (250.0, 600.0)}     # the board's
 SPAN = 0.6              # at mid the board spans this share of the frame (the larger of its two sides)
 NEAR, FAR = 0.85, 1.2   # near and far, against mid
 MAX_ROLL = 35.0
+MAX_TILT = 35.0
+REACH = 0.025           # a pose for a corner of the photo: the board's own corner this far inside it (of the frame;
+                        # the lens moves the corners of the image outwards by about 1.5 %)
+# the corner of the board that goes to each corner of the photo (the board's top up on the screen): x and y of M, 0 or 1
+CORNER_SIDES = {"top_left": (0, 0), "top_right": (1, 0), "bottom_right": (1, 1), "bottom_left": (0, 1)}
 MIN_SEEN = 24            # corners a pose must keep inside the frame (as calibrate_charuco.sample_pose)
 EDGE_PX = 20             # ... at least this far from the frame's edge
 DIAG = 1 / math.sqrt(2)
@@ -68,13 +82,19 @@ VIEWS = {"front": (0, 0), "left": (-1, 0), "right": (1, 0), "above": (0, 1), "be
 JITTER = {"tilt_deg": 6.0, "dir_deg": 12.0, "at": 0.06, "dist": 0.08, "roll_deg": 6.0}
 
 
-def P(view, tilt, at=(0.5, 0.5), dist="mid", roll=0.0):
-    return {"view": view, "tilt": float(tilt if view != "front" else 0.0), "at": [float(at[0]), float(at[1])],
-            "dist": dist, "roll": float(roll)}
+def P(view, tilt, at=(0.5, 0.5), dist="mid", roll=0.0, corner=None):
+    p = {"view": view, "tilt": float(tilt if view != "front" else 0.0), "at": [float(at[0]), float(at[1])],
+         "dist": dist, "roll": float(roll)}
+    if corner:
+        p["corner"] = corner
+    return p
 
 
 _CORNERS = (("above_left", (0.3, 0.3)), ("above_right", (0.7, 0.3)), ("below_left", (0.3, 0.7)),
             ("below_right", (0.7, 0.7)))
+# the four corners of the photo, each seen from the opposite side (`at` only a first guess: placed works it out)
+_REACH = (("below_right", (0.3, 0.3), "top_left"), ("below_left", (0.7, 0.3), "top_right"),
+          ("above_right", (0.3, 0.7), "bottom_left"), ("above_left", (0.7, 0.7), "bottom_right"))
 _DIRS = ("left", "right", "above", "below", "above_left", "above_right", "below_left", "below_right")
 
 
@@ -89,16 +109,16 @@ def _toward(u, v):
 _PLACES = [((u, v), _toward(u, v)) for v in (0.28, 0.5, 0.72) for u in (0.28, 0.5, 0.72)]
 
 PLANS = {
-    "quick": [P("front", 0), P("left", 40), P("right", 40), P("above", 40), P("below", 40)]
-    + [P(v, 35, at, "far") for v, at in _CORNERS]
+    "quick": [P("front", 0), P("left", 35), P("right", 35), P("above", 35), P("below", 35)]
+    + [P(v, 20, at, "far", corner=c) for v, at, c in _REACH]
     + [P("front", 0, dist="near", roll=25), P("left", 15, dist="near", roll=-25),
        P("left", 25, (0.68, 0.5), "far", 15), P("right", 25, (0.32, 0.5), "far", -15),
        P("above", 25, (0.5, 0.68), "near"), P("below", 25, (0.5, 0.32), "near")],
-    "accurate": [P(v, 25) for v in _DIRS] + [P(v, 40) for v in _DIRS]
+    "accurate": [P(v, 25) for v in _DIRS] + [P(v, 35) for v in _DIRS]
     + [P(view, 0 if view == "front" else 15, at, "far") for at, view in _PLACES]
     + [P("front", 0, dist="near", roll=20), P("front", 0, dist="mid", roll=-20), P("front", 0, dist="near", roll=-35),
        P("front", 0, dist="mid", roll=35)]
-    + [P(v, 30, at, "far", r) for (v, at), r in zip(_CORNERS, (20, -20, -20, 20))]
+    + [P(v, 25, at, "far", corner=c) for v, at, c in _REACH]
     + [P("front", 0, dist="near"), P("left", 30, dist="near"), P("right", 30, dist="near"),
        P("above", 30, dist="near"), P("below", 30, dist="near"), P("front", 0, dist="far"), P("above_left", 20)],
     "check": [P("front", 0), P("left", 35), P("right", 35), P("above", 35), P("below", 35)]
@@ -163,11 +183,38 @@ def direction(pose):
     return t * dx, t * dy
 
 
+def placed(pose, board_mm, mode="photo", K=None, size=None):
+    """The pose with its `at` worked out when it is a pose for a corner of the photo ("corner"): the place of the
+    board's centre on the screen at which the board's own corner on that side falls REACH inside that corner of the
+    photo, for this board and camera (the pose then says which corner in "reach"); any other pose as it is."""
+    if not pose.get("corner"):
+        return pose
+    nominal_K, nominal_size = camera(mode)
+    K = nominal_K if K is None else np.asarray(K, np.float64)
+    w, h = nominal_size if size is None else size
+    sx, sy = CORNER_SIDES[pose["corner"]]
+    corner = np.array([[sx * board_mm[0], sy * board_mm[1], 0.0]])
+    want = np.array([(sx + (1 - 2 * sx) * REACH) * w, (sy + (1 - 2 * sy) * REACH) * h])
+    at = np.asarray(pose["at"], np.float64)
+    for _ in range(12):         # turning the phone a little moves the whole picture about as much: a few steps
+        uv, _ = project(_camera_pose({**pose, "at": at.tolist()}, board_mm, mode, K, (w, h)), corner, K)
+        step = (want - uv[0]) / [w, h]
+        at = np.clip(at + step, 0.05, 0.95)
+        if np.abs(step).max() < 1e-4:
+            break
+    out = {k: v for k, v in pose.items() if k != "corner"}
+    return {**out, "at": [round(float(at[0]), 4), round(float(at[1]), 4)], "reach": pose["corner"]}
+
+
 def camera_pose(pose, board_mm, mode="photo", K=None, size=None):
     """T_C_M (4 x 4) of a pose for a board of board_mm = (width, height): the phone at the pose's distance from the
     board's centre, on the side its view says, looking at the centre with the board's top up, turned by roll, then
-    turned in place so that the centre falls at `at` on the screen. K and size default to the mode's nominal
-    camera (each on its own)."""
+    turned in place so that the centre falls at `at` on the screen (for a pose for a corner of the photo, where
+    placed() puts it). K and size default to the mode's nominal camera (each on its own)."""
+    return _camera_pose(placed(pose, board_mm, mode, K, size), board_mm, mode, K, size)
+
+
+def _camera_pose(pose, board_mm, mode="photo", K=None, size=None):
     nominal_K, nominal_size = camera(mode)
     K = nominal_K if K is None else np.asarray(K, np.float64)
     size = nominal_size if size is None else size
@@ -218,12 +265,30 @@ def seen(pose, spec, mode="photo"):
     return int(ok.sum()), int(len(ok))
 
 
+def findable(pose, spec, mode="photo"):
+    """The chessboard corners of the board (px, N x 2) the detector can find at this pose with the nominal camera:
+    each with the four squares about it inside the frame (EDGE_PX from its edge), so that the markers it is found
+    from are whole in the photo."""
+    K, (w, h) = camera(mode)
+    nx, ny = spec["squares"]
+    q = spec["square_mm"]
+    xs, ys = np.meshgrid(np.arange(nx + 1) * q, np.arange(ny + 1) * q)
+    grid = np.stack([xs, ys, np.zeros_like(xs)], -1).reshape(-1, 3)
+    uv, z = project(camera_pose(pose, board_mm(spec), mode), grid, K)
+    uv = uv.reshape(ny + 1, nx + 1, 2)
+    inside = ((z.reshape(ny + 1, nx + 1) > 1) & (uv[..., 0] >= EDGE_PX) & (uv[..., 0] < w - EDGE_PX)
+              & (uv[..., 1] >= EDGE_PX) & (uv[..., 1] < h - EDGE_PX))
+    return np.array([uv[j, i] for j in range(1, ny) for i in range(1, nx) if inside[j - 1:j + 2, i - 1:i + 2].all()]
+                    ).reshape(-1, 2)
+
+
 def guide(pose, spec, mode="photo", n=0, plan="quick"):
     """What the page draws for a pose: the screen's aspect; the board's outline and its black squares as the phone's
     screen shows them, in fractions of the screen's width and height (x right, y down; parts may lie outside it); and
     the side view: yaw and pitch (degrees), the distance (cm), the roll."""
     K, (w, h) = camera(mode)
     W, H = board_mm(spec)
+    pose = placed(pose, (W, H), mode)
     T = camera_pose(pose, (W, H), mode)
     nx, ny = spec["squares"]
     sq = spec["square_mm"]
@@ -322,7 +387,7 @@ def render_plan(out, plan, spec, kind, mode="photo", lay=None, seed=0, K=None, d
     for i, pose in enumerate(PLANS[plan]):
         if only is not None and i not in only:
             continue
-        j = jittered(pose, rng)
+        j = jittered(placed(pose, board_mm(spec), mode, K, (w, h)), rng)
         d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
         T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
         img, b, nz = calibrate_charuco.render(page, origin, rays, T[:3, :3], T[:3, 3], rng, ppm, blur=blur)
@@ -372,7 +437,7 @@ def photo(plan, i, spec, kind, mode="photo", lay=None, rng=None, size=None):
     rays = _rays(K, (w, h))
     page, origin, ppm = texture(kind, spec, lay)
     page = cv2.GaussianBlur(page, (0, 0), 0.6)
-    pose = PLANS[plan][i % len(PLANS[plan])]
+    pose = placed(PLANS[plan][i % len(PLANS[plan])], board_mm(spec), mode, K, (w, h))
     j = jittered(pose, rng)
     d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
     T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
@@ -453,25 +518,50 @@ def cmd_test(a):
                        if seen(p, spec, mode)[0] < MIN_SEEN]
                 expect(not low, f"{name}, {mode}, {plan} ({len(PLANS[plan])} poses): every pose keeps at least "
                                 f"{MIN_SEEN} corners in the frame {low or ''}")
-    # the plans span what a calibration needs: tilts in every direction up to 40 degrees, the whole image, turns
+    # the plans span what a calibration needs: tilts in every direction up to MAX_TILT, the whole image, turns
     for plan in ("quick", "accurate"):
         ps = PLANS[plan]
         dirs = {p["view"] for p in ps}
-        tilts = max(p["tilt"] for p in ps)
+        tilts = max(p["tilt"] for p in ps + PLANS["check"])
         rolls = (min(p["roll"] for p in ps), max(p["roll"] for p in ps))
         ats = np.array([p["at"] for p in ps])
-        expect(dirs >= set(VIEWS) and tilts >= 35 and rolls[0] <= -15 and rolls[1] >= 15
+        expect(dirs >= set(VIEWS) and 30 <= tilts <= MAX_TILT and rolls[0] <= -15 and rolls[1] >= 15
                and ats[:, 0].min() <= 0.32 and ats[:, 0].max() >= 0.68 and ats[:, 1].min() <= 0.32
                and ats[:, 1].max() >= 0.68 and max(abs(p["roll"]) for p in ps) <= MAX_ROLL
                and {p["dist"] for p in ps} == {"near", "mid", "far"},
                f"{plan}: {len(ps)} poses, all nine views, tilt up to {tilts:.0f} degrees, turns {rolls}, the board "
                f"from {ats.min(0).round(2)} to {ats.max(0).round(2)} of the screen, three distances")
+    # ... and the four corners of the photo, with every board in both modes: the corners that can be found (their
+    # squares whole in the frame, as the markers about them must be) beyond calibrate_charuco.COVER_CORNER
+    for name, kind, spec, lay in boards():
+        for mode in CAMERAS:
+            K, (w, h) = camera(mode)
+            for plan in ("quick", "accurate"):
+                cov = calibrate_charuco.coverage([findable(p, spec, mode) for p in PLANS[plan]], (w, h))
+                expect(not cov["missing_corners"],
+                       f"{name}, {mode}, {plan}: the board reaches the four corners of the photo ({cov['corners']}, "
+                       f"{100 * cov['reach']:.0f} % of the way)")
     # the guide's picture is the projection of the pose: the outline holds the board's centre where the pose says
     _, _, spec, _ = boards()[1]
     g = guide(PLANS["quick"][1], spec)
     c = np.mean(g["outline"], 0)
-    expect(abs(g["yaw"] + 40) < 1e-6 and g["cells"] and abs(c[0] - 0.5) < 0.12 and abs(c[1] - 0.5) < 0.05,
-           f"guide: pose 2 seen from the left, 40 degrees; the outline's middle at {c.round(3)} of the screen")
+    expect(abs(g["yaw"] + 35) < 1e-6 and g["cells"] and abs(c[0] - 0.5) < 0.12 and abs(c[1] - 0.5) < 0.05,
+           f"guide: pose 2 seen from the left, 35 degrees; the outline's middle at {c.round(3)} of the screen")
+    # a pose for a corner of the photo: the board's own corner REACH inside that corner, whatever the board
+    far = []
+    for name, kind, spec, lay in boards():
+        K, (w, h) = camera("photo")
+        for p in PLANS["quick"]:
+            if not p.get("corner"):
+                continue
+            q = placed(p, board_mm(spec))
+            sx, sy = CORNER_SIDES[p["corner"]]
+            W, H = board_mm(spec)
+            uv = project(camera_pose(q, (W, H)), np.array([[sx * W, sy * H, 0.0]]), K)[0][0] / [w, h]
+            far.append(float(np.abs(uv - [sx + (1 - 2 * sx) * REACH, sy + (1 - 2 * sy) * REACH]).max()))
+    expect(len(far) == 12 and max(far) < 1e-3 and all("corner" not in placed(p, (200.0, 150.0)) for p in PLANS["quick"]),
+           f"the poses for the corners of the photo put the board's own corner {100 * REACH:.1f} % inside them "
+           f"(at most {max(far):.5f} off)")
     # simulation: each plan's photos (with the operator's slips) calibrate within the limits
     limits_ = {"quick": (0.5, 0.004, 6.0, 2.5), "accurate": (0.5, 0.002, 4.0, 1.5)}
     for name, kind, spec, lay in boards():

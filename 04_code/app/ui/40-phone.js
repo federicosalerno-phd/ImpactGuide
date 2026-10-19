@@ -189,11 +189,11 @@ const LINK = {
       else if (e.action === 'via') toast(T('link.said.' + (e.via === 'wifi' ? 'wifi' : 'usb')), TOAST_SAID_MS);
       else if (e.action === 'paired') { LINK.pairing = false; toast(T('link.said.paired'), TOAST_SAID_MS); }
       else if (e.action === 'connected') toast(T('link.said.connected'), TOAST_SAID_MS);
-      else if (e.action === 'failed') toast(errorText(e), TOAST_LONG_MS);
+      else if (e.action === 'failed') toast(errorText(e), TOAST_LONG_MS, 'error');
       if (LINK.open) LINK.refresh();
     } else if (e.type === 'view') {
       if (e.action === 'opened') toast(T('view.said.opened'), TOAST_SAID_MS);
-      else if (e.action === 'failed') toast(errorText(e), TOAST_LONG_MS);
+      else if (e.action === 'failed') toast(errorText(e), TOAST_LONG_MS, 'error');
       if (LINK.open) LINK.refresh();
     } else if (e.type === 'live' && e.action === 'stopped' && e.reason === 'link') {
       toast(T('link.said.live_stopped'), TOAST_SAID_MS);

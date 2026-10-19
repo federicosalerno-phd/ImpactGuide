@@ -3,26 +3,30 @@
 
 // The work of the page (workOn keys) that each job of the backend ends, for an `error` event naming its job; a job
 // without work of the page here ends none, an event without a job ends all.
-const JOB_WORK = { phone: ['cal_photo', 'trial_file'], photo_check: ['cal_photo'], calibration: ['calib'],
+const JOB_WORK = { phone: ['cal_photo', 'trial_file'], phone_copy: ['cal_photo'], photo_check: ['cal_photo'], calibration: ['calib'],
                    live: ['live', 'cal_stream'], import_file: ['trial_file'] };
 
 // The backend's events, to every part that follows them; what concerns no part in particular is said here.
+let phoneHeard = false;     // a phone event came already: the next one that changes the link is a phone come or gone
 function onEvent(raw) {
   let e = null;
   try { e = JSON.parse(raw); } catch (err) { console.warn('an event that is not JSON', raw); return; }
   if (!e || typeof e !== 'object') return;
   if (e.type === 'phone') {
-    const left = LINK.leftOnPhone();
+    const left = LINK.leftOnPhone(), was = !!PHONE.ok, heard = phoneHeard;
     PHONE = e;
+    phoneHeard = true;
+    // the phone came, or went; never at the start (the first state is how things stand, nothing that happened)
+    if (heard && !!e.ok !== was) playSound(e.ok ? 'on' : 'off');
     LINK.sayLeft(left);
     showPhone();
     LINK.onEvent(e);
     return;
   }
-  if (e.type === 'acquire_failed') toast(errorText(e), TOAST_LONG_MS);
+  if (e.type === 'acquire_failed') toast(errorText(e), TOAST_LONG_MS, 'error');
   if (e.type === 'error') {
     // something failed in the backend without the event of its own work: that work is over, the page reads again
-    toast(errorText({ error: e.error || 'internal', args: e.args, message: e.message }), TOAST_LONG_MS);
+    toast(errorText({ error: e.error || 'internal', args: e.args, message: e.message }), TOAST_LONG_MS, 'error');
     if (!e.job) workClear();
     else if (Object.prototype.hasOwnProperty.call(JOB_WORK, e.job)) JOB_WORK[e.job].forEach(function (k) { workOff(k); });
     if (page === 'calibration') CAL.refresh();
@@ -31,6 +35,7 @@ function onEvent(raw) {
   CAL.onEvent(e);
   TRIALS.onEvent(e);
   LIVE.onEvent(e);
+  TWIN.onEvent(e);
   LINK.onEvent(e);
 }
 
@@ -46,12 +51,14 @@ function boot() {
   const speak = function (lang) {
     setLang(lang);
     setWindowHints({ maximise: T('win.maximise.hint'), restore: T('win.restore.hint') });
+    setSoundHints({ on: T('win.sound.on.hint'), off: T('win.sound.off.hint') });
     wireSteps();
     HOME.wire();
     CAL.wire();
     TRIALS.wire();
     LIVE.wire();
     LINK.wire();
+    TWIN.wire();
     showWork();         // the pill: what the app is doing, or the phone, in the new language
   };
   askQuiet('app_info', function (info, bad) {
@@ -80,6 +87,10 @@ function boot() {
     LINK.btn();
     // the app opens at home; a module asked for on the command line opens instead
     go(info.page || 'home');
+    // SlantUI's sounds, once the start is made (it makes none): the speaker on the band and Ctrl+M, the choice kept
+    // in the preferences of this computer
+    initSounds({ on: info.sound !== false, keep: function (on) { be('set_sound', on); },
+                 hints: { on: T('win.sound.on.hint'), off: T('win.sound.off.hint') } });
   });
 }
 

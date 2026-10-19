@@ -35,27 +35,40 @@ const ARMED_MS = 4000;          // how long a button that cannot be taken back w
 // The signs this application adds to SlantUI's set, on the same 24 grid.
 ICONS.camera = { s: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9'
   + 'a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.8" r="3.4"/>' };
-// The four signs of home, on SlantUI's 24 grid and stroke, each drawn so that its box is centred by construction
-// (SlantUI centres a sign by its box: no shift, so the squares stay on whole pixels at the choices' 28 px, where one
-// pixel is 6/7 of a unit). Calibrate the phone: a 4 x 4 checkerboard of 3 px squares in the outline of its sheet.
-ICONS.board = { s: '<rect x="4" y="4" width="16" height="16" rx="1.5"/>'
-  + '<path d="M6.857 6.857h2.571v2.571H6.857zM12 6.857h2.571v2.571H12zM9.429 9.429H12V12H9.429zM14.571 9.429h2.571V12'
-  + 'h-2.571zM6.857 12h2.571v2.571H6.857zM12 12h2.571v2.571H12zM9.429 14.571H12v2.571H9.429zM14.571 14.571h2.571'
-  + 'v2.571h-2.571z" fill="currentColor" stroke="none"/>' };
-// Run the trials: the app's logo in line, as much of it as reads at 28 px: the support and its pin, the rod, the
-// mass, the flash of the impact and the checkered marker.
-ICONS.pendulum = { s: '<path d="M6.5 2.571h7"/><circle cx="10" cy="4.75" r="1.15" fill="currentColor"/>'
-  + '<path d="M9.62 6.05 7.682 11.94"/><circle cx="6.73" cy="15.1" r="3.3"/><path d="M16.6 4.4 14.2 8.1h3.1l-2.4 3.7"/>'
-  + '<rect x="12" y="12.857" width="8.571" height="8.571" rx="1"/>'
-  + '<path d="M13.714 14.571h2.571v2.571h-2.571zM16.286 17.143h2.571v2.571h-2.571z" fill="currentColor" stroke="none"/>' };
-// Scans and results: a sphere fitted to the points of a scan, its centre marked. The circle, of radius 7.8792, goes
-// through the three points, whose centres are worked out on it (cos and sin of 225, 315 and 45 degrees) and fall on
-// pixel centres at 28 px (6.5 px from the middle); the circle stops short of each point, so the points read as points.
-ICONS.results = { s: '<path d="M14.9172 19.3193A7.8792 7.8792 0 0 1 4.6807 9.0828M9.0828 4.6807A7.8792 7.8792 0 0 1'
-  + ' 14.9172 4.6807M19.3193 9.0828A7.8792 7.8792 0 0 1 19.3193 14.9172"/><path d="M12 10v4M10 12h4"/>'
-  + '<circle cx="6.4286" cy="6.4286" r="2" fill="currentColor" stroke="none"/>'
-  + '<circle cx="17.5714" cy="6.4286" r="2" fill="currentColor" stroke="none"/>'
-  + '<circle cx="17.5714" cy="17.5714" r="2" fill="currentColor" stroke="none"/>' };
+// The four signs of home, on SlantUI's 24 grid and stroke, each drawn whole inside the grid with room for its stroke
+// (nothing cut at the edge) and its ink centred on it (SlantUI centres a sign by its box: no shift). Every board the
+// app draws as a sign is a sheet lying across, its long side horizontal, with squares of 2.4 (ICONS.screen too).
+// Calibrate the phone: a 6 x 4 checkerboard in the outline of its sheet.
+ICONS.board = { s: '<rect x="2.7" y="5.1" width="18.6" height="13.8" rx="1.5"/>'
+  + '<path d="M4.8 7.2h2.4v2.4h-2.4zM9.6 7.2h2.4v2.4h-2.4zM14.4 7.2h2.4v2.4h-2.4zM7.2 9.6h2.4v2.4h-2.4zM12 9.6h2.4v2.4'
+  + 'h-2.4zM16.8 9.6h2.4v2.4h-2.4zM4.8 12h2.4v2.4h-2.4zM9.6 12h2.4v2.4h-2.4zM14.4 12h2.4v2.4h-2.4zM7.2 14.4h2.4v2.4'
+  + 'h-2.4zM12 14.4h2.4v2.4h-2.4zM16.8 14.4h2.4v2.4h-2.4z" fill="currentColor" stroke="none"/>' };
+// Run the trials: the round of the trials, an arc of three quarters with the dots of the quarter still to come,
+// around the sign that starts the next one.
+ICONS.trials = { s: '<path d="M12 3.5A8.5 8.5 0 1 1 3.5 12"/>'
+  + '<circle cx="4.119" cy="8.817" r="0.9" fill="currentColor" stroke="none"/>'
+  + '<circle cx="5.99" cy="5.99" r="0.9" fill="currentColor" stroke="none"/>'
+  + '<circle cx="8.817" cy="4.119" r="0.9" fill="currentColor" stroke="none"/>'
+  + '<path d="M10.25 8.75L15.5 12L10.25 15.25z" fill="currentColor"/>' };
+// Scans and results: a mesh as a scan gives it, a polyhedron seen along its axis: its outline, the face in front,
+// and the edges behind it, half seen.
+ICONS.results = { s: '<path d="M12 6.438L4.206 7.5M12 6.438L12 3M12 6.438L19.794 7.5M16.817 14.781L19.794 7.5'
+  + 'M16.817 14.781L19.794 16.5M16.817 14.781L12 21M7.183 14.781L12 21M7.183 14.781L4.206 16.5M7.183 14.781L4.206 7.5"'
+  + ' opacity="0.5"/><path d="M12 3 19.794 7.5 19.794 16.5 12 21 4.206 16.5 4.206 7.5z"/>'
+  + '<path d="M12 6.438 16.817 14.781 7.183 14.781z"/>' };
+// The two names a trial is read by in every row and cell, as signs (SlantUI's .ilbl, the name in the tooltip):
+// the hole, an angle opened from the rail, and the direction, an arrow that points.
+ICONS.hole = { s: '<path d="M4 19h16M4 19 15.5 7.5"/><path d="M11.5 19a7.5 7.5 0 0 0-2.2-5.3"/>' };
+ICONS.direction = { s: '<path d="M5.5 18.5 18.5 5.5M9.5 5.5h9v9"/>' };
+
+// A value with a sign for its name: the sign in front of it, the name its tooltip (SlantUI's .ilbl).
+function signed(sign, text, name) {
+  const s = E('span', 'ilbl');
+  s.innerHTML = icon(sign);       // SlantUI's own sign, made by the app: no data in it
+  s.append(document.createTextNode(text));
+  s.title = name;
+  return s;
+}
 
 let page = 'home';          // the module open, or home
 let trialsView = 'guide';   // the step open in Trials (ui/20-trials.js)
@@ -177,13 +190,14 @@ function errorText(a, prefix) {
 /** Says a failed answer in a toast; false when the answer is not a failure. */
 function failed(a) {
   if (!a || !a.error) return false;
-  toast(errorText(a), TOAST_ERROR_MS);
+  toast(errorText(a), TOAST_ERROR_MS, 'error');
   return true;
 }
 
 // ── the pill, the toast, the wait ──────────────────────────────────────────
 let toastTimer = null;
-function toast(text, ms) {
+// `sound`: the SlantUI voice said with it ('error'), or none; a press makes its own sound (data-sound).
+function toast(text, ms, sound) {
   // last guard: a raw line (stack, exception, log) never reaches the screen
   if (/[|]|exception|traceback|java\.|android\.|\bat [a-z]+\./i.test(String(text || ''))) text = T('err.generic.plain');
   const el = $('toast');
@@ -191,6 +205,7 @@ function toast(text, ms) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(function () { el.classList.remove('show'); }, ms || TOAST_MS);
+  if (sound) playSound(sound);
 }
 
 function setStatus(kind, text) {
@@ -316,10 +331,17 @@ function showPanel(name) {
 // becomes a button, raised and pressable.
 function goHome() { go('home'); }
 function showHome() {
-  setBrandAction(goHome, T('win.home.hint'));
+  const b = setBrandAction(goHome, T('win.home.hint'));
+  if (b) b.setAttribute('data-sound', page === 'home' ? '' : 'back');      // SlantUI's voice, on the press
 }
 
 function stepOf(p) { return p === 'trials' ? trialsView : STEP[p]; }
+// The voice of a way to step s of module p (SlantUI's data-sound, played on the press): forward to a later step,
+// back to an earlier one, none to the step open.
+function stepSound(p, s) {
+  const steps = MODULES[p] ? MODULES[p].steps : [], now = steps.indexOf(stepOf(p)), to = steps.indexOf(s);
+  return to < 0 || to === now ? '' : to > now ? 'forward' : 'back';
+}
 function stepWord(p, s) { return T(STEP_WORD[p][s]); }
 
 // The rail: the steps of the module open, numbered, the open one lit; nothing at home.
@@ -335,6 +357,7 @@ function rail() {
     t.title = stepWord(page, s);
     t.tabIndex = 0;
     t.setAttribute('role', 'button');
+    t.setAttribute('data-sound', stepSound(page, s));
     t.append(E('div', 'tn', i + 1), E('span', null, stepWord(page, s)));
     onActivate(t, function () { go(page, s); });
     host.append(t);
@@ -362,11 +385,13 @@ function go(p, step) {
   $('hint').textContent = '';
   showHome();
   rail();
+  document.querySelectorAll('.rp-page [data-step]').forEach(function (b) { b.setAttribute('data-sound', stepSound(page, b.dataset.step)); });
   if (p === 'home') { showView('home'); HOME.enter(); return; }
   be('set_page', p);
   if (p === 'calibration') { CAL.enter(s); return; }
   if (p === 'live') { LIVE.enter(s); return; }
   if (p === 'trials') { TRIALS.enter(); return; }
+  if (p === 'results' && s === 'scans') { TWIN.open('results'); return; }     // the scans on the twin (18-twin.js)
   showView('soon');
   showPanel('soon');
   $('soonTitle').textContent = T('page.' + s + '.title');

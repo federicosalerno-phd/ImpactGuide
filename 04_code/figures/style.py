@@ -2,10 +2,11 @@
 
 Importing this module sets the matplotlib defaults (Abadi, 7 pt text, thin
 axes, no top and right spines). Figure scripts size their figures with
-figsize() at one of the Elsevier widths and write them with save(), which
-produces a vector PDF with embedded TrueType fonts (fonttype 42) and a 300 dpi
-PNG in 06_pictures. Output files are rewritten only when their content changes,
-so rebuilding unchanged figures adds no versions to Drive.
+figsize() at one of the widths of a two-column journal page and write them
+with save(), which produces a vector PDF with embedded TrueType fonts
+(fonttype 42) and a 300 dpi PNG in 06_pictures. Output files are rewritten
+only when their content changes, so rebuilding unchanged figures adds no
+versions to Drive.
 """
 
 import io
@@ -26,7 +27,7 @@ PICTURES_DIR = ROOT / "06_pictures"
 RESULTS_DIR = ROOT / "05_results"
 
 MM = 1 / 25.4
-WIDTHS_MM = (90, 140, 190)  # Elsevier single, 1.5 and double column
+WIDTHS_MM = (90, 140, 190)  # a two-column page: one column, one and a half, the full width
 DPI = 300
 FONT = "Abadi"
 PLACEHOLDER_TAG = "placeholder data"  # searched for by 04_code/tools/make_submission.py
@@ -113,9 +114,9 @@ plt.rcParams.update({
 
 
 def figsize(width_mm, height_mm):
-    """Figure size in inches for an Elsevier width (90, 140 or 190 mm)."""
+    """Figure size in inches for one of the page widths WIDTHS_MM (90, 140 or 190 mm)."""
     if width_mm not in WIDTHS_MM:
-        raise ValueError(f"width {width_mm} mm is not an Elsevier width {WIDTHS_MM}")
+        raise ValueError(f"width {width_mm} mm is not one of the page widths {WIDTHS_MM}")
     return width_mm * MM, height_mm * MM
 
 
@@ -129,7 +130,7 @@ def save(fig, name, placeholder=False):
         raise ValueError(f"'{name}' is not a figure name (figNN_name, figSN_name, graphical_abstract)")
     width_mm = fig.get_figwidth() / MM
     if not any(abs(width_mm - w) < 0.5 for w in WIDTHS_MM):
-        raise ValueError(f"{name}: width {width_mm:.1f} mm is not an Elsevier width {WIDTHS_MM}")
+        raise ValueError(f"{name}: width {width_mm:.1f} mm is not one of the page widths {WIDTHS_MM}")
 
     keywords = {"Keywords": PLACEHOLDER_TAG} if placeholder else {}
     pdf = io.BytesIO()

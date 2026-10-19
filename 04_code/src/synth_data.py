@@ -3,7 +3,8 @@
     python 04_code/src/synth_data.py index  [--root DIR]
         OUT/index.csv: one row per image (session, split, face, interface, state, view, mode, motion, deformation,
         head spheres shown or not, pixel counts); OUT/index.json: counts, splits, faces, distributions of displacements
-        and deformations, render time. Sessions 900 and above (check set) are left out.
+        and deformations, render time, the fingerprint of the scene the sessions were rendered on (scene_print).
+        Sessions 900 and above (check set) are left out.
     python 04_code/src/synth_data.py check  [--root DIR] [--sessions s0900] [--renderer numpy|gl|both]
         renderer of the face (mesh_overlay.py, and gl_overlay.py) against the exact masks of Blender: the decimated face
         rendered at the true pose T_C_B against <image>_model.png (undeformed face alone, same camera); IoU, outline
@@ -112,10 +113,13 @@ def spread(x):
 def cmd_index(args):
     """index.csv (one row per image) and index.json (counts, splits, distributions of the samples, timing). Sessions
     from CHECK_FROM on are the check set of the renderer (synth_data.py check), not the dataset."""
-    rows, states, ms = [], {}, []
+    rows, states, ms, prints = [], {}, [], {}
     for sd in sessions(args.root):
         if int(sd.name[1:]) >= CHECK_FROM:
             continue
+        info = json.loads((sd / "session.json").read_text(encoding="utf-8")) if (sd / "session.json").exists() else {}
+        p = info.get("scene_print") or ""      # sessions rendered before the fingerprint existed have none
+        prints[p] = prints.get(p, 0) + 1
         for f in frames(sd):
             shown = f.get("head_spheres", True)        # frames written before the choice existed always showed them
             rows.append({"session": f["session"], "split": f["split"], "face": f["face"], "interface": f["interface"],
@@ -167,6 +171,10 @@ def cmd_index(args):
         "distinct_marker_poses": {i: {k: len({tuple(np.round(np.array(f[k]).ravel(), 2)) for f in st
                                               if f["interface"] == i}) for k in ("T_M_B0", "T_M_B")}
                                   for i in sorted({f["interface"] for f in st})},
+        # the scene the sessions were rendered on (twin_export.py): one fingerprint, or "" when they differ or one
+        # was rendered before fingerprints were written; ImpactGuide compares it with the bench as it stands
+        "scene_print": next(iter(prints)) if len(prints) == 1 else "",
+        "scene_prints": {k or "none": v for k, v in sorted(prints.items())},
     }
     (root / "index.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print(json.dumps({k: summary[k] for k in ("sessions", "samples", "images", "registrations", "splits", "faces",

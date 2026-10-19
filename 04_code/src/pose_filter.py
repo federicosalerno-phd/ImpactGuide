@@ -5,14 +5,17 @@ to frame, now and then comes out wrong on a frame with few corners, and is missi
 covered or blurred. Drawn as it comes, the overlay trembles and blinks. PoseTracker turns the poses of the processed
 frames into a calm pose for every frame shown:
 
-  filter    One Euro filter (Casiez, Roussel and Vogel, CHI 2012) on SE(3), in two channels: the position of an
-            anchor (the board's centre) and the rotation (along the geodesic, slerp). Each cutoff grows with that
-            channel's speed in the image (px/s: the anchor's; the model's lever times the angular speed, times f / z)
-            beyond a dead band (still_px_s, the speed that noise alone gives): strong smoothing while the phone is
-            still, almost none, and so almost no lag, as soon as it moves; moving, the pose is first carried on by
-            the filtered velocity (the lead), so a steady motion is not left behind either. The rotation of a small
-            board is noisier (the tracker says how much, noise_px): its dead band is wider and its smoothing at rest
-            stronger, while the position keeps following the hand.
+  filter    One Euro filter (Casiez, Roussel and Vogel, CHI 2012) on SE(3), in three channels: the position of an
+            anchor (the board's centre), the board's turn about the line of sight to it, and its tilt against that
+            line (along the geodesic, slerp). Each cutoff grows with that channel's speed in the image (px/s: the
+            anchor's; the model's lever times the angular speed, times f / z) beyond a dead band (still_px_s, or the
+            speed that the channel's noise alone gives): strong smoothing while the phone is still, almost none, and
+            so almost no lag, as soon as it moves; moving, the pose is first carried on by the filtered velocity (the
+            lead), so a steady motion is not left behind either. The tilt of a small board is what its corners give
+            worst (the tracker says how noisy, noise_px): its dead band is wider and its smoothing at rest stronger.
+            A hand that trembles turns the phone, which moves the board's centre across the picture and leaves its
+            orientation against the line of sight as it was: the tremble goes through the position, followed as it
+            comes, and the face stays on the board instead of trailing it.
   gate      a pose that would move the model in the image by more than the gate from the predicted one is a jump.
             A jump measured on many corners at a low reprojection error is believed at once (the filter restarts from
             it, gliding there over glide_s instead of jumping); a jump on few corners is rejected, unless the next
@@ -43,10 +46,16 @@ import cv2
 import numpy as np
 
 STATES = ("lost", "acquiring", "tracking", "holding", "fading")
+# The values: 19/10/2026, against the face drawn on a hand-held phone with the truth known (a tremor of 6-12 Hz, a
+# drift, slow and fast moves; corners with the tracker's noise; both boards) and against the reference of the two
+# regression clips of the phone (live_tune): the precise channels open up at once with the speed (beta, and a cap
+# four times higher) so the face follows the hand, the tilt keeps its smoothing (tilt_beta, a higher floor).
 DEFAULTS = {
     "smooth": True,           # False: every frame at its own pose as it comes (the tests of the geometry)
     "min_cutoff_hz": 2.0,     # smoothing while still: lower is calmer and slower to settle
-    "beta": 0.25,             # cutoff added per px/s of the model's speed past the dead band: higher lags less
+    "beta": 1.0,              # cutoff added per px/s of the model's speed past the dead band: higher lags less
+    "turn_beta": 1.0,         #   the same for the turn about the line of sight
+    "tilt_beta": 0.25,        #   and for the tilt, the noisy channel
     "d_cutoff_hz": 2.0,       # smoothing of that speed
     "lead": True,             # moving, the filter carries the pose on by its speed first: no lag at a steady speed
     "still_px_s": 8.0,        # dead band at least this (px/s at the stream size): slower is noise, not motion
@@ -56,9 +65,11 @@ DEFAULTS = {
     "gate_px": 40.0,          # a pose moving the model more than this (px, stream size) from the prediction is a jump,
     "glide_s": 0.15,          #   believed (when strong or confirmed) by gliding there over this time
     "noise_k": 2.0,           # each channel's dead band: this many times the speed its expected noise gives
+    "turn_share": 0.12,       # noise of the turn about the line of sight, as a share of the rotation's (synthetic
+                              #   PnP of both boards: 0.10 and 0.13)
     "noise_ref_px": 0.5,      # the lowest cutoff scales with noise_ref_px over the expected noise (px per frame),
-    "min_cutoff_floor": 0.4,  #   down to this share for a noisy measure (a small board far away)
-    "min_cutoff_cap": 3.0,    #   and up to this many times for a precise one: the overlay stays glued to the board
+    "min_cutoff_floor": 0.5,  #   down to this share for a noisy measure (a small board far away)
+    "min_cutoff_cap": 12.0,   #   and up to this many times for a precise one: the overlay stays glued to the board
     "hold_s": 0.7,            # the board lost: the last pose stays drawn this long
     "fade_s": 0.35,           # then fades out over this time
     "fade_in_s": 0.1,         # and fades in when the board is found again,
@@ -83,14 +94,65 @@ def smoothing(cutoff_hz, dt):
     return 1.0 / (1.0 + tau / max(dt, 1e-6))
 
 
+def line_of_sight(p):
+    """The rotation taking the optical axis onto the line of sight to the point p (the shortest one)."""
+    u = np.asarray(p, np.float64) / max(float(np.linalg.norm(p)), 1e-9)
+    axis = np.array([-u[1], u[0], 0.0])
+    s = float(np.linalg.norm(axis))
+    if s < 1e-12:
+        return np.eye(3)
+    return rotmat(axis / s * np.arctan2(s, u[2]))
+
+
+def turn_z(phi):
+    """The rotation by phi about the optical axis."""
+    c, s = np.cos(phi), np.sin(phi)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def split_turn(D):
+    """D = turn_z(phi) @ S: its turn about the optical axis and the rest, the tilt (swing and twist)."""
+    w = rotvec(D)
+    a = float(np.linalg.norm(w))
+    if a < 1e-12:
+        return 0.0, np.eye(3)
+    phi = 2.0 * np.arctan2(np.sin(a / 2) * w[2] / a, np.cos(a / 2))
+    return phi, turn_z(-phi) @ D
+
+
+def wrap(a):
+    """An angle in (-pi, pi]."""
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def towards(u, v):
+    """The rotation vector of the shortest turn taking the unit vector u onto the unit vector v."""
+    axis = np.cross(u, v)
+    s = float(np.linalg.norm(axis))
+    if s < 1e-15:
+        return np.zeros(3)
+    return axis / s * np.arctan2(s, float(np.dot(u, v)))
+
+
 class OneEuroPose:
-    """One Euro filter on a rigid transform T (4 x 4, camera from board, mm), in two channels: the position of the
-    anchor (the board's centre) and the rotation (which a small board gives far less precisely, and which the lever of
-    the model, radius mm from the anchor, magnifies in the image). Each channel has its own cutoff from its own speed
-    in the image (px/s: the anchor's; radius times the angular speed) past its own dead band, and both follow the noise
-    the tracker expects on this frame (noise_px for the rotation at the model, noise_pos_px for the anchor, px per
-    frame): a precise measure (many corners, a large board) is followed almost as it comes, so the overlay stays glued
-    to the board even when the hand trembles; a noisy one (a small board far away) is smoothed while still."""
+    """One Euro filter on a rigid transform T (4 x 4, camera from board, mm), in four channels, each with its own
+    cutoff from its own speed in the image past its own dead band, after the noise the tracker expects on it:
+      direction  of the line of sight to the anchor, the board's centre: its place in the picture, what the
+                 corners give best (noise_pos_px);
+      range      the anchor's distance from the camera: what the size of the board in the picture gives, poorly for a
+                 small board (noise_range_mm), and which the model's lever (radius mm from the anchor) turns into a
+                 shift of the face;
+      turn       the board's turn about the line of sight: the corners turning in the picture, about eight times
+                 better given than the tilt (turn_share of noise_px);
+      tilt       the board's orientation against the line of sight: what a small board gives worst, its PnP pose
+                 shaking there by pixels on the face (noise_px).
+    The pose is split along the line of sight because a hand that trembles turns the phone: the board moves in the
+    picture, but its distance and its orientation against the line of sight to its centre stay as they were. So the
+    tremble of the hand is carried by the direction, followed as it comes, and the smoothing of the range and the
+    tilt (where the noise is) leaves the face on the board instead of trailing it. A precise measure (many corners, a
+    large board) is followed almost as it comes; a noisy one (a small board far away) is smoothed while still. The
+    tilt is taken from a reference orientation (the one at the last restart) so that its split from the turn never
+    meets the half turn where it is undefined."""
 
     def __init__(self, settings, anchor, radius_mm, f_px):
         self.s = {**DEFAULTS, **settings}
@@ -98,19 +160,59 @@ class OneEuroPose:
         self.radius, self.f = float(radius_mm), float(f_px)
         self.t = None
         self.noise = None           # expected noise of the rotation at the model, px per frame (smoothed)
-        self.noise_pos = None       # and of the anchor
+        self.noise_pos = None       # of the anchor in the picture, px per frame
+        self.noise_range = None     # of its distance, mm per frame
         self.frame_dt = FRAME_DT_S  # interval between frames (s): what turns a noise per frame into a speed
 
     def reset(self, T, t):
-        self.R = np.array(T[:3, :3], np.float64)
-        self.p = self.R @ self.anchor + T[:3, 3]
-        self.v, self.w = np.zeros(3), np.zeros(3)      # anchor velocity (mm/s, camera), angular velocity (rad/s, body)
+        R = np.array(T[:3, :3], np.float64)
+        p = R @ self.anchor + T[:3, 3]
+        self.rho = max(float(np.linalg.norm(p)), 1.0)     # the anchor's distance (mm) and direction
+        self.u = p / self.rho
+        self.ref = line_of_sight(self.u).T @ R      # the orientation against the line of sight at the restart
+        self.phi, self.S = 0.0, np.eye(3)           # turn and tilt from it
+        # angular velocity of the direction (rad/s, camera), speed of the distance (mm/s), turn rate (rad/s),
+        # angular velocity of the tilt (rad/s)
+        self.w_dir, self.v_rho, self.w_turn, self.w = np.zeros(3), 0.0, 0.0, np.zeros(3)
         self.t = float(t)
 
+    @property
+    def p(self):
+        """The anchor in the camera (mm)."""
+        return self.rho * self.u
+
+    def _rotation(self, u, phi, S):
+        return line_of_sight(u) @ turn_z(phi) @ S @ self.ref
+
+    @property
+    def R(self):
+        """The rotation of the filtered pose."""
+        return self._rotation(self.u, self.phi, self.S)
+
+    def _parts(self, T):
+        """(direction, distance, turn, tilt) of a pose, against the reference orientation."""
+        R = np.asarray(T[:3, :3], np.float64)
+        p = R @ self.anchor + T[:3, 3]
+        rho = max(float(np.linalg.norm(p)), 1.0)
+        u = p / rho
+        phi, S = split_turn(line_of_sight(u).T @ R @ self.ref.T)
+        return u, rho, phi, S
+
+    def _range_px(self):
+        """px on the model per mm of the anchor's distance: the lever seen from the camera."""
+        return self.f * self.radius / self.rho ** 2
+
+    def _speeds(self):
+        """Speed in the image (px/s) of the anchor (its direction), and of the model at the radius from the
+        distance, the turn and the tilt."""
+        k = self.f / self.rho
+        return (self.f * float(np.linalg.norm(self.w_dir)), self._range_px() * abs(self.v_rho),
+                k * self.radius * abs(self.w_turn), k * self.radius * float(np.linalg.norm(self.w)))
+
     def speeds(self):
-        """Speed in the image (px/s) of the anchor and, from the rotation alone, of the model at the radius."""
-        k = self.f / max(self.p[2], 1.0)
-        return k * np.linalg.norm(self.v), k * self.radius * np.linalg.norm(self.w)
+        """Speed in the image (px/s) of the anchor and, from the rotation (turn and tilt), of the model at the radius."""
+        d, g, q, r = self._speeds()
+        return d + g, q + r
 
     def speed(self):
         return sum(self.speeds())
@@ -124,39 +226,50 @@ class OneEuroPose:
         cut = s["min_cutoff_hz"] * float(np.clip(ratio, s["min_cutoff_floor"], s["min_cutoff_cap"]))
         return max(s["still_px_s"], s["noise_k"] * noise / max(dt, 1e-3)), cut
 
+    def _noises(self):
+        """The noise of each channel as px per frame: direction, distance, turn, tilt (None: unknown)."""
+        return (self.noise_pos, None if self.noise_range is None else self._range_px() * self.noise_range,
+                None if self.noise is None else self.s["turn_share"] * self.noise, self.noise)
+
     def dead_bands(self, dt=None):
-        """(anchor, rotation) dead bands, px/s, for frames dt apart (None: the measured frame interval)."""
+        """(anchor, tilt) dead bands, px/s, for frames dt apart (None: the measured frame interval)."""
         dt = self.frame_dt if dt is None else dt
         return self._channel(self.noise_pos, dt)[0], self._channel(self.noise, dt)[0]
 
-    def update(self, T, t, noise_px=None, noise_pos_px=None):
+    def update(self, T, t, noise_px=None, noise_pos_px=None, noise_range_mm=None):
         def mix(old, new):
-            return None if new is None else float(new) if old is None else 0.8 * old + 0.2 * float(new)
+            return old if new is None else float(new) if old is None else 0.8 * old + 0.2 * float(new)
         if self.t is None:
             self.reset(T, t)
             self.noise, self.noise_pos = mix(None, noise_px), mix(None, noise_pos_px)
+            self.noise_range = mix(None, noise_range_mm)
             return
         s = self.s
         dt = max(float(t) - self.t, 1e-3)
-        self.noise = mix(self.noise, noise_px) if noise_px is not None else self.noise
-        self.noise_pos = mix(self.noise_pos, noise_pos_px) if noise_pos_px is not None else self.noise_pos
-        R_m = np.asarray(T[:3, :3], np.float64)
-        p_m = R_m @ self.anchor + T[:3, 3]
-        dw = rotvec(self.R.T @ R_m)
+        self.noise = mix(self.noise, noise_px)
+        self.noise_pos = mix(self.noise_pos, noise_pos_px)
+        self.noise_range = mix(self.noise_range, noise_range_mm)
+        u_m, rho_m, phi_m, S_m = self._parts(T)
         a_d = smoothing(s["d_cutoff_hz"], dt)
-        self.v += a_d * ((p_m - self.p) / dt - self.v)
-        self.w += a_d * (dw / dt - self.w)
-        v_px, w_px = self.speeds()
-        dead_t, min_t = self._channel(self.noise_pos, self.frame_dt)
-        dead_r, min_r = self._channel(self.noise, self.frame_dt)
-        a_t = smoothing(min_t + s["beta"] * max(0.0, v_px - dead_t), dt)
-        a_r = smoothing(min_r + s["beta"] * max(0.0, w_px - dead_r), dt)
-        lead = s["lead"]
+        self.w_dir += a_d * (towards(self.u, u_m) / dt - self.w_dir)
+        self.v_rho += a_d * ((rho_m - self.rho) / dt - self.v_rho)
+        self.w_turn += a_d * (wrap(phi_m - self.phi) / dt - self.w_turn)
+        self.w += a_d * (rotvec(self.S.T @ S_m) / dt - self.w)
+        speed = self._speeds()
+        chans = [self._channel(n, self.frame_dt) for n in self._noises()]
+        betas = (s["beta"], s["tilt_beta"], s["turn_beta"], s["tilt_beta"])
+        a = [smoothing(c[1] + b * max(0.0, v - c[0]), dt) for v, c, b in zip(speed, chans, betas)]
+        lead = [s["lead"] and v >= c[0] for v, c in zip(speed, chans)]
         # moving, blend towards the pose carried on by the filtered velocity: no lag at a steady speed
-        p0 = self.p + self.v * dt if lead and v_px >= dead_t else self.p
-        R0 = self.R @ rotmat(self.w * dt) if lead and w_px >= dead_r else self.R
-        self.p = p0 + a_t * (p_m - p0)
-        self.R = R0 @ rotmat(a_r * rotvec(R0.T @ R_m))
+        u0 = rotmat(self.w_dir * dt) @ self.u if lead[0] else self.u
+        rho0 = self.rho + self.v_rho * dt if lead[1] else self.rho
+        phi0 = self.phi + self.w_turn * dt if lead[2] else self.phi
+        S0 = self.S @ rotmat(self.w * dt) if lead[3] else self.S
+        u = rotmat(a[0] * towards(u0, u_m)) @ u0
+        self.u = u / np.linalg.norm(u)
+        self.rho = max(rho0 + a[1] * (rho_m - rho0), 1.0)
+        self.phi = phi0 + a[2] * wrap(phi_m - phi0)
+        self.S = S0 @ rotmat(a[3] * rotvec(S0.T @ S_m))
         self.t = float(t)
 
     def predict(self, t, horizon=None, still_px_s=0.0, tau=None):
@@ -169,13 +282,15 @@ class OneEuroPose:
         dt = max(dt, 0.0)
         if tau:
             dt = tau * (1.0 - np.exp(-dt / tau))
-        v_px, w_px = self.speeds()
-        dead_t, dead_r = self.dead_bands()
-        R = self.R @ rotmat(self.w * dt) if w_px >= dead_r else self.R
-        p = self.p + self.v * dt if v_px >= dead_t else self.p
+        on = [v >= self._channel(n, self.frame_dt)[0] for v, n in zip(self._speeds(), self._noises())]
+        u = rotmat(self.w_dir * dt) @ self.u if on[0] else self.u
+        rho = max(self.rho + self.v_rho * dt, 1.0) if on[1] else self.rho
+        phi = self.phi + self.w_turn * dt if on[2] else self.phi
+        S = self.S @ rotmat(self.w * dt) if on[3] else self.S
+        R = self._rotation(u, phi, S)
         T = np.eye(4)
         T[:3, :3] = R
-        T[:3, 3] = p - R @ self.anchor
+        T[:3, 3] = rho * u - R @ self.anchor
         return T
 
 
@@ -219,11 +334,12 @@ class PoseTracker:
         self.glide = None           # (t, anchor offset, rotation offset): the overlay glides from where it was
 
     # ── the processed frames ─────────────────────────────────────────────
-    def measure(self, t, T=None, strong=False, noise_px=None, noise_pos_px=None):
+    def measure(self, t, T=None, strong=False, noise_px=None, noise_pos_px=None, noise_range_mm=None):
         """A processed frame taken at t: T the PnP pose that passed the RMS limit, None when the board was not found.
-        strong: many corners and a low reprojection error. noise_px, noise_pos_px: the noise the tracker expects on
-        the model from the rotation and on the anchor (px per frame). Returns accepted, restarted, rejected or
-        missed (a frame older than the filter's is rejected and counted as late)."""
+        strong: many corners and a low reprojection error. noise_px, noise_pos_px, noise_range_mm: the noise the
+        tracker expects on the model from the rotation (px per frame), on the anchor in the picture (px) and on its
+        distance (mm). Returns accepted, restarted, rejected or missed (a frame older than the filter's is rejected
+        and counted as late)."""
         self._frame_interval(t)
         if T is None:
             self.streak = 0
@@ -236,7 +352,7 @@ class PoseTracker:
         f = self.filter
         if f.t is None or self.t_good is None or t - self.t_good > s["hold_s"] + s["fade_s"]:
             f.reset(T, t)
-            f.noise, f.noise_pos = noise_px, noise_pos_px
+            f.noise, f.noise_pos, f.noise_range = noise_px, noise_pos_px, noise_range_mm
             self.glide = None
             return self._accept(T, t, "restarted")
         if t <= f.t:            # an older frame than the filter's: it comes too late
@@ -253,14 +369,14 @@ class PoseTracker:
                 # board the drawn pose is stale: go there at once
                 if t - self.t_good > s["glide_gap_s"]:
                     f.reset(T, t)
-                    f.noise, f.noise_pos = noise_px, noise_pos_px
+                    f.noise, f.noise_pos, f.noise_range = noise_px, noise_pos_px, noise_range_mm
                     self.glide = None
                 else:
                     self._restart_gliding(T, t)
                 return self._accept(T, t, "restarted")
             self.counts["rejected"] += 1
             return "rejected"
-        f.update(T, t, noise_px, noise_pos_px)
+        f.update(T, t, noise_px, noise_pos_px, noise_range_mm)
         return self._accept(T, t, "accepted")
 
     def _frame_interval(self, t):
@@ -378,28 +494,38 @@ def run_test(settings=None):
     anchor, radius, f = np.array([100.0, 70.0, -60.0]), 80.0, 1439.0
     dt = 1 / 30
 
-    def noisy(T, rot_deg=0.03, trans_mm=0.1, about=None):
+    def noisy(T, rot_deg=0.03, trans_mm=0.1, about=None, turn=None):
         """T with noise: a small rotation (about the board origin, or about the given point, where the corners
-        are) and a small shift."""
-        N = _pose(*rng.normal(0, rot_deg, 3), *rng.normal(0, trans_mm, 3))
-        if about is not None:
-            N[:3, 3] += about - N[:3, :3] @ about
-        return T @ N
+        are) and a small shift. turn: the rotation as PnP gives it, in the camera, about the given point: about
+        the axes across the line of sight (nearly the optical axis here) rot_deg, about it `turn` times as much."""
+        if turn is None:
+            N = _pose(*rng.normal(0, rot_deg, 3), *rng.normal(0, trans_mm, 3))
+            if about is not None:
+                N[:3, 3] += about - N[:3, :3] @ about
+            return T @ N
+        c = T[:3, :3] @ about + T[:3, 3]
+        N = _pose(*(rng.normal(0, rot_deg, 3) * [1.0, 1.0, turn]), *rng.normal(0, trans_mm, 3))
+        N[:3, 3] += c - N[:3, :3] @ c
+        return N @ T
 
     def shift(Ta, Tb):
         return image_shift(Ta, Tb, anchor, radius, f)
 
     # still: jitter of the drawn model, raw against filtered; a large board (noise mostly in the position) and a
-    # small one (noise mostly in the rotation, which the tracker reports: noise_px)
+    # small one (noise mostly in the rotation, which the tracker reports: noise_px; as PnP gives it, the tilt
+    # against the line of sight, the turn about it turn_share as large)
     base = _pose(160, 5, 3, -90, -60, 480)
-    for name, rot, trans, limit in (("large board", 0.03, 0.1, 0.5), ("small board", 0.4, 0.1, 0.3)):
+    # (the small board's limit: a third of the raw jitter; its tilt is smoothed a little less at rest since 19/10, so
+    # that the face keeps up with a hand-held phone)
+    for name, rot, trans, limit in (("large board", 0.03, 0.1, 0.5), ("small board", 0.4, 0.1, 0.35)):
         tr = PoseTracker(settings, anchor, radius, f)
         noise_px = f / 480 * radius * np.radians(rot) * np.sqrt(2)     # rotation noise at the model, px per frame
         raw, out = [], []
         for k in range(150):
             t = k * dt
-            m = noisy(base, rot, trans, about=anchor)
-            tr.measure(t, m, strong=True, noise_px=noise_px if rot > 0.1 else None)
+            m = noisy(base, rot, trans, about=anchor, turn=settings["turn_share"] if rot > 0.1 else None)
+            tr.measure(t, m, strong=True, noise_px=noise_px if rot > 0.1 else None,
+                       noise_pos_px=f / 480 * trans if rot > 0.1 else None, noise_range_mm=trans if rot > 0.1 else None)
             T, vis, state = tr.pose_at(t)
             if k >= 30:
                 raw.append(shift(m, base))

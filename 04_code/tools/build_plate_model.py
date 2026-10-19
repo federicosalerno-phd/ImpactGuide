@@ -4,9 +4,10 @@ as one binary glTF, 04_code/app/ui/models/charuco_plate.glb.
 Two meshes, the white plate and the black print in relief, each with its colour as printed (PLA white and black,
 matte), vertices welded, in metres as glTF wants them, Y up (the plate's face looking up, +Y), centred on the plate.
 The scene's extras say where the caliper reads (the two lengths of the plate's JSON, between the outer faces of the
-ticks, at the middle of the ticks and just above the face): the page draws them on the model.
-The page (ui/17-plate3d.js) reads it with three.js and draws it flat shaded: a printed part is all planes. The file is
-made once, and again whenever the plate is rebuilt.
+ticks, at the middle of the ticks and just above the face): `check` holds them to the nominal lengths (the page draws
+nothing over the model: the plate's own printed marks show both lengths).
+The page (ui/17-plate3d.js, VIEW3D) reads it with three.js and draws it flat shaded: a printed part is all planes, so
+the file carries no normals. It is made once, and again whenever the plate is rebuilt.
 
 Usage:
     python build_plate_model.py            write the GLB from the STL of 02_cad/stl

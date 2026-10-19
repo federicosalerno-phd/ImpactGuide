@@ -57,6 +57,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import arrowhead
 import calibrate_charuco
 
 _LOGGER = logging.getLogger("screen_board")
@@ -76,7 +77,7 @@ TOP_MM = 14.0                                           # above the board: the d
 MIN_MARGIN_PX, MIN_TOP_PX = 24, 56
 LINE_GAP_MM = 6.0                                       # from the dimension line to the board
 EXT_MM = 2.5                                            # the extension lines go this far past the dimension line
-ARROW_MM = (2.6, 0.9)                                   # arrowhead length and half width
+ARROW_MM = (arrowhead.LENGTH_MM, arrowhead.HALF_MM)     # arrowhead length and half width: the one arrowhead
 LINE_PX = 2                                             # lines two pixels thick, centred on the board's edges
 EDID_OFFSET_MM, EDID_HALF_MM = 0.25, 0.75               # whole mm, rounded or cut: n + 0.25 +/- 0.75
 CM_OFFSET_MM, CM_HALF_MM = 2.5, 7.5                     # whole cm, the same in cm
@@ -476,7 +477,8 @@ def _placed(w, h, p, margin, top, ah, s, m, nx, ny):
             "origin_px": [x0, y0], "margin_px": margin, "top_px": top,
             "square_mm": s * p, "marker_mm": m * p, "width_mm": nx * s * p, "height_mm": ny * s * p,
             "line_y": line_y, "ext_top": line_y - max(6, round(EXT_MM / p)),
-            "arrow_px": [max(8, round(ARROW_MM[0] / p)), max(3, round(ARROW_MM[1] / p))]}
+            # whole pixels long: the base, across the line, falls between two columns of pixels and is sharp
+            "arrow_px": [max(8, round(ARROW_MM[0] / p)), max(8, round(ARROW_MM[0] / p)) * arrowhead.HALF]}
 
 
 def place(px, pitch_mm, held):
@@ -562,7 +564,9 @@ def board_tile(lay):
 def render(lay):
     """The whole screen, one array pixel per screen pixel: white, the board, and above it the two extension lines
     (2 px, centred on the board's outer left and right edges) with the dimension line and its arrowheads between
-    them. The words go on top in the app, in the band above (none over the board or the lines' ends)."""
+    them. The words go on top in the app, in the band above (none over the board or the lines' ends). Black and
+    white only, but for the arrowheads' edges (arrowhead.fill: grey where a pixel is partly covered); the line runs
+    into each arrowhead and stops inside it, so the point is the triangle's own."""
     w, h = lay["size_px"]
     s = lay["square_px"]
     nx, ny = lay["squares"]
@@ -574,12 +578,12 @@ def render(lay):
     half = LINE_PX // 2
     for x in (x0, x1):
         img[ye:y0, x - half:x + LINE_PX - half] = 0
-    img[ya - half:ya + LINE_PX - half, x0:x1] = 0
-    length, hw = lay["arrow_px"]
+    length = float(lay["arrow_px"][0])
+    stop = math.ceil(arrowhead.inset(length, LINE_PX))
+    img[ya - half:ya + LINE_PX - half, x0 + stop:x1 - stop] = 0
     yc = ya - 0.5                                    # centre of the two rows of the line
-    for tip, d in ((x0 - 0.5, 1), (x1 - 0.5, -1)):    # tips on the lines' centres
-        pts = np.array([[tip, yc], [tip + d * length, yc - hw], [tip + d * length, yc + hw]])
-        cv2.fillConvexPoly(img, np.round(pts * 16).astype(np.int32), 0, lineType=cv2.LINE_8, shift=4)
+    for tip, d in ((x0 - 0.5, -1), (x1 - 0.5, 1)):    # tips on the lines' centres, pointing out
+        arrowhead.fill(img, (tip, yc), (d, 0), length, 0)
     return img
 
 
@@ -814,12 +818,19 @@ def test_image(work):
         x0, y0 = lay["origin_px"]
         tile = img[y0:y0 + ny * s, x0:x0 + nx * s]
         same = np.array_equal(tile, board_px(lay).generateImage((nx * s, ny * s), marginSize=0, borderBits=1))
-        crisp = set(np.unique(img).tolist()) <= {0, 255}
         x1 = x0 + nx * s
+        # grey only on the arrowheads' edges, the two arrows mirror images of each other
+        L, ya = lay["arrow_px"][0], lay["line_y"]
+        hy, hx = math.ceil(L * arrowhead.HALF) + 1, math.ceil(L) + 1
+        heads = np.zeros(img.shape, bool)
+        heads[ya - hy:ya + hy, x0 - 1:x0 + hx] = heads[ya - hy:ya + hy, x1 - hx:x1 + 1] = True
+        crisp = set(np.unique(img[~heads]).tolist()) <= {0, 255} and len(np.unique(img[heads])) > 4
+        left, right = img[ya - hy:ya + hy, x0 - 1:x0 + hx], img[ya - hy:ya + hy, x1 - hx:x1 + 1]
+        crisp = crisp and np.array_equal(left, right[:, ::-1]) and np.array_equal(left, left[::-1])
         lines = (img[y0 - 1, x0 - 1:x0 + 1].tolist() == [0, 0] and img[y0 - 1, x0 + 1] == 255
                  and img[y0 - 1, x1 - 1:x1 + 1].tolist() == [0, 0] and img[y0 - 1, x1 - 2] == 255)
-        expect(same and crisp and lines, f"{name}: image only black and white, the board as OpenCV draws it, "
-                                         f"the lines on its outer edges")
+        expect(same and crisp and lines, f"{name}: image black and white but for the arrowheads' edges (the two "
+                                         f"mirror images), the board as OpenCV draws it, the lines on its outer edges")
         path = work / f"screen_{k}.png"
         cv2.imwrite(str(path), img)
         # the calibration's detection, on the image itself

@@ -12,7 +12,9 @@ that shows it, at its true size: laid out for the pixels of that area at the
 pitch of the monitor the window is on (screen_board.py), never in a window of
 its own; or it is physical: the 3D-printed plate (charuco_plate.py) or a printed
 A4 sheet, measured with a caliper. The photos of a calibration follow a plan of
-poses (calib_guide.py), each one checked as it comes.
+poses (calib_guide.py), each one taken at once (Take, the space bar, or by
+itself when the phone holds the pose, auto_shot.py), copied and checked in the
+background while the next one is taken.
 
 This file is the host: the window, the bridge, the background jobs. The logic
 is in 04_code/src (trials.py, acquisition.py, calibrate_charuco.py, live_ar.py,
@@ -21,7 +23,9 @@ runs without the app. The live frames reach the page as MJPEG from 127.0.0.1
 (live_ar.MjpegServer), and the phone's own screen from a port of this PC
 (phone_view.ViewServer), made when the operator opens that view and bound to
 127.0.0.1 (the phone reaches it through adb) unless he asks to show the view on
-another screen of the same network. The link to the phone is found and watched by itself
+another screen of the same network. The twin of the bench (twin.py) has its 3D model made again from the bench
+scene by a Blender in the background once the scene has rested for two minutes; the page shows it from the trial's
+page and as the Scans step. The link to the phone is found and watched by itself
 (phone_link, "auto": the cable when the phone is on it, else the Wi-Fi it was
 paired on); every part asks phone_link for the serial, and the Phone panel only
 shows the link and pairs Wi-Fi when that is wanted.
@@ -84,7 +88,9 @@ from slantui.shell.qt import (QApplication, QColor, QDesktopServices, QFileDialo
 from slantui.tokens import PALETTES  # noqa: E402
 
 import acquisition  # noqa: E402
+import auto_shot  # noqa: E402
 import calib_guide  # noqa: E402
+import calib_video  # noqa: E402
 import calibrate_charuco  # noqa: E402
 import charuco_plate  # noqa: E402
 import live_ar  # noqa: E402
@@ -92,6 +98,7 @@ import phone_link  # noqa: E402
 import phone_view  # noqa: E402
 import screen_board  # noqa: E402
 import trials  # noqa: E402
+import twin  # noqa: E402
 
 APP_NAME = "ImpactGuide"
 APP_VERSION = "0.1.0"
@@ -106,7 +113,13 @@ LANGS = tuple(code for code, _, _ in LANGUAGES)
 PAGES = ("calibration", "live", "trials", "results")     # the modules of home, each with its steps (ui/01-shell.js)
 ICON = APP / "ui" / "impactguide-icon.svg"  # the round app icon: desktop, taskbar, window
 MARK = APP / "ui" / "impactguide-mark.svg"  # the same drawing without its disc, cut to fill the band's square
-CALIB_MODES = ("photo", "stream")     # the phone's photos (camera app), the frames of the live stream
+# the camera modes, each with its own calibration (intrinsics_<mode>.json), never used for another: the phone's photos
+# (camera app), the films of its camera app (the trial videos; calibrated on frames chosen from a film), the frames of
+# the live stream
+CALIB_MODES = ("photo", "video", "stream")
+FILM_MAX_S = 120            # a film for a calibration stops by itself after this long
+FILM_SIM_SIZE = (1280, 720)  # the simulated phone's film of the board
+NARROWER_MAX = 0.03         # a film (or the stream) whose field is this much narrower than the photos' was cropped
 IMAGE_SUFFIXES = tuple(sorted(calibrate_charuco.IMAGE_SUFFIXES))
 CHECK_FIELDS = ("time", "mode", "folder", "ok", "n_views", "rms_stored_px", "fx_change", "fy_change",
                 "cx_change", "cy_change")
@@ -114,6 +127,9 @@ BOARD_KINDS = ("screen", "plate", "sheet")  # on this monitor, the 3D-printed pl
 MIN_WINDOW = (720, 560)     # the app's least size
 PHOTO_CHECKS = "photo_checks.json"    # the check of each photo of a series, beside the photos
 REJECTED = "rejected"                 # the photos of a series put aside by their check (or by hand)
+THUMB_W = 160               # the small picture of each photo of a series (the Photos step), px wide
+STRIP_N = 12                # the newest photos of a series the Photos step shows, each with how its check went
+PREVIEW_RETRY_S = 5.0       # the phone's screen mirrored for the photo taken by itself: tried again this often
 SHEET_SPREAD_MAX = 0.30     # mm between the readings of the A4 sheet's long side (a caliper, or a steel ruler)
 SHEET_NOMINAL_TOL = 0.02    # a printer that scales the page by more than 2 %, or a misreading
 PLATE_MODEL = APP / "ui" / "models" / "charuco_plate.glb"   # the plate in 3D for the page (tools/build_plate_model.py)
@@ -122,6 +138,7 @@ COMMA_LANGS = ("it", "fr", "es", "de")
 WINDOW_SIZE = (1440, 900)   # the window at its first start
 JOB_PUMP_MS = 150           # results of background jobs handed to the GUI thread this often
 SCAN_POLL_MS = 1000         # the scanner's export folder listed this often, in a worker
+TWIN_POLL_MS = 10000        # the bench scene looked at this often, for the model of the twin (twin.py)
 FAKE_SCAN_MS = 1200         # in simulation the stand-in scanner exports this long after the watch starts
 SPLASH_HIDE_MS = 200        # the loading screen goes this long after the page says it is up
 SPLASH_MAX_MS = 25000       # and at the latest this long after the start
@@ -129,6 +146,9 @@ READING_MM = (20.0, 1000.0)  # a caliper reading of the plate or the sheet outsi
 QR_CACHE = 8                # QR codes kept as SVG (the Phone panel asks every second)
 SERIES_KEEP_S = 6 * 3600    # a series goes on past midnight while its last photo is younger than this
 F_STD_REL_MAX = 0.005       # a focal length less certain than this (std over value) is not a good calibration
+# what spoils a calibration (calibrate_charuco.ISSUES), the most serious first: the first one is said in full
+ISSUE_ORDER = ("board_not_flat", "phone_not_still", "camera_settings", "corners_missing")
+EXTRA_MAX = 4               # photos past the plan for the corners of the photo the board has not reached yet
 LOG_MAX_BYTES = 2_000_000   # errors.log is turned over at this size (one older file kept)
 WRITE_RETRIES = 20          # a file held for a moment (Drive, an antivirus) is replaced again this many times
 WRITE_RETRY_S = 0.25        # this far apart
@@ -432,6 +452,10 @@ class Prefs:
     DEFAULTS: ClassVar[dict[str, Any]] = {
         "lang": "", "page": "trials", "phase": "campaign", "scanner_folder": "",
         "calib_mode": "photo", "calib_kind": "calibration", "calib_plan": "quick",
+        # the photo taken by itself when the phone holds the guide's pose still (auto_shot.py); never a countdown
+        "calib_auto": True,
+        # SlantUI's sounds (the speaker on the band, Ctrl+M): on until switched off
+        "sound": True,
         "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down", "switch_modes": True,
                   "link": phone_link.AUTO, "wifi_address": "", "phone_id": "", "wifi_paired": False},
         "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": "",
@@ -460,7 +484,7 @@ class Prefs:
             b["kind"] = "sheet"
         for k in ("monitor", "place", "split"):
             b.pop(k, None)
-        if self.data.get("calib_mode") not in ("photo", "stream"):
+        if self.data.get("calib_mode") not in CALIB_MODES:
             self.data["calib_mode"] = "photo"
         self.data.pop("square_mm", None)
         phone = self.data["phone"]
@@ -573,6 +597,7 @@ class Backend(Bridge):
         self._phone = None
         self.phone_status = {"ok": False, "cause": "unknown"}
         self._pending_cal = {}
+        self._film = None           # a film for a calibration: {"folder", "since", "recording", "n"} while it records
         self._watch = None
         self._scan_error = ""       # why the scanner folder could not be listed, last said in the log
         self._live = None
@@ -584,6 +609,21 @@ class Backend(Bridge):
         self._view_opened = False   # opened on the phone through adb: its tunnel is laid again after a reconnection
         self._phone_lock = threading.Lock()     # one adb conversation with the phone's camera at a time
         self._check_queue = []      # [(folder, photo)] waiting for their check, in the order they came
+        # the photos of a calibration on their way, each with the pose of the plan it is for: shooting (the shutter
+        # not pressed yet), shot (pressed, the file not whole yet), copying, checking; gone once checked
+        self._shots = []
+        self._copy_queue = []       # [(shot, check)] taken and waiting for their copy, one copy at a time
+        self._take_wanted = False   # Take came while a photo was being taken: the next one follows it at once
+        self._calib_waiting = None  # Calibrate came while photos were on their way: the photos left out, until then
+        self._auto = None           # the photo taken by itself (auto_shot.Watcher) while the Photos step is open
+        self._auto_view = {"state": "off", "score": 0.0}
+        self._auto_mode = "photo"   # the camera mode it watches for
+        self._auto_snapshot = None  # what it watches for, for the simulated view (read on its thread)
+        self._sim_view = None       # the simulated phone's view of the guide's pose, drawn once per pose
+        self._watching = False      # the page has the Photos step open
+        self._preview = None        # the phone's screen mirrored for it (auto_shot.preview_stream), photo mode
+        self._preview_try = 0.0     # time.monotonic() of its last start
+        self._countdown_said = False    # the camera app counted down all the same: said once
         self._calib_log = {}        # mode -> what the last calibration or check said (calib_log_open)
         self._lay_scale = 1.0       # screen pixels per device pixel of the page when the board was laid out
         self._plate_warned = False  # the plate file could not be read, and the log said so
@@ -617,6 +657,16 @@ class Backend(Bridge):
         self._scan_timer.setInterval(SCAN_POLL_MS)
         self._scan_timer.timeout.connect(self._poll_scan)
         self._scan_timer.start()
+        # the twin: its model made again from the bench scene once the scene rests (twin.py); a simulation starts
+        # from the app's own model; IMPACTGUIDE_TWIN_AUTO=0 makes none (the tests)
+        auto = os.environ.get("IMPACTGUIDE_TWIN_AUTO", "1") != "0"
+        self.twin = twin.Watcher(roots.local / "twin", blender=True if auto else None,
+                                 seed=twin.CACHE if roots.simulate else None)
+        self._twin_said = (self.twin.current() or {}).get("version")
+        self._twin_timer = QTimer(self)
+        self._twin_timer.setInterval(TWIN_POLL_MS)
+        self._twin_timer.timeout.connect(self._twin_poll)
+        self._twin_timer.start()
         self.link.watch(self._on_link)
 
     def _connect(self, signal: Any, slot: Callable[..., Any]) -> None:
@@ -759,7 +809,7 @@ class Backend(Bridge):
                         "langs": [{"code": c, "native": n, "flag": f} for c, n, f in LANGUAGES],
                         "page": self.start_page,
                         "simulate": bool(self.roots.simulate), "qt": "PyQt6" if USE_QT6 else "PyQt5",
-                        "link": self.link.via})
+                        "link": self.link.via, "sound": bool(self.prefs["sound"])})
 
     @pyqtSlot(str)
     @guarded
@@ -775,6 +825,12 @@ class Backend(Bridge):
     def set_page(self, page: str) -> None:
         if page in PAGES:
             self.prefs.set("page", page)
+
+    @pyqtSlot(bool)
+    @guarded
+    def set_sound(self, on: bool) -> None:
+        """The sounds switched on or off on the band (SlantUI's switch): kept for the next start."""
+        self.prefs.set("sound", bool(on))
 
     def _data_folder(self, path: Path | str) -> Path:
         """`path` as an existing folder under the data roots (Roots.data_folders).
@@ -1449,6 +1505,10 @@ class Backend(Bridge):
             if error is not None:
                 self._emit({"type": "acquire_failed", "key": key, "trial": trial, **self._err(error)})
                 return
+            # the camera app's own timer counted down all the same (no intent lifts it in its Pro mode): said once
+            if not video and getattr(self.phone(), "countdown_seen", False) and not self._countdown_said:
+                self._countdown_said = True
+                self._emit({"type": "calib_photo", "action": "countdown", "folder": ""})
             self._staged(trial, key, path, temp=True)
         return done
 
@@ -1460,7 +1520,9 @@ class Backend(Bridge):
             if blocked:
                 return blocked
             out, phone = self.roots.staging / row["trial"], self.phone()
-            started = self._spawn("phone", self._with_phone(lambda: phone.shoot(out)),
+            # the camera app left in its mode, as for a calibration's photos (Pro, the focus by hand): no intent to it,
+            # not even the one that lifts its timer (acquisition.Phone.take, keep_mode)
+            started = self._spawn("phone", self._with_phone(lambda: phone.shoot(out, keep_mode=True)),
                                   self._acquired(row["trial"], key))
             return {"ok": started} if started else {"error": "busy"}
         return self._answer(go)
@@ -1649,8 +1711,10 @@ class Backend(Bridge):
     # Three steps (ui/10-calibration.js): the board (on this monitor, in the page; or a physical one: the 3D-printed
     # plate or a printed sheet, with its measure), the photos (a plan of poses, quick or accurate, each photo checked
     # as it comes and kept or put aside), the calibration (its errors per photo and over the board, the intrinsics in
-    # plain units, a verdict, photos left out by hand, saved). Two camera modes: the phone's photos (the camera app,
-    # 12.5 MP, what the measurements of the bench use) and the live stream (its frames, for the live AR).
+    # plain units, a verdict, photos left out by hand, saved). Three camera modes, each calibrated on its own images
+    # and never used for another: the phone's photos (the camera app, 12.5 MP, what the measurements of the bench
+    # use), its video (the camera app's films, the trial videos: frames chosen from a film) and the live stream (its
+    # frames, for the live AR).
     def _intrinsics_path(self, mode):
         return self.roots.calib_out / f"intrinsics_{mode}.json"
 
@@ -1719,9 +1783,103 @@ class Backend(Bridge):
         last = None
         if checks:
             name = max(checks, key=lambda k: (checks[k].get("seq", 0), checks[k].get("time", "")))
-            last = {"name": name, **{k: checks[name].get(k) for k in ("ok", "why", "corners", "of", "blur_px",
-                                                                       "points", "time")}}
-        return {**f, "same": same, "photos": rows, "points": points, "last": last}
+            # the picture the page shows it by: its small one, else the photo where it is now (put aside when it
+            # failed its check)
+            at = next((p for p in (self._thumb_path(d, name), d / name, d / REJECTED / name) if p.is_file()), None)
+            last = {"name": name, "url": file_url(at) if at else "",
+                    **{k: checks[name].get(k) for k in ("ok", "why", "corners", "of", "blur_px", "points", "time")},
+                    "problems": list((checks[name].get("settings") or {}).get("problems") or [])}
+        return {**f, "same": same, "photos": rows, "points": points, "last": last,
+                "missing_corners": self._missing_corners(photos, checks)}
+
+    @staticmethod
+    def _missing_corners(photos: list[Path], checks: dict[str, dict[str, Any]]) -> list[str]:
+        """The corners of the photo (calibrate_charuco.CORNER_NAMES) the board has not reached yet in the photos kept
+        of a series (of the size of the first one): all four before the first."""
+        import numpy as np
+        kept = [checks[p.name] for p in photos if (checks.get(p.name) or {}).get("ok")]
+        kept = [c for c in kept if c.get("points") and c.get("size")]
+        if not kept:
+            return list(calibrate_charuco.CORNER_NAMES)
+        size = kept[0]["size"]
+        kept = [c for c in kept if c["size"] == size]
+        reached = set()
+        for c in kept:      # each check's own coverage, of all its corners; else its points (a few of them)
+            cov = c.get("coverage") or calibrate_charuco.coverage(
+                [np.asarray(c["points"], np.float64).reshape(-1, 2) * size], tuple(size))
+            reached |= {k for k, v in (cov.get("corners") or {}).items() if v}
+        return [k for k in calibrate_charuco.CORNER_NAMES if k not in reached]
+
+    # ── the photos on their way: the pose each is for, the next pose, the strip of the Photos step ──
+    def _shots_in(self, d: Path | str) -> list[dict[str, Any]]:
+        """The photos of the folder d on their way (taken, copied or checked now)."""
+        d = str(Path(d))
+        return [x for x in self._shots if str(x["path"]) == d]
+
+    def _poses_taken(self, d: Path, names: list[str], checks: dict[str, dict[str, Any]]) -> set[int]:
+        """The poses of the plan the series has a photo for: kept, being checked, or taken and on its way. A photo
+        with no pose of its own (imported, or of a version that did not keep it) stands for the first free pose."""
+        shots = self._shots_in(d)
+        by_name = {x["name"]: x for x in shots if x["name"]}
+        used, loose = set(), 0
+        for name in names:
+            c = checks.get(name)
+            if c is not None and not c.get("ok"):
+                continue            # failed and not put aside (the move failed): its pose comes again
+            pose = c.get("pose") if c is not None else (by_name.get(name) or {}).get("pose")
+            if isinstance(pose, int) and pose >= 0 and pose not in used:
+                used.add(pose)
+            else:
+                loose += 1
+        used |= {x["pose"] for x in shots if x["state"] in ("shot", "copying") and isinstance(x["pose"], int)}
+        i = 0
+        while loose > 0:
+            if i not in used:
+                used.add(i)
+                loose -= 1
+            i += 1
+        return used
+
+    def _thumb_path(self, d: Path, name: str) -> Path:
+        """The small picture of a photo of a series (made as it is copied, or at its check), in the app's cache."""
+        return self.roots.local / "cache" / "thumbs" / Path(d).name / (Path(name).stem + ".jpg")
+
+    @staticmethod
+    def _make_thumb(src: Path, out: Path) -> None:
+        """The small picture of a photo, THUMB_W wide (decoded at an eighth of its size: quick); never fails the
+        caller (a picture that cannot be made is only missing)."""
+        import cv2
+        try:
+            img = cv2.imread(str(src), cv2.IMREAD_REDUCED_GRAYSCALE_8)
+            if img is None:
+                return
+            h = max(1, round(img.shape[0] * THUMB_W / img.shape[1]))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out), cv2.resize(img, (THUMB_W, h), interpolation=cv2.INTER_AREA),
+                        [cv2.IMWRITE_JPEG_QUALITY, 80])
+        except (OSError, ValueError, cv2.error):
+            log.warning("no small picture of %s", src, exc_info=True)
+
+    def _strip(self, d: Path, checks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        """The newest STRIP_N photos of the series in the order they were taken, each with its pose, its small
+        picture and how its check went: kept, retake (with why), or checking (still on its way)."""
+        out = []
+        for name, c in sorted(checks.items(), key=lambda kv: (kv[1].get("seq", 0), kv[1].get("time", ""))):
+            t = self._thumb_path(d, name)
+            out.append({"name": name, "pose": c.get("pose"), "state": "kept" if c.get("ok") else "retake",
+                        "why": c.get("why") or "", "thumb": file_url(t) if t.is_file() else ""})
+        shots = self._shots_in(d)
+        on_way = {x["name"] for x in shots if x["name"]}
+        with contextlib.suppress(OSError):
+            for p in sorted((p for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES and p.name not in checks
+                             and p.name not in on_way), key=lambda p: p.stat().st_mtime):
+                out.append({"name": p.name, "pose": None, "state": "checking", "why": "", "thumb": ""})
+        for x in shots:
+            if x["state"] != "shooting":
+                t = self._thumb_path(d, x["name"]) if x["name"] else None
+                out.append({"name": x["name"], "pose": x["pose"], "state": "checking", "why": "",
+                            "thumb": file_url(t) if t is not None and t.is_file() else ""})
+        return out[-STRIP_N:]
 
     def _guide_board(self, series, active):
         """The board the guide draws: the series' own (board.json) when it has photos, else the one in use."""
@@ -1750,12 +1908,44 @@ class Backend(Bridge):
         f = self._series()
         series = self._series_detail(f, active) if f is not None else None
         n = series["n"] if series and series["same"] else 0
+        # the photos on their way count at once, each for its pose: the guide shows the next free pose as soon as the
+        # shutter went, their checks come later (a photo put aside frees its pose again)
+        on_way = 0
+        taken: set[int] = set()
+        if series and series["same"]:
+            d = Path(series["path"])
+            checks_d = self._photo_checks(d)
+            on_way = sum(1 for x in self._shots_in(d) if x["state"] in ("shot", "copying"))
+            taken = self._poses_taken(d, [p["name"] for p in series["photos"]], checks_d)
+            series["shots"] = self._strip(d, checks_d)
+        elif series:
+            series["shots"] = []
+        n += on_way
+        pose = next((i for i in range(len(calib_guide.PLANS[plan])) if i not in taken), None)
+        # every pose of the plan has its photo but the board has not reached a corner of the photo yet (once the photos
+        # on their way are checked): that corner's pose once more, up to EXTRA_MAX photos past the plan
+        extra = None
+        if (pose is None and kind == "calibration" and series and series["same"] and not self._on_way()
+                and series.get("missing_corners") and n < lim["max"] + EXTRA_MAX):
+            extra = series["missing_corners"][0]
+            pose = next((i for i, p in enumerate(calib_guide.PLANS[plan]) if p.get("corner") == extra), None)
         nxt = None
-        if active and n < lim["max"]:
+        if active and (n < lim["max"] or extra) and pose is not None and mode != "video":   # a film: every pose
             g = self._guide_board(series if series and series["same"] else None, active)
             with contextlib.suppress(KeyError, TypeError, ValueError):
-                nxt = calib_guide.guide(calib_guide.PLANS[plan][n], g, mode, n, plan)
+                nxt = calib_guide.guide(calib_guide.PLANS[plan][pose], g, mode, pose, plan)
+                # what is moved for it: a physical board in the hand, the phone still on its stand; the phone, before
+                # the board on this monitor
+                nxt["move"] = "board" if bs.get("kind") in ("plate", "sheet") else "phone"
+                nxt["extra"] = extra
+        try:                                # the photo taken by itself never costs the page its state
+            self._auto_target(nxt, active, series, mode)
+        except Exception:
+            log.warning("the photo taken by itself not told the next pose", exc_info=True)
         result = self._result(mode)
+        # the last calibration of this mode found that the phone moved between its photos: the Photos step says to
+        # keep it still on a stand where it checks for a phone held still
+        moved = bool(result and "phone_not_still" in result["issues"])
         live = None
         if self._live is not None:
             st = self._live.status()
@@ -1768,7 +1958,9 @@ class Backend(Bridge):
                 "modes": modes, "last_check": last, "result": result, "board_ui": bs, "phone": self.phone_status,
                 "busy": sorted(self._busy), "min_views": calibrate_charuco.MIN_VIEWS,
                 "max_rms": calibrate_charuco.MAX_RMS, "live": live, "simulate": bool(r.simulate),
-                "raw": str(r.calib_raw), "out": str(r.calib_out)}
+                "raw": str(r.calib_raw), "out": str(r.calib_out), "film": self._film_state(series),
+                "pending": len(self._shots), "calib_waiting": self._calib_waiting is not None,
+                "auto": {"on": bool(self.prefs["calib_auto"]), **self._auto_view}, "moved": moved}
 
     @pyqtSlot(result=str)
     def calib_state(self):
@@ -1779,7 +1971,9 @@ class Backend(Bridge):
         verdict, the error of each photo (used, dropped by the 3-times-the-median rule, left out by hand), where on
         the board the error is, the intrinsics in plain units. The verdict is the one of the plan the photos were
         taken with (stored with the calibration), whatever plan is chosen now; a focal length known to worse than
-        F_STD_REL_MAX is never good, whatever its error."""
+        F_STD_REL_MAX is never good, whatever its error, and a calibration with one of
+        calibrate_charuco.ISSUES_NOT_GOOD (a board not flat, the phone moved, automatic settings) is not good enough:
+        its photos must be taken again (what is wrong in `issues`, _issues)."""
         pending = self._pending_cal.get(mode)
         cal = pending
         if cal is None:
@@ -1800,15 +1994,54 @@ class Backend(Bridge):
         f_std = plain.get("f_std")                # None when the calibration does not know it (std NaN or missing)
         focal_rel = f_std / plain["fx"] if f_std is not None and plain["fx"] else math.inf
         focal_ok = math.isfinite(focal_rel) and focal_rel <= F_STD_REL_MAX
-        verdict = "good" if rms < calibrate_charuco.MAX_RMS and not few and focal_ok else \
+        # a film or the stream seeing a narrower field than the photos: cropped (stabilisation or a zoom on), so its
+        # frames were not all the same camera; never good
+        narrower = None
+        ref = self._intrinsics_path("photo")
+        if mode != "photo" and ref.exists():
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError, ZeroDivisionError):
+                narrower = calib_video.narrower_than(cal, json.loads(ref.read_text(encoding="utf-8")))
+        cropped = narrower is not None and narrower > NARROWER_MAX
+        issues = self._issues(cal)
+        verdict = "poor" if issues["not_good"] else \
+            "good" if rms < calibrate_charuco.MAX_RMS and not few and focal_ok and not cropped else \
             "fair" if rms < 2 * calibrate_charuco.MAX_RMS else "poor"
         b = cal.get("board") or {}
         res = cal.get("residuals")
         grid = [int(b["squares"][0]) - 1, int(b["squares"][1]) - 1] if b.get("squares") else None
         return {"saved": pending is None, "date": cal.get("date", ""), "rms_px": rms, "n_views": cal["n_views"],
+                "cropped": cropped, "narrower": narrower, "film": cal.get("film"),
                 "of": len(every), "few": few, "focal_ok": focal_ok, "verdict": verdict, "photos": photos,
                 "limit_px": cal.get("limit_px"), "max_rms": calibrate_charuco.MAX_RMS,
-                "residuals": res, "grid": grid, "plain": plain, "images": cal.get("images", "")}
+                "residuals": res, "grid": grid, "plain": plain, "images": cal.get("images", ""), **issues}
+
+    @staticmethod
+    def _issues(cal: dict[str, Any]) -> dict[str, Any]:
+        """What spoils a calibration (calibrate_charuco.ISSUES, in its "issues"), the most serious first (ISSUE_ORDER),
+        with what the page says of each: how much the board bends (sag_mm), how far the optical centre moved from photo
+        to photo (centre_px: the phone moved), the corners of the photo the board never reached, the photos taken
+        with automatic settings and the problems found in them (calibrate_charuco.SETTINGS); not_good: the issues
+        that keep it from being good (calibrate_charuco.ISSUES_NOT_GOOD). A calibration made before these were
+        known has none."""
+        have = set(cal.get("issues") or [])
+        issues = [i for i in ISSUE_ORDER if i in have]
+        sh, ce, co = cal.get("shape") or {}, cal.get("centre") or {}, cal.get("coverage") or {}
+        settings = cal.get("settings") or {}
+        codes = sorted({c for v in settings.values() for c in v if c in calibrate_charuco.SETTINGS},
+                       key=calibrate_charuco.SETTINGS.index)
+        return {"issues": issues, "not_good": [i for i in issues if i in calibrate_charuco.ISSUES_NOT_GOOD],
+                "flat": sh.get("flat", True), "sag_mm": sh.get("sag_mm"), "focal_shift": sh.get("focal_shift"),
+                "rms_flat_px": cal.get("rms_flat_px", sh.get("rms_flat_px")),
+                "still": ce.get("still", True), "centre_px": ce.get("spread_px"), "centre_max_px": ce.get("max_px"),
+                "missing_corners": [c for c in calibrate_charuco.CORNER_NAMES if c in (co.get("missing_corners") or [])],
+                "reach": co.get("reach"), "settings_n": len(settings), "settings": codes}
+
+    @staticmethod
+    def _good(cal: dict[str, Any]) -> bool:
+        """A calibration worked out well enough to say so: its error under the limit and none of the issues that
+        keep it from being good."""
+        return cal["rms_px"] < calibrate_charuco.MAX_RMS and not set(cal.get("issues") or []) & set(
+            calibrate_charuco.ISSUES_NOT_GOOD)
 
     # ── calibration: the series of photos ───────────────────────────────
     def _series_kind(self):
@@ -1871,7 +2104,8 @@ class Backend(Bridge):
 
     @pyqtSlot(str, result=str)
     def calib_set(self, payload):
-        """{mode: photo or stream, plan: quick or accurate, kind: calibration or check}."""
+        """{mode: photo or stream, plan: quick or accurate, kind: calibration or check, auto: the photo taken by
+        itself on or off}."""
         def go():
             c = json.loads(payload)
             if c.get("mode") in CALIB_MODES:
@@ -1880,6 +2114,9 @@ class Backend(Bridge):
                 self.prefs.set("calib_plan", c["plan"])
             if c.get("kind") in ("calibration", "check"):
                 self.prefs.set("calib_kind", c["kind"])
+            if isinstance(c.get("auto"), bool):
+                self.prefs.set("calib_auto", c["auto"])
+            self._auto_sync()
             return self._calib_state()
         return self._answer(go)
 
@@ -1895,25 +2132,379 @@ class Backend(Bridge):
     @pyqtSlot(result=str)
     def calib_take(self):
         """The next photo of the plan into the series: a photo from the phone's camera app, or the newest frame of the
-        live stream. The board must be on show when it is the one on this monitor, and the plan not full. The photo
-        is checked as it comes (calib_photo events)."""
+        live stream, at once (never a countdown). The board must be on show when it is the one on this monitor, and
+        the plan not full. A Take while a photo is being taken is taken right after it. The guide moves to the next
+        pose as soon as the shutter went (calib_photo action shot); each photo is copied and checked in the
+        background (calib_photo with its check) while the next ones are taken."""
+        return self._answer(lambda: self._take(False))
+
+    def _take(self, auto: bool) -> dict[str, Any]:
+        """calib_take, or the photo taken by itself (auto)."""
         def go():
+            if self._mode() == "video" and self._film is not None:
+                return self._film_stop()            # a film: the same button stops it
             st = self._board()
             if st["kind"] == "screen" and (not self._board_on or self._lay is None):
                 return {"error": "board_small" if self._board_on else "board_hidden"}
+            if self._mode() == "video":
+                return self._film_start()
+            if "phone" in self._busy:           # a photo is being taken: this one follows it at once
+                self._take_wanted = True
+                return {"ok": True, "queued": True}
             s = self._calib_state()
-            if s["count"] >= s["limits"]["max"]:
+            if s["count"] >= s["limits"]["max"] and not (s["next"] and s["next"].get("extra")):
                 return {"error": "calib_full"}
-            if self._checking():
-                return {"error": "busy"}
+            if s["next"] is None:               # no board to take, or every pose has its photo
+                return {"error": "calib_full" if s["board_ui"]["active"] else "board_hidden"}
             if self._mode() == "stream" and not (self._live is not None and self._live.running
                                                  and self._live_for == "calibration"):
                 return {"error": "stream_off"}
             d = self._series_folder()
+            pose = s["next"]["n"] if s["series"] is None or Path(s["series"]["path"]) == d else 0
             if self._mode() == "stream":
-                return self._grab_into(d)
-            return self._shoot_into(d)
+                return self._grab_into(d, pose, auto)
+            return self._shoot_into(d, pose=pose, auto=auto)
+        return go()
+
+    def _take_queued(self) -> None:
+        """A Take that came while the last photo was being taken: taken now (said when it cannot be)."""
+        if not self._take_wanted:
+            return
+        self._take_wanted = False
+        try:
+            r = self._take(False)
+        except (Exception, SystemExit) as e:        # said, never out of a done()
+            r = self._err(e)
+        if r.get("error"):
+            self._emit({"type": "acquire_failed", "key": "calibration", "error": r["error"],
+                        "args": r.get("args", {}), "message": r.get("message", "")})
+
+    def _pressed(self, shot: dict[str, Any]) -> None:
+        """The shutter went for this photo (on the GUI thread): its pose counts from now, the page says so at once
+        (a flash and a sound) and shows the guide of the next pose."""
+        if shot not in self._shots:
+            return
+        shot["state"] = "shot"
+        shot.setdefault("t_press", time.monotonic())
+        if self._auto is not None:
+            self._auto.shot()
+            self._calib_state()             # the watcher on the next pose at once
+        self._emit({"type": "calib_photo", "action": "shot", "folder": shot["folder"], "pose": shot["pose"],
+                    "auto": shot["auto"]})
+
+    def _drop_shot(self, shot: dict[str, Any]) -> None:
+        if shot in self._shots:
+            self._shots.remove(shot)
+
+    def _on_way(self) -> bool:
+        """Photos are being taken, copied or checked."""
+        return self._checking() or bool(self._shots) or bool(self._copy_queue)
+
+    def _maybe_calibrate(self) -> None:
+        """A Calibrate that came while photos were on their way: started once the last one is checked."""
+        if self._calib_waiting is None or self._on_way():
+            return
+        leave, self._calib_waiting = self._calib_waiting, None
+        r = json.loads(self.calib_run(json.dumps(leave)))
+        if r.get("error"):
+            self._emit({"type": "calib", "action": "calibrate", "mode": self._mode(), "ok": False, **r})
+
+    # ── calibration: the photo taken by itself (auto_shot.py) ────────────
+    # While the Photos step is open and the option is on, a watcher looks at the preview: the frames of the live
+    # stream in the streaming mode, the phone's own screen mirrored in the photo mode (the camera app has the camera,
+    # its preview on the screen is the photo to come), the simulated phone's view in simulation. When the board is
+    # where the guide wants it and the phone holds still a moment, at least auto_shot.GAP_S after the last photo, the
+    # photo is taken as by Take.
+    @pyqtSlot(bool, result=str)
+    def calib_watch(self, on: bool) -> str:
+        """The page has the Photos step open (on) or left it."""
+        def go() -> dict[str, Any]:
+            self._watching = bool(on)
+            self._auto_sync()
+            return {"ok": True, "auto": {"on": bool(self.prefs["calib_auto"]), **self._auto_view}}
         return self._answer(go)
+
+    def _auto_wanted(self) -> bool:
+        return self._watching and bool(self.prefs["calib_auto"]) and self._mode() in ("photo", "stream")
+
+    def _auto_sync(self) -> None:
+        """The watcher running while it is wanted, stopped otherwise; the mirrored screen only with it, in the photo
+        mode."""
+        want = self._auto_wanted()
+        if want and self._auto is None:
+            self._auto_mode, self._auto_snapshot = self._mode(), None
+            self._auto = auto_shot.Watcher(self._auto_frame, self._auto_due, self._auto_said)
+            self._auto.start()
+            self._calib_state()             # its first guide
+        elif not want and self._auto is not None:
+            w, self._auto = self._auto, None
+            w.stop(wait=False)              # it ends at its next look; a mirror it opens late is closed by itself
+            self._auto_view = {"state": "off", "score": 0.0}
+        if not want or self._mode() != "photo":
+            self._preview_close()
+
+    def _preview_close(self) -> None:
+        p, self._preview = self._preview, None
+        if p is not None:
+            try:
+                p.close()
+            except Exception:
+                log.warning("the phone's mirrored screen not closed", exc_info=True)
+
+    def _auto_target(self, nxt: dict[str, Any] | None, active: dict[str, Any] | None, series: dict[str, Any] | None,
+                     mode: str) -> None:
+        """The watcher told the guide of the next photo and its board (nothing wanted when there is none)."""
+        w = self._auto
+        if w is None:
+            return
+        self._auto_mode = mode
+        spec = self._guide_board(series if series and series["same"] else None, active) if active and nxt else None
+        key = ((series or {}).get("name", ""), nxt["n"]) if nxt else None
+        w.target(nxt["outline"] if spec else None, spec, key, "stream" if mode == "stream" else "photo")
+        self._auto_snapshot = {"pose": nxt["n"], "plan": nxt["plan"], "spec": spec, "kind": spec.get("kind") or "screen",
+                               "lay": self._lay} if spec else None
+
+    def _auto_frame(self) -> tuple[Any, int, str] | None:
+        """The newest frame for the watcher (on its thread): (image, frame number, kind) or None."""
+        mode = self._auto_mode
+        if mode == "stream":
+            ar = self._live
+            if ar is None or not ar.running or self._live_for != "calibration":
+                return None
+            img, n = ar.still()
+            return (img, n, "photo") if img is not None else None
+        if self.roots.simulate:
+            return self._sim_preview()
+        p = self._preview
+        if p is not None and p.alive:
+            img, _, n = p.latest()
+            return (img, n, "display") if img is not None else None
+        if time.monotonic() - self._preview_try < PREVIEW_RETRY_S or (self._live is not None and self._live.running):
+            return None
+        self._preview_try = time.monotonic()
+        if p is not None:
+            self._preview = None
+            with contextlib.suppress(Exception):
+                p.close()
+        try:
+            p = auto_shot.preview_stream()
+            p.start(timeout=8.0)
+        except Exception as e:
+            log.info("the phone's screen not mirrored for the photo taken by itself: %s", e)
+            return None
+        if self._auto is None or self._auto_mode != "photo":    # stopped meanwhile
+            with contextlib.suppress(Exception):
+                p.close()
+            return None
+        self._preview = p
+        return None
+
+    def _sim_preview(self) -> tuple[Any, int, str] | None:
+        """In simulation the phone's view is the board at the guide's pose, as an operator who follows the guide holds
+        it (calib_guide.photo, small): drawn once per pose."""
+        snap = self._auto_snapshot
+        if snap is None:
+            return None
+        key = (snap["plan"], snap["pose"], json.dumps(snap["spec"], sort_keys=True, default=str))
+        cached = getattr(self, "_sim_view", None)
+        if cached is None or cached[0] != key:
+            tex = {"screen": "screen", "plate": "plate", "sheet": "sheet"}.get(snap["kind"], "screen")
+            img = calib_guide.photo(snap["plan"], snap["pose"], snap["spec"], tex, "photo",
+                                    snap["lay"] if tex == "screen" else None, size=(1024, 768))
+            cached = self._sim_view = (key, img, (cached[2] + 1) if cached else 1)
+        return cached[1], cached[2], "photo"
+
+    def _auto_due(self) -> None:
+        """A photo is due (on the watcher's thread): taken on the GUI thread."""
+        self._jobs.put(("", lambda _r, _e: self._auto_fire(), None, None))
+
+    def _auto_fire(self) -> None:
+        w = self._auto
+        if w is None:
+            return
+        if not self._auto_wanted() or "phone" in self._busy:
+            w.refused()
+            return
+        try:
+            r = self._take(True)
+        except (Exception, SystemExit) as e:        # said in the log, tried again later
+            r = self._err(e)
+        if r.get("error") or r.get("queued"):
+            w.refused()
+
+    def _auto_said(self, state: str, score: float) -> None:
+        """The watcher's state changed (on its thread): kept for calib_state and said to the page."""
+        def say(_r: Any, _e: Any) -> None:
+            if self._auto is None:
+                return
+            self._auto_view = {"state": state, "score": score}
+            self._emit({"type": "calib_auto", "state": state, "score": score})
+        self._jobs.put(("", say, None, None))
+
+    # ── calibration: a film of the board (the camera app's video mode) ───
+    # The camera app films the board while the operator moves the phone through the poses, holding still a moment at
+    # each; it records as for a trial video (acquisition.Phone: copied, checked and deleted on the phone). The film
+    # goes to film/ in a series folder of its own (frames of two films are never mixed), the frames worth calibrating
+    # on are chosen from it (calib_video.py) and written beside it as the series' photos, and the calibration of the
+    # video mode runs on them by itself (a session check waits for its button). It is the calibration of the camera
+    # app's video, never of its photos nor of the live stream.
+    def _film_state(self, series: dict[str, Any] | None) -> dict[str, Any]:
+        """The film under way (recording, starting or stopping, since when) and what the series' film gave."""
+        f = self._film
+        got = calib_video.film_of(series["path"]) if series and self._mode() == "video" else None
+        return {"recording": bool(f and f["recording"]), "starting": bool(f and not f["recording"] and not f["stopping"]),
+                "stopping": bool(f and f["stopping"]), "since": f["since"] if f else None, "max_s": FILM_MAX_S,
+                "choosing": "film" in self._busy,
+                "last": {k: got.get(k) for k in ("video", "duration_s", "counts", "refused")} if got else None}
+
+    def _film_start(self) -> dict[str, Any]:
+        """The camera app starts filming (its video mode): calib_film events say when it records."""
+        if self._checking() or {"phone", "film"} & self._busy:
+            return {"error": "busy"}
+        blocked = self._free_camera()
+        if blocked:
+            return blocked
+        phone = self.phone()
+        film = {"since": time.time(), "recording": False, "stopping": False}
+        self._film = film
+
+        def started(_: Any, error: BaseException | None) -> None:
+            if self._film is not film:
+                return
+            if error is not None:
+                self._film = None
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                return
+            film["recording"], film["since"] = True, time.time()
+            self._emit({"type": "calib_film", "action": "recording"})
+            QTimer.singleShot(FILM_MAX_S * 1000, lambda: self._film_timeout(film))
+        if not self._spawn("phone", self._with_phone(phone.start_video), started):
+            self._film = None
+            return {"error": "busy"}
+        return {"ok": True, "film": "starting"}
+
+    @guarded
+    def _film_timeout(self, film: dict[str, Any]) -> None:
+        if self._film is film and film["recording"] and not film["stopping"]:
+            log.info("calibration film stopped after %d s", FILM_MAX_S)
+            self._film_stop()
+
+    def _film_stop(self) -> dict[str, Any]:
+        """The film stops and comes to a series folder of its own; then its frames are chosen (_film_choose)."""
+        film = self._film
+        if film is None:
+            return {"error": "nothing"}
+        if not film["recording"] or film["stopping"] or "phone" in self._busy:
+            return {"error": "busy"}
+        f = self._series()
+        empty = f is not None and f["n"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
+        d = Path(f["path"]) if empty else self._new_series()
+        self._folder_board(d)
+        board = self._board_args(d)         # here: it may ask Qt for the monitors
+        plan = self._calib_plan()
+        lim = calib_guide.limits(plan)
+        sim = self._film_scene(plan) if self.roots.simulate else None
+        phone, staging = self.phone(), self.roots.staging / "calibration"
+
+        def work() -> Path:
+            path = Path(phone.stop_video(staging))
+            if sim is not None:
+                sim(path)
+            dest = d / calib_video.FILM_DIR / path.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(dest))
+            return dest
+        left = len(self._left_on_phone())
+
+        def done(dest: Path | None, error: BaseException | None) -> None:
+            self._film = None
+            self._check_left(left)
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                return
+            self._film_choose(d, dest, board, lim["max"])
+        if not self._spawn("phone", self._with_phone(work), done):
+            return {"error": "busy"}
+        film["stopping"] = True
+        return {"ok": True, "film": "stopping", "folder": d.name}
+
+    def _film_scene(self, plan: str) -> Callable[[Path], None]:
+        """In simulation the phone's film shows the board in use, moved through the poses of the plan."""
+        st = self._board()
+        spec, kind = st["active"], st["kind"]
+        lay = self._lay if kind == "screen" else None
+
+        def film(path: Path) -> None:
+            calib_video.synth_film(path, spec, kind, size=FILM_SIM_SIZE, plan=plan, pause_s=0.5, move_s=0.7,
+                                   lay=lay, seed=int(time.time()) % 1000)
+            path.with_name(path.stem + "_truth.json").unlink(missing_ok=True)
+        return film
+
+    def _film_choose(self, d: Path, video: Path, board: tuple[float, Any, float], target: int) -> None:
+        """The frames of the film worth calibrating on, chosen in a worker and written into d as its photos (each with
+        its check); then, for a calibration, the calibration on them."""
+        mode = self._mode()
+        square, squares, marker = board
+        said: list[str] = []
+
+        def work() -> dict[str, Any]:
+            b = calibrate_charuco.make_board(square, squares, marker)
+            return calib_video.run_choose(video, d, b, target, mode=mode, log=said.append,
+                                          need=calibrate_charuco.MIN_VIEWS)
+
+        def done(summary: dict[str, Any] | None, error: BaseException | None) -> None:
+            for line in said:
+                log.info("film: %s", line)
+            self._keep_log(mode, log_text(said))
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error, "film_unreadable")})
+                return
+            checks = self._photo_checks(d)
+            now = datetime.now().isoformat(timespec="seconds")
+            seq = max((c.get("seq", 0) for c in checks.values()), default=0)
+            for name, c in sorted(summary["checks"].items(), key=lambda kv: kv[1].get("film_s") or 0):
+                seq += 1
+                checks[name] = {**c, "time": now, "mode": mode, "seq": seq}
+            self._write_checks(d, checks)
+            self._emit({"type": "calib_film", "action": "chosen", "folder": d.name, "n": len(summary["checks"]),
+                        "seconds": summary["duration_s"], "counts": summary["counts"]})
+            if self._series_kind() == "calibration":
+                self.calib_run("[]")
+        if not self._spawn("film", work, done):
+            self._emit({"type": "acquire_failed", "key": "calibration", "error": "busy", "args": {}, "message": ""})
+            return
+        self._emit({"type": "calib_film", "action": "choosing", "folder": d.name})
+
+    def _film_import(self) -> dict[str, Any]:
+        """A film chosen by hand (the camera app's own recording, copied by cable) into a series of its own."""
+        if self._film is not None or {"phone", "film", "import"} & self._busy:
+            return {"error": "busy"}
+        pattern = " ".join("*" + s for s in calib_video.VIDEO_SUFFIXES)
+        path, _ = QFileDialog.getOpenFileName(None, "ImpactGuide", str(Path.home()), f"video ({pattern})")
+        if not path:
+            return {**self._calib_state(), "added": 0, "skipped": 0}
+        src = Path(path)
+        f = self._series()
+        empty = f is not None and f["n"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
+        d = Path(f["path"]) if empty else self._new_series()
+        self._folder_board(d)
+        board = self._board_args(d)
+        target = calib_guide.limits(self._calib_plan())["max"]
+        dest = d / calib_video.FILM_DIR / src.name
+
+        def work() -> Path:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            return dest
+
+        def done(copied: Path | None, error: BaseException | None) -> None:
+            if error is not None:
+                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error, "copy_failed")})
+                return
+            self._film_choose(d, copied, board, target)
+        if not self._spawn("import", work, done):
+            return {"error": "busy"}
+        return {**self._calib_state(), "added": 0, "skipped": 0, "film": "copying"}
 
     def _sim_scene(self):
         """In simulation the phone photographs the board in use at the next pose of the plan (calib_guide.photo)."""
@@ -1923,7 +2514,7 @@ class Backend(Bridge):
         spec = self._guide_board(s["series"] if s["series"] and s["series"]["same"] else None, st["active"])
         lay = self._lay if kind == "screen" else None
         tex_kind = {"screen": "screen", "plate": "plate", "sheet": "sheet"}[kind]
-        n = s["count"]
+        n = s["next"]["n"] if s["next"] else s["count"]     # the pose the photo now taken is for
         size = self.phone().photo_px
 
         def scene():
@@ -1932,41 +2523,100 @@ class Backend(Bridge):
             return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         return scene
 
-    def _shoot_into(self, d: Path, check: bool = True) -> dict[str, Any]:
-        """A photo from the phone into the folder d (moved there by the worker: d may be on Drive), then checked."""
+    def _shoot_into(self, d: Path, check: bool = True, pose: int | None = None, auto: bool = False) -> dict[str, Any]:
+        """A photo from the phone for the pose `pose` of the plan into the folder d, then checked. The phone's job is
+        only the photo (the shutter and the file whole on the phone); its copy (moved into d: d may be on Drive) and
+        its check follow in the background, while the next photo can be taken."""
         blocked = self._free_camera()
         if blocked:
             return blocked
+        if "phone" in self._busy:
+            return {"error": "busy"}
         self._folder_board(d)
         phone = self.phone()
         if self.roots.simulate and check:
             phone.scene = self._sim_scene()
+        shot = {"path": d, "folder": d.name, "pose": pose, "name": "", "state": "shooting", "auto": auto,
+                "t0": time.monotonic()}
+
+        def pressed() -> None:      # on the worker: said on the GUI thread, through the jobs' queue
+            shot["t_press"] = time.monotonic()
+            self._jobs.put(("", lambda _r, _e: self._pressed(shot), None, None))
+
+        def work() -> str:
+            # the camera app left in the mode the operator set (Pro, the focus by hand): no intent to it, not even the
+            # one that lifts its own timer, which may bring it back to its Photo mode (acquisition.Phone.take)
+            return phone.take(pressed=pressed, keep_mode=True)
+
+        def done(name: str | None, error: BaseException | None) -> None:
+            if self.roots.simulate:
+                phone.scene = None
+            try:
+                if error is not None:
+                    self._drop_shot(shot)
+                    if self._auto is not None:
+                        self._auto.refused()
+                    self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                    return
+                if shot["state"] == "shooting":     # the press was said after the photo (a quick fake phone)
+                    self._pressed(shot)
+                shot["name"], shot["state"], shot["t_taken"] = name, "copying", time.monotonic()
+                self._copy_queue.append((shot, check))
+                self._next_copy()
+                if getattr(phone, "countdown_seen", False) and not self._countdown_said:
+                    self._countdown_said = True
+                    self._emit({"type": "calib_photo", "action": "countdown", "folder": d.name})
+            finally:
+                self._take_queued()
+                self._maybe_calibrate()
+        self._shots.append(shot)
+        if not self._spawn("phone", self._with_phone(work), done):
+            self._drop_shot(shot)
+            return {"error": "busy"}
+        return {"ok": True, "folder": d.name}
+
+    def _next_copy(self) -> None:
+        """The next photo taken copied from the phone (a copier of its own: the next photo may be taken meanwhile),
+        its small picture made, moved into its folder, then queued for its check."""
+        if "phone_copy" in self._busy or not self._copy_queue:
+            return
+        shot, check = self._copy_queue.pop(0)
+        d, name = Path(shot["path"]), shot["name"]
+        copier = self.phone().copier()
         staging = self.roots.staging / "calibration"
+        thumb = self._thumb_path(d, name)
+        left = len(self._left_on_phone())
 
         def work() -> Path:
-            path = phone.shoot(staging)
-            dest = d / Path(path).name
+            path = Path(copier.pull(name, staging))
+            self._make_thumb(path, thumb)
+            dest = d / path.name
             if dest.exists():       # never over a photo of the series: this one stays in staging
                 log.warning("%s already in %s: the new photo stays in %s", dest.name, d, path)
                 raise UserError("exists", dest.name)
             shutil.move(str(path), str(dest))
             return dest
 
-        left = len(self._left_on_phone())
-
         def done(dest: Path | None, error: BaseException | None) -> None:
-            if self.roots.simulate:
-                phone.scene = None
-            self._check_left(left)
-            if error is not None:
-                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
-                return
-            self._arrived(d, dest, check)
-        ok = self._spawn("phone", self._with_phone(work), done)
-        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
+            try:
+                self._check_left(left)
+                if error is not None:
+                    self._drop_shot(shot)
+                    self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                    return
+                shot["state"], shot["t_copied"] = "checking", time.monotonic()
+                if not check:
+                    self._drop_shot(shot)
+                self._arrived(d, dest, check)
+            finally:
+                self._next_copy()
+                self._maybe_calibrate()
+        if not self._spawn("phone_copy", work, done):
+            self._copy_queue.insert(0, (shot, check))
 
-    def _grab_into(self, d: Path) -> dict[str, Any]:
-        """The newest frame of the live stream, at its full size, into the series as a PNG (lossless)."""
+    def _grab_into(self, d: Path, pose: int | None = None, auto: bool = False) -> dict[str, Any]:
+        """The newest frame of the live stream, at its full size, into the series as a PNG (lossless), for the pose
+        `pose` of the plan; checked in the background as a photo is."""
         ar = self._live
         if ar is None or not ar.running or self._live_for != "calibration":
             return {"error": "stream_off"}
@@ -1975,19 +2625,33 @@ class Backend(Bridge):
             return {"error": "stream_off"}
         self._folder_board(d)
         name = f"frame_{datetime.now():%Y%m%d_%H%M%S}_{n:06d}.png"
+        thumb = self._thumb_path(d, name)
+        shot = {"path": d, "folder": d.name, "pose": pose, "name": name, "state": "shooting", "auto": auto,
+                "t0": time.monotonic()}
 
         def work() -> Path:
             import cv2
             cv2.imwrite(str(d / name), img)
+            self._make_thumb(d / name, thumb)
             return d / name
 
         def done(path: Path | None, error: BaseException | None) -> None:
-            if error is not None:
-                self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
-                return
-            self._arrived(d, path, True)
-        ok = self._spawn("phone", work, done)
-        return {"ok": ok, "folder": d.name} if ok else {"error": "busy"}
+            try:
+                if error is not None:
+                    self._drop_shot(shot)
+                    self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error)})
+                    return
+                shot["state"] = "checking"
+                self._arrived(d, path, True)
+            finally:
+                self._take_queued()
+                self._maybe_calibrate()
+        self._shots.append(shot)
+        if not self._spawn("phone", work, done):
+            self._drop_shot(shot)
+            return {"error": "busy"}
+        self._pressed(shot)         # the frame is the one of this moment
+        return {"ok": True, "folder": d.name}
 
     def _arrived(self, d: Path, dest: Path, check: bool = True) -> None:
         """A photo is in the series: checked as soon as the checks before it are done (board found, corners, blur, the
@@ -2016,6 +2680,8 @@ class Backend(Bridge):
             d, dest = self._check_queue.pop(0)
             if not dest.exists():
                 log.info("photo %s gone before its check", dest)
+                for x in [x for x in self._shots_in(d) if x["name"] == dest.name]:
+                    self._drop_shot(x)
                 # said, so that the page ends the work it started for this photo
                 self._emit({"type": "acquire_failed", "key": "calibration", "error": "not_found",
                             "args": {"name": dest.name}, "message": ""})
@@ -2024,6 +2690,8 @@ class Backend(Bridge):
                 square, squares, marker = self._board_args(d)
             except UserError as e:
                 self._check_queue = [(f, p) for f, p in self._check_queue if f != d]
+                for x in [x for x in self._shots_in(d) if x["state"] == "checking"]:
+                    self._drop_shot(x)
                 self._emit({"type": "acquire_failed", "key": "calibration", **self._err(e)})
                 continue
             try:
@@ -2031,6 +2699,9 @@ class Backend(Bridge):
                 kept = [p for p in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime)
                         if p.suffix.lower() in IMAGE_SUFFIXES and p != dest and (checks.get(p.name) or {}).get("ok")]
                 size = (checks.get(kept[0].name) or {}).get("size") if kept else None
+                # the camera's settings of the first photo kept (its check has them, else its file): a photo with
+                # another ISO, exposure time, lens or resolution is refused (calibrate_charuco.settings_problems)
+                first = ((checks.get(kept[0].name) or {}).get("settings") or kept[0]) if kept else None
             except OSError as e:        # the folder could not be listed (Drive, a file gone meanwhile)
                 try:
                     self._checked(d, dest, None, e)     # the photo counts as not checked, put aside, said
@@ -2040,15 +2711,19 @@ class Backend(Bridge):
                 continue
 
             def work(dest: Path = dest, size: Any = size, square: float = square, squares: Any = squares,
-                     marker: float = marker) -> dict[str, Any]:
+                     marker: float = marker, thumb: Path = self._thumb_path(d, dest.name),
+                     first: Any = first) -> dict[str, Any]:
                 board = calibrate_charuco.make_board(square, squares, marker)
-                return calibrate_charuco.check_photo(dest, board, size)
+                if not thumb.is_file():         # a photo added by hand: its small picture made here
+                    self._make_thumb(dest, thumb)
+                return calibrate_charuco.check_photo(dest, board, size, first)
 
             def done(res: dict[str, Any] | None, error: BaseException | None, d: Path = d, dest: Path = dest) -> None:
                 try:
                     self._checked(d, dest, res, error)
                 finally:
                     self._next_check()
+                    self._maybe_calibrate()
             self._spawn("photo_check", work, done)
 
     def _checked(self, d: Path, dest: Path, res: dict[str, Any] | None, error: BaseException | None) -> None:
@@ -2058,6 +2733,18 @@ class Backend(Bridge):
             res = {"ok": False, "why": "unreadable", "corners": 0, "of": 0, "blur_px": None, "points": []}
         res["time"] = datetime.now().isoformat(timespec="seconds")
         res["mode"] = self._mode()
+        shot = next((x for x in self._shots_in(d) if x["name"] == dest.name), None)
+        if shot is not None:                # the pose of the plan it was taken for, kept with its check
+            res["pose"] = shot["pose"]
+            # seconds from Take (or the photo taken by itself) to the shutter, the photo whole on the phone, copied,
+            # checked: how long the next photo waited, if at all
+            t0, now = shot.get("t0"), time.monotonic()
+            if t0 is not None:
+                res["timing_s"] = {k: round(shot[t] - t0, 2) for k, t in (("shutter", "t_press"),
+                                   ("taken", "t_taken"), ("copied", "t_copied")) if shot.get(t) is not None}
+                res["timing_s"]["checked"] = round(now - t0, 2)
+            res["auto"] = bool(shot.get("auto"))
+            self._drop_shot(shot)
         if not res["ok"]:
             aside = d / REJECTED
             try:
@@ -2069,6 +2756,8 @@ class Backend(Bridge):
         res["seq"] = 1 + max((c.get("seq", 0) for c in allc.values()), default=0)    # the order they came in
         allc[dest.name] = res
         self._write_checks(d, allc)
+        if self._auto is not None and not res["ok"]:
+            self._calib_state()             # its pose comes again: the watcher back on it
         self._emit({"type": "calib_photo", "folder": d.name, "name": dest.name,
                     "check": {k: res.get(k) for k in ("ok", "why", "corners", "of", "blur_px")}})
 
@@ -2106,7 +2795,7 @@ class Backend(Bridge):
             self._live_purpose("calibration")
             if ar.running:
                 return self._calib_state()
-            if "phone" in self._busy or self.cur.get("recording"):
+            if "phone" in self._busy or self.cur.get("recording") or self._film is not None:
                 return {"error": "busy"}
             if not self._spawn("live", ar.start, self._live_started("calibration")):
                 return {"error": "live_starting"}
@@ -2200,8 +2889,12 @@ class Backend(Bridge):
     @pyqtSlot(str, result=str)
     def calib_import(self, name: str) -> str:
         """Photo files added to a folder by name, or to the series (name empty), each checked as a photo taken. The
-        copies are made in a worker (the folder may be on Drive); each photo is checked once it is there."""
+        copies are made in a worker (the folder may be on Drive); each photo is checked once it is there. In the video
+        mode: a film of the camera app (copied by cable), into a series of its own, its frames chosen as for a film
+        taken here."""
         def go() -> dict[str, Any]:
+            if self._mode() == "video" and not name:
+                return self._film_import()
             d = self._calib_dir(name) if name else self._series_folder()
             pattern = " ".join("*" + s for s in IMAGE_SUFFIXES)
             paths, _ = QFileDialog.getOpenFileNames(None, "ImpactGuide", str(Path.home()), f"photos ({pattern})")
@@ -2238,15 +2931,17 @@ class Backend(Bridge):
     @pyqtSlot(str, result=str)
     def calib_run(self, exclude: str) -> str:
         """Calibrates the camera mode on the photos of the series, leaving out those named in exclude (a JSON list);
-        the result waits for calib_save. Refused while photos still wait for their check."""
+        the result waits for calib_save. With photos still on their way (taken, copied or checked) it starts by
+        itself once the last one is checked (waiting)."""
         def go() -> dict[str, Any]:
+            leave = [str(x) for x in json.loads(exclude or "[]")]
+            if self._on_way():
+                self._calib_waiting = leave
+                return {"ok": True, "waiting": True}
             f = self._series()
             if f is None or not f["n"]:
                 return {"error": "nothing"}
-            if self._checking():
-                return {"error": "busy"}
             d, mode, plan = Path(f["path"]), self._mode(), self._calib_plan()
-            leave = [str(x) for x in json.loads(exclude or "[]")]
             board = self._board_args(d)         # here: it may ask Qt for the monitors
             said_so_far: list[str] = []         # what it logged, kept for "Open the log" even when it fails
 
@@ -2262,10 +2957,15 @@ class Backend(Bridge):
                     return
                 cal, said = result
                 cal["plan"] = plan              # the verdict keeps the plan the photos were taken with
+                cal["mode"] = mode              # its camera mode, never used for another
+                film = calib_video.film_of(d)
+                if film:                        # frames chosen from a film: which, and what the film was
+                    cal["film"] = {k: film.get(k) for k in ("video", "size", "fps", "frames", "duration_s", "codec",
+                                                            "counts", "limits", "closest_steps")}
                 self._pending_cal[mode] = cal
                 self._keep_log(mode, said)
-                self._emit({"type": "calib", "action": "calibrate", "mode": mode,
-                            "ok": cal["rms_px"] < calibrate_charuco.MAX_RMS, "result": self._cal_summary(cal)})
+                self._emit({"type": "calib", "action": "calibrate", "mode": mode, "ok": self._good(cal),
+                            "result": self._cal_summary(cal)})
             ok = self._spawn("calibration", work, done)
             return {"ok": ok} if ok else {"error": "busy"}
         return self._answer(go)
@@ -2312,7 +3012,7 @@ class Backend(Bridge):
             mode = self._mode()
             if f is None or not f["n"]:
                 return {"error": "nothing"}
-            if self._checking():
+            if self._on_way():                  # photos still being taken, copied or checked
                 return {"error": "busy"}
             d = Path(f["path"])
             intr = self._intrinsics_path(mode)
@@ -2700,9 +3400,12 @@ class Backend(Bridge):
 
     def _free_camera(self) -> dict[str, Any] | None:
         """The phone's camera serves one at a time: a photo or a video stops the live view first (the
-        acquisition then brings the camera app back). An error while the live view is still starting."""
+        acquisition then brings the camera app back). An error while the live view is still starting, or while a
+        film for a calibration records (the same key would stop it)."""
         if "live" in self._busy:
             return {"error": "live_starting"}
+        if self._film is not None:
+            return {"error": "busy"}
         if self._live is not None and self._live.running:
             self._live.stop()
             self._emit(self._live_event("stopped", reason="photo"))
@@ -2737,7 +3440,7 @@ class Backend(Bridge):
             self._live_purpose("live")
             if ar.running:
                 return self._live_state()
-            if "phone" in self._busy or self.cur.get("recording"):
+            if "phone" in self._busy or self.cur.get("recording") or self._film is not None:
                 return {"error": "busy"}
             if not self._spawn("live", ar.start, self._live_started("live")):
                 return {"error": "live_starting"}
@@ -2779,6 +3482,17 @@ class Backend(Bridge):
             return self._live_state()
         return self._answer(go)
 
+    @pyqtSlot(float, result=str)
+    def live_opacity(self, value):
+        """The opacity while its slider moves: the live view takes it from its next frame, and nothing else is read or
+        written (the slider let go keeps it through live_settings). Answers {opacity}."""
+        def go():
+            v = self._opacity(value)
+            if self._live is not None and self._live_for == "live":
+                self._live.configure(opacity=v)
+            return {"opacity": v}
+        return self._answer(go)
+
     @pyqtSlot(result=str)
     def live_registration_load(self):
         """A registration file (JSON with T_M_B, as ground_truth.py writes it) in place of the demo."""
@@ -2804,6 +3518,118 @@ class Backend(Bridge):
             return self._live_state()
         return self._answer(go)
 
+    # ── the twin of the bench (twin.py, ui/18-twin.js) ───────────────────
+    @guarded
+    def _twin_poll(self) -> None:
+        """The bench scene looked at: once it rests and differs from the model's scene, the model is made again in a
+        worker (Blender in the background, below the app's priority), never while the live AR runs."""
+        if self._live is not None and getattr(self._live, "running", False):
+            return
+        if self.twin.due():
+            self._twin_export()
+
+    def _twin_export(self) -> bool:
+        def done(cur: dict | None, error: BaseException | None) -> None:
+            if isinstance(error, twin.Busy):
+                return                  # saved meanwhile: tried again once it rests
+            if error is not None:
+                log.warning("twin model not made", exc_info=(type(error), error, error.__traceback__))
+                self._emit({"type": "twin", "action": "failed"})
+                return
+            new = cur.get("version") != self._twin_said
+            self._twin_said = cur.get("version")
+            v = twin.versions(cur.get("phone_print", ""))
+            self._emit({"type": "twin", "action": "updated" if new else "same", "version": cur.get("version"),
+                        **{k: v[k] for k in ("stale", "dataset", "network")}})
+        started = self._spawn("twin_export", self.twin.run, done)
+        if started:
+            self._emit({"type": "twin", "action": "exporting"})
+        return started
+
+    def _twin_model(self) -> dict[str, Any]:
+        cur = self.twin.current()
+        busy = self.twin.running or "twin_export" in self._busy
+        if cur is None:
+            return {"state": "exporting" if busy else ("none" if self.twin.can_export() else "no_blender")}
+        return {"state": "exporting" if busy else "ready", "url": file_url(self.twin.cache / cur["model"]),
+                "scene": Path(str(cur.get("scene", ""))).name,
+                **{k: cur.get(k) for k in ("version", "hash", "phone_print", "scene_saved", "exported", "export_s",
+                                           "bytes", "triangles")}}
+
+    def _twin_trial(self, run: trials.Run, mode: str, want: str) -> tuple[dict[str, str] | None, list, int]:
+        """The trial the twin shows, its steps and the step it is at: in Trials the open one at its step (else the
+        next, planned, at its first); in Scans and results the one asked for, else the newest with its scans, at
+        its first scan."""
+        rows = run.log.rows()
+        if mode == "results":
+            if not want:
+                done = twin.scanned_trials(run)
+                want = done[0]["trial"] if done else (rows[-1]["trial"] if rows else "")
+            row = next((r for r in rows if r["trial"] == want), None)
+            steps = run.steps(row["trial"]) if row is not None else []
+            first = next((i for i, st in enumerate(steps) if st.key.startswith("scan_")), 0)
+            return row, steps, first
+        row = self._open_trial(run)
+        if row is not None:
+            steps = run.steps(row["trial"])
+            return row, steps, min(self.cur.get("step", 0), len(steps) - 1)
+        plan = self._plan(run)
+        if not plan:
+            return None, [], 0
+        row = {k: plan.get(k, "") for k in trials.LOG_FIELDS}
+        return row, trials.trial_steps(run.config, row, rows[-1] if rows else None), 0
+
+    @pyqtSlot(str, result=str)
+    def twin_state(self, payload: str) -> str:
+        """The twin for the page: {"mode": "trials" | "results", "trial": id or ""} -> the model (url, version...),
+        whether the dataset and the network were made on this scene, the phone's field of view, the trial shown
+        (its setting, its steps and the one it is at, the arm's positions) and, after its scans, the marker's motion with the TRE at each target; in Scans and results
+        the trials with scans as well. The scans are measured in a worker: "measuring", then a `twin` event."""
+        def go() -> dict[str, Any]:
+            ask_ = json.loads(payload or "{}")
+            mode = "results" if ask_.get("mode") == "results" else "trials"
+            run = self.run()
+            cur = self.twin.current()
+            out = {"model": self._twin_model(), "versions": twin.versions(cur.get("phone_print", "") if cur else ""),
+                   "phone": twin.phone_view(self.roots.calib_out), "mode": mode, "trial": None, "scan": None}
+            if mode == "results":
+                out["trials"] = twin.scanned_trials(run)
+            row, steps, at = self._twin_trial(run, mode, str(ask_.get("trial") or ""))
+            if row is None:
+                return out
+            cfg = run.config
+            out["trial"] = twin.setting(row, steps[at].key if steps else None, cfg.photo_az)
+            # its steps, for the twin to put the bench as each has it; the arm's positions and its sweep
+            out["steps"], out["step"] = [st.key for st in steps], at
+            out["arm"] = {"photo_az": list(cfg.photo_az), "scan_az": list(cfg.scan_az), "video_az": list(cfg.video_az),
+                          "video_deg_s": trials.VIDEO_SPEED}
+            info = self.twin.info(cur)
+            sim = bool(self.roots.simulate)
+            res = twin.scan_result(run, row, info, self.twin.cache, simulate=sim, measure=False)
+            if res.get("state") == "measuring":
+                trial = row["trial"]
+
+                def done(r: dict | None, error: BaseException | None) -> None:
+                    if error is not None:
+                        log.warning("scans of %s not measured", trial, exc_info=(type(error), error,
+                                                                                 error.__traceback__))
+                    self._emit({"type": "twin", "action": "scan", "trial": trial,
+                                "state": (r or {}).get("state", "failed")})
+                self._spawn("twin_scan", lambda: twin.scan_result(run, row, info, self.twin.cache, simulate=sim), done)
+            out["scan"] = res
+            return out
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def twin_update(self) -> str:
+        """The model made again now, from the scene as it is saved (Advanced): a `twin` event when it is ready."""
+        def go() -> dict[str, Any]:
+            if not self.twin.can_export():
+                return {"error": "twin_no_blender"}
+            self._twin_export()
+            return {"model": self._twin_model()}
+        return self._answer(go)
+
     # ── the window is closing ────────────────────────────────────────────
     @guarded
     def shutdown(self) -> None:
@@ -2811,6 +3637,8 @@ class Backend(Bridge):
         (a process singleton), the servers and the live AR. Each part is let go even when one before it fails."""
         self._pump.stop()
         self._scan_timer.stop()
+        self._twin_timer.stop()
+        self.twin.cancel()              # a model being made: its Blender stopped
         self._check_queue.clear()
         self._frames.close()            # the phone's page stops waiting for frames
         for signal, slot in self._connections:
@@ -2818,7 +3646,9 @@ class Backend(Bridge):
                 signal.disconnect(slot)
         self._connections.clear()
         # the link (a process singleton in real use) forgets this backend's listener and removes its adb tunnels
-        steps = [("staged files", self._drop_staged), ("link listener", lambda: self.link.unwatch(self._on_link)),
+        self._watching = False
+        steps = [("photo taken by itself", self._auto_sync),
+                 ("staged files", self._drop_staged), ("link listener", lambda: self.link.unwatch(self._on_link)),
                  ("link", self.link.close)]
         if self._view is not None:
             steps.append(("phone view", self._view.close))

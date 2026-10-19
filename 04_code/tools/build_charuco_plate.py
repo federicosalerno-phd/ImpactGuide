@@ -6,8 +6,15 @@ ticks) / 11, as for the A4 sheet, so the code that finds the A4 board finds this
 
 Plate (mm, plate coordinates: X right, Y up, Z up from the bed face, origin at the plate's lower left corner):
     white body   PLATE_W x PLATE_H x BASE, corners rounded in plan (vertical edges only: the face and the bed face keep
-                 sharp edges), solid: printed with walls and sparse infill it is a sandwich of two skins and the infill
-                 ribs, flat on the bed, which keeps it flat and stiff.
+                 sharp edges), solid, flat on the bed. Printed with PRINT it is a sandwich: a bottom skin of 3 solid
+                 layers, a top skin of 5 (under the black: 3 white and the 2 black), a 10 % grid between them and 2
+                 walls. The skins hold most of the plastic (about 10 g a layer; a millimetre of grid about 7 g): the
+                 plastic is saved in PRINT, not in BASE. BASE buys flatness: a bow after the plate leaves the bed goes
+                 as 1 / (distance between the skins), the sag under its own weight as its square, and the face must
+                 stay flat within 0.1 mm along its diagonals (a board curved by 2 mm biases the focal length by about
+                 1 %). 8.0 keeps the skins 7.4 apart: held flat by one edge the plate sags by at most 0.25 mm, nearly
+                 all a tilt (the 70 corners leave their best plane by 0.01 mm RMS); leaned or two-handed, by about
+                 0.01 mm. A thinner plate saves little (5.0: 20 g less) and bows more, as 1 / d (5.0: 1.7 times).
     black body   INK above the white face (two layers of 0.2 mm, from BASE to BASE + INK): the black squares, the
                  markers, the two dimension marks and the label. Two black cells that touch only at a corner (the
                  chessboard corners, and diagonal bits inside a marker) are parted there by CORNER_GAP (a diamond
@@ -23,8 +30,9 @@ Board coordinates (as OpenCV's CharucoBoard): x right, y down from the board's t
 plate coordinates the board's corner is at (MARGIN left, PLATE_H - MARGIN top, BASE + INK).
 
 Outputs in 02_cad/stl (NAME_*): white and black STL (one body per colour), a 3MF with one object of two parts (white
-on filament 1, black on filament 2), placed on the X2D's bed where both nozzles reach, and NAME.json with the board's
-nominal sizes and what to measure, read by 04_code/src/charuco_plate.py.
+on filament 1, black on filament 2) that carries PRINT as the object's own settings (Bambu Studio applies them over
+any process preset), placed on the X2D's bed where both nozzles reach, and NAME.json with the board's nominal sizes,
+what to measure and how to print, read by 04_code/src/charuco_plate.py.
 
 Checks (build runs them; check runs them on the files):
     layout       the black cells equal OpenCV's own image of the board, cell for cell
@@ -100,6 +108,12 @@ PLATE_H = MARGIN["top"] + SQUARES[1] * SQUARE + MARGIN["bottom"]     # 196
 BED = (256.0, 256.0)
 BOTH_NOZZLES_X = (20.5, 256.0)
 BED_EDGE = 5.0
+LAYER_H = 0.2
+# Bambu Studio settings of the plate (0.20 mm layers, PLA), written into the 3MF as the object's own: the X2D's 0.20
+# Standard but for the grid, 10 % instead of 15 (5 solid layers above it carry the face), and no brim (sharp bed edge)
+PRINT = {"wall_loops": "2", "top_shell_layers": "5", "top_shell_thickness": "1", "bottom_shell_layers": "3",
+         "bottom_shell_thickness": "0", "sparse_infill_density": "10%", "sparse_infill_pattern": "grid",
+         "enable_support": "0", "brim_type": "no_brim"}
 
 # detection check: the camera of the live stream (live_ar.py, nominal Poco X7 Pro) and the photo mode
 STREAM = {"size": (1920, 1440), "f": 1439.0}
@@ -385,8 +399,8 @@ def placement():
 
 
 def write_3mf(path, bodies):
-    """3MF (core spec, mm): one object of two parts, each on its filament (Bambu Studio's model_settings.config), placed
-    on the bed by its build item. bodies: [(name, V, F, filament)]."""
+    """3MF (core spec, mm): one object of two parts, each on its filament, with PRINT as the object's settings (Bambu
+    Studio's model_settings.config), placed on the bed by its build item. bodies: [(name, V, F, filament)]."""
     M, _ = placement()
     xml = ['<?xml version="1.0" encoding="UTF-8"?>',
            '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">',
@@ -405,6 +419,7 @@ def write_3mf(path, bodies):
     xml += ["</resources>", "<build>", f'<item objectid="{top}" transform="{t}"/>', "</build>", "</model>"]
     cfg = ['<?xml version="1.0" encoding="UTF-8"?>', "<config>", f'  <object id="{top}">',
            f'    <metadata key="name" value="{NAME}"/>', '    <metadata key="extruder" value="1"/>']
+    cfg += [f'    <metadata key="{k}" value="{v}"/>' for k, v in PRINT.items()]
     for i, (name, _, _, filament) in enumerate(bodies, 1):
         cfg += [f'    <part id="{i}" subtype="normal_part">', f'      <metadata key="name" value="{name}"/>',
                 f'      <metadata key="extruder" value="{filament}"/>', "    </part>"]
@@ -447,7 +462,8 @@ def spec_json():
                   "board_axes": {"x": [1, 0, 0], "y": [0, -1, 0], "z": [0, 0, -1]},
                   "corner_gap_mm": CORNER_GAP, "min_feature_mm": MIN_WIDTH},
         "files": {"white": f"{NAME}_white.stl", "black": f"{NAME}_black.stl", "3mf": f"{NAME}.3mf"},
-        "print": {"layer_mm": 0.2, "colour_change_mm": BASE, "filament_1": "white", "filament_2": "black"},
+        "print": {"layer_mm": LAYER_H, "colour_change_mm": BASE, "filament_1": "white", "filament_2": "black",
+                  "settings": PRINT},
     }
 
 
@@ -653,7 +669,12 @@ def cmd_check(_args):
     check_fit()
     with zipfile.ZipFile(OUT / f"{NAME}.3mf") as z:
         names = set(z.namelist())
-    expect({"3D/3dmodel.model", "Metadata/model_settings.config"} <= names, f"3MF {NAME}.3mf")
+        cfg = z.read("Metadata/model_settings.config").decode() if "Metadata/model_settings.config" in names else ""
+    expect({"3D/3dmodel.model", "Metadata/model_settings.config"} <= names
+           and all(f'<metadata key="{k}" value="{v}"/>' in cfg for k, v in PRINT.items()),
+           f"3MF {NAME}.3mf, with the print settings " + ", ".join(f"{k} {v}" for k, v in PRINT.items()))
+    n = BASE / LAYER_H
+    expect(abs(n - round(n)) < 1e-9, f"colour change at the top of a layer: BASE {BASE:g} = {round(n)} x {LAYER_H:g}")
     spec = json.loads((OUT / f"{NAME}.json").read_text(encoding="utf-8"))
     expect(spec == json.loads(json.dumps(spec_json())), f"{NAME}.json up to date")
     check_detection(Vb, Fb)

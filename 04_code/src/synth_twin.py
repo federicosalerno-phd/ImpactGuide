@@ -43,7 +43,8 @@ script and the seed:
     meshes/occluders.npz, meshes/face_weights.npz
     drapes/drape_NN.npz                          drape shapes in B
     s1.json                                      visibility of the head spheres, candidate positions
-    sessions/sNNNN/session.json                  face, split, pendulum direction, constants
+    sessions/sNNNN/session.json                  face, split, pendulum direction, constants, scene_print (the
+                                                 fingerprint of what the phone sees, twin_export.py)
     sessions/sNNNN/frames.jsonl                  one line per image: poses, intrinsics, parameters, label pixel counts,
                                                  shift of the TRE targets under dT (error of the stale registration)
     sessions/sNNNN/<image>.jpg                   RGB, JPEG 95
@@ -669,8 +670,12 @@ def open_twin(out, force_copy=False):
     copy = out / "twin_scene.blend"
     status = refresh_copy(SCENE, copy, force_copy)
     bpy.ops.wm.open_mainfile(filepath=str(copy), load_ui=False)
-    print(json.dumps({"scene": str(copy), "copy": status}))
-    return Twin()
+    import twin_export
+    scene_print = twin_export.fingerprint()[0]      # of what the phone sees, before the twin changes the scene
+    print(json.dumps({"scene": str(copy), "copy": status, "scene_print": scene_print}))
+    tw = Twin()
+    tw.scene_print = scene_print
+    return tw
 
 
 def cmd_probe(tw, args):
@@ -1082,7 +1087,8 @@ def cmd_render(tw, args):
                     labels=LABELS, targets=target_ids, ball_centre=lst(tw.c, 4), face_centroid=lst(tw.o, 4), board=tw.board,
                     scale=args.scale, samples=args.samples, blender=bpy.app.version_string,
                     head_spheres="shown" if args.head_spheres else "hidden (spheres and frame left out of the images)",
-                    scene_mtime=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(SCENE.stat().st_mtime)))
+                    scene_mtime=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(SCENE.stat().st_mtime)),
+                    scene_print=tw.scene_print)
         (sdir / "session.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
         for r in range(args.registrations):
             reg = sample_registration(tw, sess, r)

@@ -93,7 +93,7 @@ const TRIALS = {
   render: function (s) {
     TRIALS.state = s;
     TRIALS.where(s.totals);
-    if (trialsView !== 'guide') return;
+    if (trialsView !== 'guide' || (typeof TWIN !== 'undefined' && TWIN.showing())) return;   // the twin in its place
     const done = !!s.complete;
     $('guide').classList.toggle('hidden', done);
     $('guideDone').classList.toggle('hidden', !done);
@@ -107,7 +107,12 @@ const TRIALS = {
     chips.replaceChildren();
     if (t.open) chips.append(chip(T(t.resumed ? 'trials.chip.resumed' : 'trials.chip.open', fmtTime(t.time_start)), 'accent'));
     const reasons = (t.reference || '').split(';').filter(Boolean);
-    if (reasons.length) chips.append(chip(T('trials.chip.reference', reasons.map(function (r) { return TRIALS.word('ref.', r); }).join(', '))));
+    if (reasons.length) {
+      // the chip names it; why the reference scans are due is its tooltip
+      const c = chip(T('trials.chip.ref'));
+      c.title = T('trials.chip.reference', reasons.map(function (r) { return TRIALS.word('ref.', r); }).join(', '));
+      chips.append(c);
+    }
     if (String(t.drape) === '1') chips.append(chip(T('trials.chip.drape'), 'warn'));
 
     // the settings
@@ -357,6 +362,11 @@ const TRIALS = {
 
   // ── the log ────────────────────────────────────────────────────────────
   colName: function (c) { return hasT('col.' + c) ? T('col.' + c) : c; },
+  // a trial's hole and direction as two signs, each with its name in the tooltip (ICONS.hole, ICONS.direction)
+  signs: function (r) {
+    return [signed('hole', r.angle_deg + '°', T('col.angle_deg')),
+            signed('direction', r.direction_deg + '°', T('col.direction_deg'))];
+  },
 
   // A logged value as it reads: yes or no, a time, a unit after the number.
   colValue: function (c, v) {
@@ -390,11 +400,14 @@ const TRIALS = {
       it.tabIndex = 0;
       it.setAttribute('role', 'button');
       const name = E('span', 'mitem-name', r.trial + ' ');
-      let det = r.holder + ' · ' + T('seq.cell', r.angle_deg, r.direction_deg) + (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '')
-        + ' · ' + fmtTime(r.time_impact || r.time_start);
+      // the hole and the direction as signs, their names in the tooltips (TRIALS.signs)
+      let det = (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '') + ' · ' + fmtTime(r.time_impact || r.time_start);
       if (r.cap_shift_mm) det += ' · ' + T('log.cap', fmtNum(r.cap_shift_mm, 2));
       if (edited[r.trial]) det += ' · ' + T('log.edited', edited[r.trial]);
-      name.append(E('span', 'mitem-det', det));
+      const d = E('span', 'mitem-det', r.holder + ' · ');
+      d.append.apply(d, TRIALS.signs(r));
+      d.append(document.createTextNode(det));
+      name.append(d);
       it.append(name, E('span', 'mbadge', TRIALS.word('status.', r.status)));
       onActivate(it, function () { TRIALS.logSel = r.trial; TRIALS.renderLog(TRIALS.log); });
       list.append(it);
@@ -412,7 +425,12 @@ const TRIALS = {
     const editable = L.columns.filter(function (c) { return c.name !== 'trial' && c.name !== 'phase'; });
     if (r) {
       L.columns.forEach(function (c) {
-        if (r[c.name] !== '') fields.append(piRow(TRIALS.colName(c.name), TRIALS.colValue(c, r[c.name])));
+        if (r[c.name] === '') return;
+        // a time as the hour (the day too when it is not today), the whole stamp in the row's tooltip
+        const iso = c.unit === 'ISO 8601';
+        const row = piRow(TRIALS.colName(c.name), iso ? fmtTime(r[c.name]) : TRIALS.colValue(c, r[c.name]));
+        if (iso) row.title = TRIALS.colValue(c, r[c.name]);
+        fields.append(row);
       });
     }
     setOptions($('lgField'), editable.map(function (c) { return TRIALS.colName(c.name); }), editable.map(function (c) { return c.name; }));
@@ -476,8 +494,9 @@ const TRIALS = {
     Q.rows.forEach(function (r) {
       const next = String(r.slot) === String(Q.next);
       const cell = E('div', 'seq-cell' + (r.trial ? ' filled' : '') + (next ? ' next' : '') + (r.drape === '1' ? ' drape' : ''));
+      cell.title = T('seq.cell', r.angle_deg, r.direction_deg);      // the two signs in words
       cell.append(E('div', 'seq-n', r.slot + ' · ' + r.holder + ' · R' + r.replicate + (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '')),
-                  E('div', 'seq-v', T('seq.cell', r.angle_deg, r.direction_deg)),
+                  (function () { const v = E('div', 'seq-v'); v.append.apply(v, TRIALS.signs(r)); return v; })(),
                   E('div', 'seq-t', r.trial || (next ? T('trials.badge.next') : '')));
       grid.append(cell);
     });

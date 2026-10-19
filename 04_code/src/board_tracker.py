@@ -219,6 +219,7 @@ class TrackResult:
         self.ambiguity_px, self.evidence = 0.0, 0.0
         self.noise_px = None        # expected noise of the overlay from the rotation alone, px per frame (see _noise)
         self.noise_pos_px = None    # and of the anchor (the board's centre), px per frame
+        self.noise_range_mm = None  # and of its distance from the camera, mm per frame
         self.tm = {}
         self.why = ""
         self.counts = None          # corners before, after the flow, after the saddle point refinement
@@ -406,9 +407,11 @@ class Tracker:
         return bool(sv[1] >= 0.5 * self.sq)
 
     def _noise(self, ids, T, K, dist):
-        """How much the rotation of a pose from these corners shakes the overlay from frame to frame, px: corner noise
-        TRACK["corner_noise_px"] carried through the PnP (covariance from the Jacobian) to the model points, rotation
-        part only. A small board far away gives a large value: the filter then smooths its rotation more."""
+        """How much a pose from these corners shakes from frame to frame: corner noise TRACK["corner_noise_px"]
+        carried through the PnP (covariance from the Jacobian). Returns (rotation: px at the model points, rotation
+        part only; anchor: px, the board's centre in the picture; range: mm, the centre's distance from the camera).
+        A small board far away gives a large rotation and range: the filter then smooths those more, while the
+        centre's place in the picture stays precise."""
         rvec, tvec = vectors(T)
         _, J = cv2.projectPoints(self.obj[ids], rvec, tvec, K, dist)
         J = J[:, :6]
@@ -423,7 +426,19 @@ class Tracker:
         _, Jc = cv2.projectPoints(self.centre[None], rvec, tvec, K, dist)
         Jc = Jc[:, :6]
         pos = float(np.sqrt(max(np.trace(Jc @ cov @ Jc.T), 0.0)))
-        return rot, pos
+        # the centre in the camera, R c + t: its derivative by the rotation vector numerically, then along the line of
+        # sight
+        r = rvec.ravel()
+        Jp = np.zeros((3, 6))
+        Jp[:, 3:] = np.eye(3)
+        for i in range(3):
+            d = np.zeros(3)
+            d[i] = 1e-6
+            Jp[:, i] = (cv2.Rodrigues(r + d)[0] @ self.centre - cv2.Rodrigues(r - d)[0] @ self.centre) / 2e-6
+        p = cv2.Rodrigues(r)[0] @ self.centre + tvec.ravel()
+        u = p / max(float(np.linalg.norm(p)), 1e-9)
+        rng = float(np.sqrt(max(u @ Jp @ cov @ Jp.T @ u, 0.0)))
+        return rot, pos, rng
 
     def _overlay_shift(self, Ta, Tb, K):
         return float(np.sqrt(np.mean(np.sum((project(self.anchor, Ta, K, np.zeros(5))
@@ -530,7 +545,7 @@ class Tracker:
         res.sure = bool(res.ok and self.sure)
         if res.ok:
             res.T = self.T
-            res.noise_px, res.noise_pos_px = self._noise(self.ids, self.T, K, dist) or (None, None)
+            res.noise_px, res.noise_pos_px, res.noise_range_mm = self._noise(self.ids, self.T, K, dist) or (None,) * 3
             self.history[n] = (self.ids.copy(), self.pts.copy())
             res.square_px = self._square_px(self.T, K)
             res.box, res.marker_px = self.box_for(self.T, K, dist, (w, h))

@@ -46,13 +46,9 @@
   <div class="work">
     <div class="main">
 
-      <!-- One toolbar for the modules; a step shows its own group. Hidden at home. -->
+      <!-- One toolbar for the modules; a step shows its own group (.tool-group data-for="<module>-<step>").
+           Hidden at home. What Live AR draws is chosen in its panel, not here. -->
       <div class="toolbar">
-        <div class="tool-group" data-for="live-view">
-          <button class="btn btn-2 btn-sm layer-btn" data-layer="face" data-t="live.layer.face"></button>
-          <button class="btn btn-2 btn-sm layer-btn" data-layer="mandible" data-t="live.layer.mandible"></button>
-          <button class="btn btn-2 btn-sm layer-btn" data-layer="axes" data-t="live.layer.axes"></button>
-        </div>
         <span class="cthint" id="hint"></span>
         <span class="chip chip-warn hidden" id="simChip" data-t="win.simulation"></span>
         <span class="ct-fname fit" id="where"></span>
@@ -74,13 +70,13 @@
             <div class="choices home-choices" style="--cols:2">
               <button class="choice" type="button" data-go="calibration"><span data-icon="board"></span><span class="choice-name" data-t="home.cal"></span><span class="choice-line" data-t="home.cal.sub"></span></button>
               <button class="choice" type="button" data-go="live"><span data-icon="camera"></span><span class="choice-name" data-t="home.live"></span><span class="choice-line" data-t="home.live.sub"></span></button>
-              <button class="choice" type="button" data-go="trials"><span data-icon="pendulum"></span><span class="choice-name" data-t="home.trials"></span><span class="choice-line" data-t="home.trials.sub"></span></button>
+              <button class="choice" type="button" data-go="trials"><span data-icon="trials"></span><span class="choice-name" data-t="home.trials"></span><span class="choice-line" data-t="home.trials.sub"></span></button>
               <button class="choice" type="button" data-go="results"><span data-icon="results"></span><span class="choice-name" data-t="home.scans"></span><span class="choice-line" data-t="home.scans.sub"></span></button>
             </div>
-            <div class="stcells home-cells" style="--cols:3">
+            <div class="stcells line home-cells">
               <button class="stcell" type="button" id="hsPhone" data-t-title="link.btn.hint"><span class="sd"></span><span class="stcell-l" data-t="home.st.phone"></span><span class="stcell-v"></span></button>
-              <div class="stcell" id="hsCal"><span class="sd"></span><span class="stcell-l" data-t="home.st.cal"></span><span class="stcell-v"></span></div>
-              <div class="stcell" id="hsTrial"><span class="sd"></span><span class="stcell-l" data-t="home.st.trial"></span><span class="stcell-v"></span></div>
+              <button class="stcell" type="button" id="hsCal" data-t-title="home.cal"><span class="sd"></span><span class="stcell-l" data-t="home.st.cal"></span><span class="stcell-v"></span></button>
+              <button class="stcell" type="button" id="hsTrial" data-t-title="home.trials"><span class="sd"></span><span class="stcell-l" data-t="home.st.trial"></span><span class="stcell-v"></span></button>
             </div>
           </div>
         </div>
@@ -128,9 +124,14 @@
             <div class="ph-live hidden" id="phLive"><img class="live-img" id="phLiveImg" alt=""/><div class="covl ph-live-tag hidden" id="phLiveTag"></div></div>
             <div class="ph-guide" id="phGuide">
               <div class="guide" id="phGuideFig"></div>
+              <!-- the newest photos, each a small picture with its pose; its check (kept, retake) comes on it later -->
+              <div class="ph-strip hidden" id="phStrip"></div>
               <div class="ph-last hidden" id="phLast">
-                <div class="ph-cov" id="phCov"></div>
                 <div class="ph-last-w"><span class="live-dot" id="phLastDot"></span><span class="ph-last-t" id="phLastT"></span></div>
+                <div class="ph-last-figs">
+                  <div class="ph-last-fig"><div class="ph-shot" id="phShot"><img class="hidden" alt=""/><div class="ph-shot-pts"></div></div><div class="fig-note" data-t="cal.last.photo"></div></div>
+                  <div class="ph-last-fig"><div class="ph-cov" id="phCov"></div><div class="fig-note" data-t="cal.last.all"></div></div>
+                </div>
               </div>
             </div>
           </div>
@@ -143,10 +144,12 @@
             <div class="say card" id="crCard">
               <div class="say-top"><span class="live-dot" id="crDot"></span><span class="say-title" id="crTitle"></span></div>
               <div class="say-line" id="crLine"></div>
+              <!-- what spoils it, the most serious first and in full, a cross before each -->
+              <div class="say-list hidden" id="crIssues"></div>
             </div>
             <div class="cards2 res-figs hidden" id="crFigs">
               <div class="card col"><div class="sec-lbl" data-t="cal.res.photos"></div><div class="fig" id="crBars"></div><div class="fig-note" id="crBarsNote"></div></div>
-              <div class="card col"><div class="sec-lbl" data-t="cal.res.board"></div><div class="fig" id="crMap"></div><div class="fig-note" id="crMapNote"></div></div>
+              <div class="card col"><div class="sec-lbl" data-t="cal.res.board"></div><div class="fig" id="crMap"></div><div class="fig-note" id="crMapNote"></div><div class="fig-note" id="crMapRel"></div></div>
             </div>
           </div>
         </div>
@@ -187,6 +190,7 @@
                 <div class="trial-sub" id="gSub"></div>
                 <div class="row wrap" id="gChips"></div>
               </div>
+              <button class="btn btn-2" id="gTwin" type="button" data-t-title="twin.open.hint"><span data-icon="cube"></span><span class="btn-label" data-t="twin.open"></span></button>
             </div>
             <div class="tiles" id="gTiles"></div>
             <div class="col" id="gWarn"></div>
@@ -266,6 +270,12 @@
           </div>
         </div>
 
+        <!-- ── the twin of the bench: the bench in 3D as a trial has it, from
+             the trial's page and as the Scans step (ui/18-twin.js) ───────── -->
+        <div class="view tw-view" data-view="twin">
+          <div class="tw-3d" id="tw3d"><canvas id="tw3dCanvas"></canvas><div class="covl tw-hint" data-t="board.3d.hint"></div><div class="tw-msg hidden" id="twMsg"></div></div>
+        </div>
+
         <!-- ── scans and results: the steps still to come ──────────────── -->
         <div class="view" data-view="soon">
           <div class="sheet-col">
@@ -299,7 +309,7 @@
           <button class="btn btn-2 btn-wide" id="lkWifi" data-t-title="link.wifi.hint"><span class="btn-label" data-t="link.wifi.action"></span></button>
           <!-- Wi-Fi pairing, once per PC, only when asked for -->
           <div class="stack hidden" id="lkPair">
-            <div class="sec-lbl" data-t="link.pair.sec"></div>
+            <div class="sec-lbl" data-t="link.pair.sec" data-t-title="link.pair.sec.hint"></div>
             <div class="lk-step" id="lkS1" data-t-title="link.pair.s1.hint"><span class="tn">1</span><span data-t="link.pair.s1"></span></div>
             <div class="lk-step" id="lkS2"><span class="tn">2</span><span data-t="link.pair.s2"></span></div>
             <div class="lk-step"><span class="tn" id="lkS3n">3</span><span data-t="link.pair.s3"></span></div>
@@ -315,11 +325,11 @@
             <div id="lkMore"></div>
             <button class="btn btn-2 btn-wide" id="lkWifiAgain" data-t-title="link.wifi.hint"><span class="btn-label" data-t="link.wifi.again"></span></button>
             <!-- Wi-Fi: pairing with a code, and connecting by address -->
-            <div class="sec-lbl" data-t="link.pair.code.sec"></div>
+            <div class="sec-lbl" data-t="link.pair.code.sec" data-t-title="link.pair.code.hint"></div>
             <input class="input" type="text" id="lkPairAddr" data-t-ph="link.pair.addr.ph" data-t-title="link.pair.or"/>
             <input class="input" type="text" id="lkPairCode" inputmode="numeric" maxlength="7" data-t-ph="link.pair.code.ph"/>
             <button class="btn btn-2 btn-wide" id="lkPairBtn"><span class="btn-label" data-t="link.pair.action"></span></button>
-            <div class="sec-lbl" data-t="link.connect.sec"></div>
+            <div class="sec-lbl" data-t="link.connect.sec" data-t-title="link.connect.hint"></div>
             <input class="input" type="text" id="lkAddr" data-t-ph="link.connect.ph" data-t-title="link.connect.note"/>
             <button class="btn btn-2 btn-wide" id="lkConnect"><span class="btn-label" data-t="link.connect.action"></span></button>
             <!-- another screen on the same network: off until asked for (the view then listens on the network), then
@@ -347,10 +357,12 @@
             <div class="mitem" data-kind="screen" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.screen"></span></div>
             <div class="mitem" data-kind="physical" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.physical"></span></div>
           </div>
+          <!-- which board makes a clean calibration of the photos, in one line -->
+          <div class="note" id="calBdAdvice"></div>
           <div class="stack" id="calBdScreen">
             <div id="calBdRows"></div>
             <div class="callout callout-warn hidden" id="calBdWarn"></div>
-            <div class="fold" id="calBdRuler"><button class="fold-hd" type="button"><span class="fold-name" data-t="board.ruler.sec"></span></button><div class="fold-body"><div class="stack">
+            <div class="fold" id="calBdRuler"><button class="fold-hd" type="button" data-t-title="board.ruler.hint"><span class="fold-name" data-t="board.ruler.sec"></span></button><div class="fold-body"><div class="stack">
               <div class="note" id="calBdRulerNote"></div>
               <div class="row" data-t-title="board.ruler.hint">
                 <input class="input" type="number" id="calBdRulerV" min="50" max="2000" step="0.1"/>
@@ -364,20 +376,22 @@
               <div class="mitem" data-kind="plate" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.plate"></span><span class="mbadge" data-t="board.kind.plate.badge"></span></div>
               <div class="mitem" data-kind="sheet" tabindex="0" role="button"><span class="mitem-name" data-t="board.kind.sheet"></span></div>
             </div>
-            <div class="sec-lbl" data-t="board.read.sec"></div>
-            <div class="rd-row" id="calBdLong">
+            <div class="sec-lbl" data-t="board.read.sec" data-t-title="board.read.hint"></div>
+            <div class="rd-row" id="calBdLong" data-t-title="board.read.hint">
               <input class="input" type="number" min="20" max="1000" step="0.01" data-i="0"/>
               <input class="input" type="number" min="20" max="1000" step="0.01" data-i="1"/>
               <input class="input" type="number" min="20" max="1000" step="0.01" data-i="2"/>
+              <span class="input-unit">mm</span>
             </div>
             <div id="calBdRead"></div>
             <div class="callout callout-warn hidden" id="calBdReadWarn"></div>
             <button class="btn btn-2 btn-wide" id="calBdFile"><span data-icon="open"></span><span class="btn-label" id="calBdFileL"></span></button>
-            <div class="fold" id="calBdShort"><button class="fold-hd" type="button"><span class="fold-name" data-t="board.read.short"></span></button><div class="fold-body"><div class="stack">
+            <div class="fold" id="calBdShort"><button class="fold-hd" type="button" data-t-title="board.read.short.hint"><span class="fold-name" data-t="board.read.short"></span></button><div class="fold-body"><div class="stack">
               <div class="rd-row" id="calBdShortV">
                 <input class="input" type="number" min="20" max="1000" step="0.01" data-i="0"/>
                 <input class="input" type="number" min="20" max="1000" step="0.01" data-i="1"/>
                 <input class="input" type="number" min="20" max="1000" step="0.01" data-i="2"/>
+                <span class="input-unit">mm</span>
               </div>
               <div id="calBdShortRead"></div>
               <button class="btn btn-2 btn-wide" id="calBdFolder"><span class="btn-label" data-t="board.plate.folder"></span></button>
@@ -401,6 +415,7 @@
         <div class="rp-scroll stack">
           <div class="mlist" id="calModes">
             <div class="mitem" data-mode="photo" tabindex="0" role="button"><span class="mitem-name" data-t="cal.mode.photo"></span></div>
+            <div class="mitem" data-mode="video" tabindex="0" role="button" data-t-title="cal.mode.video.hint"><span class="mitem-name" data-t="cal.mode.video"></span></div>
             <div class="mitem" data-mode="stream" tabindex="0" role="button"><span class="mitem-name" data-t="cal.mode.stream"></span></div>
           </div>
           <div class="mlist" id="calPlans">
@@ -413,9 +428,17 @@
             <div class="count-say" id="cpSay"></div>
           </div>
           <div class="callout callout-warn hidden" id="cpNote"></div>
+          <!-- what the last photo or the last calibration says to change: the camera's settings, the phone still -->
+          <div class="callout callout-warn hidden" id="calPhWarn"></div>
+          <div class="note hidden" id="calProNote" data-t="cal.pro.note"></div>
+          <!-- the photo taken by itself when the phone holds the guide's pose still: one switch, and what it waits for -->
+          <div class="stack auto-row" id="calAutoRow">
+            <label class="toggle" data-t-title="cal.auto.hint"><input type="checkbox" id="calAuto"/><span data-t="cal.auto"></span></label>
+            <div class="auto-say" id="calAutoSay"></div>
+          </div>
           <div class="fold" id="calPhAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <label class="toggle" data-t-title="cal.kind.check.hint"><input type="checkbox" id="calKind"/><span data-t="cal.kind.check"></span></label>
-            <button class="btn btn-2 btn-wide" id="calRetake"><span class="btn-label" data-t="cal.retake"></span></button>
+            <button class="btn btn-2 btn-wide" id="calRetake" data-t-title="cal.retake.hint"><span class="btn-label" data-t="cal.retake"></span></button>
             <button class="btn btn-2 btn-wide" id="calImport"><span class="btn-label" data-t="cal.photos.import"></span></button>
             <button class="btn btn-2 btn-wide" id="calOpen"><span class="btn-label" data-t="cal.photos.open"></span></button>
             <button class="btn btn-2 btn-wide" id="calNew"><span class="btn-label" data-t="cal.series.new"></span></button>
@@ -439,7 +462,10 @@
         <div class="rp-scroll stack">
           <div id="calPlain"></div>
           <div class="note hidden" id="calLeft"></div>
+          <div class="callout callout-warn hidden" id="calCorners"></div>
           <div class="fold" id="calResAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
+            <div class="sec-lbl hidden" id="calChecksL" data-t="cal.adv.sec"></div>
+            <div id="calChecks"></div>
             <div class="sec-lbl" data-t="cal.stored.sec"></div>
             <div id="calStored"></div>
             <button class="btn btn-2 btn-wide hidden" id="calLogOpen" data-t-title="cal.log.open.hint"><span data-icon="open"></span><span class="btn-label" data-t="cal.log.open"></span></button>
@@ -497,12 +523,20 @@
           <div class="rp-sub" data-t="page.live.sub"></div>
         </div>
         <div class="rp-scroll stack">
+          <!-- what is drawn over the picture: a row per element under the heading of its group, the eye saying
+               whether it is shown (written by ui/30-live.js from LIVE_LAYERS); then how solid it is drawn, on a
+               track as wide as the panel -->
           <div class="sec-lbl" data-t="live.overlay.sec"></div>
-          <div class="slrow" data-t-title="live.opacity.hint">
+          <div class="lyr-list" id="lvLayers"></div>
+          <div class="slrow wide" data-t-title="live.opacity.hint">
             <span class="sl-l" data-t="live.opacity"></span>
-            <input type="range" id="lvOpacity" min="0" max="1" step="0.05" value="0.3"/>
+            <input type="range" id="lvOpacity" min="0" max="1" step="any" data-fine="0.001" value="0.3"/>
             <span class="sl-v" id="lvOpacityV"></span>
           </div>
+          <!-- the view on the phone's own screen: how it stands in a few words, and the command -->
+          <div class="sec-lbl" data-t="view.sec"></div>
+          <div class="live-state slim"><span class="live-dot" id="lvPhDot"></span><span class="lk-word" id="lvPhWord"></span></div>
+          <button class="btn btn-2 btn-wide" id="lvPhOpen" data-t-title="view.open.hint"><span data-icon="phone"></span><span class="btn-label" data-t="view.open"></span></button>
           <div class="fold" id="lvAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <div class="sec-lbl" id="lvStatusLbl" data-t="live.status.sec"></div>
             <div id="lvStatus"></div>
@@ -530,8 +564,8 @@
           <div class="rp-sub" id="planSub"></div>
         </div>
         <div class="rp-scroll stack">
-          <div class="sec-lbl" data-t="trials.plan.mass.sec"></div>
-          <div class="row" data-t-title="trials.plan.mass.hint">
+          <div class="field" data-t-title="trials.plan.mass.hint">
+            <span class="field-n" data-t="trials.plan.mass.sec"></span>
             <input class="input" type="number" id="planMass" min="1" step="0.1"/>
             <span class="input-unit">g</span>
           </div>
@@ -583,16 +617,16 @@
             <button class="btn btn-2 btn-wide" id="stDiscard"><span class="btn-label" data-t="step.ctl.discard"></span></button>
           </div>
           <div class="stack hidden" data-kind="spheres">
-            <label class="toggle"><input type="checkbox" id="stSpheres"/><span data-t="step.ctl.spheres"></span></label>
-            <div class="sec-lbl" data-t="step.ctl.capshift.sec"></div>
-            <div class="row" data-t-title="step.ctl.capshift.hint">
+            <label class="toggle" data-t-title="step.ctl.spheres.hint"><input type="checkbox" id="stSpheres"/><span data-t="step.ctl.spheres"></span></label>
+            <div class="field" data-t-title="step.ctl.capshift.hint">
+              <span class="field-n" data-t="step.ctl.capshift.sec"></span>
               <input class="input" type="number" id="stShift" min="0" step="0.01"/>
               <span class="input-unit">mm</span>
             </div>
           </div>
           <div class="stack hidden" data-kind="close">
-            <label class="toggle"><input type="checkbox" id="stSecond"/><span data-t="step.ctl.second"></span></label>
-            <label class="toggle"><input type="checkbox" id="stCap"/><span data-t="step.ctl.cap"></span></label>
+            <label class="toggle" data-t-title="step.ctl.second.hint"><input type="checkbox" id="stSecond"/><span data-t="step.ctl.second"></span></label>
+            <label class="toggle" data-t-title="step.ctl.cap.hint"><input type="checkbox" id="stCap"/><span data-t="step.ctl.cap"></span></label>
             <div class="sec-lbl" data-t="step.ctl.notes.sec"></div>
             <textarea class="input" id="stNotes" rows="3"></textarea>
           </div>
@@ -625,7 +659,7 @@
           <div class="combo" id="lgField" tabindex="0" role="button"><span class="combo-v"></span></div>
           <input class="input" type="text" id="lgValue" data-t-ph="log.edit.value"/>
           <input class="input" type="text" id="lgReason" data-t-ph="log.edit.reason"/>
-          <button class="btn btn-2 btn-wide" id="lgSave"><span class="btn-label" data-t="log.edit.action"></span></button>
+          <button class="btn btn-2 btn-wide" id="lgSave" data-t-title="log.edit.action.hint"><span class="btn-label" data-t="log.edit.action"></span></button>
           <div class="fold" id="lgAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <div class="sec-lbl" id="lgVoidLbl" data-t="step.ctl.void.sec"></div>
             <input class="input" type="text" id="lgVoidReason" data-t-ph="step.ctl.void.ph"/>
@@ -655,34 +689,74 @@
         <div class="rp-scroll stack">
           <div class="sec-lbl" data-t="cfg.phase"></div>
           <div class="combo" id="cfgPhase" tabindex="0" role="button"><span class="combo-v"></span></div>
-          <div class="sec-lbl" data-t="cfg.holders"></div>
-          <input class="input" type="text" id="cfgHolders"/>
-          <div class="sec-lbl" data-t="cfg.angles"></div>
-          <input class="input" type="text" id="cfgAngles"/>
-          <div class="sec-lbl" data-t="cfg.directions"></div>
-          <input class="input" type="text" id="cfgDirections"/>
-          <div class="cfg-pair">
-            <div class="col"><div class="sec-lbl" data-t="cfg.repetitions"></div><input class="input" type="number" id="cfgReps" min="1" step="1"/></div>
-            <div class="col"><div class="sec-lbl" data-t="cfg.drape"></div><input class="input" type="number" id="cfgDrape" min="0" step="1"/></div>
-          </div>
+          <div class="sec-lbl" data-t="cfg.holders" data-t-title="cfg.holders.hint"></div>
+          <input class="input" type="text" id="cfgHolders" data-t-title="cfg.holders.hint"/>
+          <div class="sec-lbl" data-t="cfg.angles" data-t-title="cfg.angles.hint"></div>
+          <div class="row" data-t-title="cfg.angles.hint"><input class="input" type="text" id="cfgAngles"/><span class="input-unit">°</span></div>
+          <div class="sec-lbl" data-t="cfg.directions" data-t-title="cfg.directions.hint"></div>
+          <div class="row" data-t-title="cfg.directions.hint"><input class="input" type="text" id="cfgDirections"/><span class="input-unit">°</span></div>
+          <div class="field" data-t-title="cfg.repetitions.hint"><span class="field-n" data-t="cfg.repetitions"></span><input class="input" type="number" id="cfgReps" min="1" step="1"/></div>
+          <div class="field" data-t-title="cfg.drape.hint"><span class="field-n" data-t="cfg.drape"></span><input class="input" type="number" id="cfgDrape" min="0" step="1"/></div>
           <div class="note" id="cfgPreview"></div>
           <div class="fold" id="cfgAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <div class="sec-lbl" data-t="cfg.order"></div>
             <div class="combo" id="cfgOrder" tabindex="0" role="button"><span class="combo-v"></span></div>
-            <div class="cfg-pair">
-              <div class="col"><div class="sec-lbl" data-t="cfg.run"></div><input class="input" type="number" id="cfgRun" min="1" step="1"/></div>
-              <div class="col"><div class="sec-lbl" data-t="cfg.seed"></div><input class="input" type="number" id="cfgSeed" step="1"/></div>
-            </div>
-            <div class="cfg-pair">
-              <div class="col"><div class="sec-lbl" data-t="cfg.washers"></div><input class="input" type="number" id="cfgWashers" min="0" step="1"/></div>
-              <div class="col"><div class="sec-lbl" data-t="cfg.reposition"></div><input class="input" type="number" id="cfgRepos" min="0.1" step="0.1"/></div>
-            </div>
-            <label class="toggle"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
+            <div class="field" data-t-title="cfg.run.hint"><span class="field-n" data-t="cfg.run"></span><input class="input" type="number" id="cfgRun" min="1" step="1"/></div>
+            <div class="field" data-t-title="cfg.washers.hint"><span class="field-n" data-t="cfg.washers"></span><input class="input" type="number" id="cfgWashers" min="0" step="1"/></div>
+            <div class="field" data-t-title="cfg.reposition.hint"><span class="field-n" data-t="cfg.reposition"></span><input class="input" type="number" id="cfgRepos" min="0.1" step="0.1"/><span class="input-unit">mm</span></div>
+            <div class="sec-lbl" data-t="cfg.seed" data-t-title="cfg.seed.hint"></div>
+            <div class="row" data-t-title="cfg.seed.hint"><input class="input" type="number" id="cfgSeed" step="1"/></div>
+            <label class="toggle" data-t-title="cfg.highspeed.hint"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
           </div></div></div>
         </div>
         <div class="rp-foot">
-          <button class="btn btn-2 btn-wide" id="cfgReset"><span data-icon="reset"></span><span class="btn-label" data-t="cfg.reset"></span></button>
+          <button class="btn btn-2 btn-wide" id="cfgReset" data-t-title="cfg.reset.hint"><span data-icon="reset"></span><span class="btn-label" data-t="cfg.reset"></span></button>
           <button class="btn btn-primary btn-wide" id="cfgApply"><span class="btn-label" data-t="cfg.apply"></span></button>
+        </div>
+      </div>
+
+      <!-- the twin: dataset and network out of date, the trial (in Scans and results), the ready views, the marker
+           after the scans (its motion enlarged, the error at the targets on its scale); the model under Advanced -->
+      <div class="rp-page" data-panel="twin">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="twin.title"></div>
+          <div class="rp-sub" id="twSub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div class="callout callout-warn hidden" id="twStale"></div>
+          <div class="stack hidden" id="twPick">
+            <div class="sec-lbl" data-t="twin.trial.sec"></div>
+            <div class="combo" id="twTrial" tabindex="0" role="button"><span class="combo-v"></span></div>
+          </div>
+          <div class="stack hidden" id="twSteps">
+            <div class="sec-lbl" data-t="trials.steps.sec"></div>
+            <div class="tw-step">
+              <button class="btn btn-2 btn-sq" id="twPrev" type="button" data-t-title="word.back"><span data-icon="chevron-left"></span></button>
+              <div class="tw-step-t"><span class="tw-step-n"><span id="twStepN"></span><span class="mbadge hidden" id="twStepNow" data-t="trials.badge.now"></span></span><span class="tw-step-name" id="twStepT"></span></div>
+              <button class="btn btn-2 btn-sq" id="twNext" type="button" data-t-title="word.next"><span data-icon="chevron-right"></span></button>
+            </div>
+          </div>
+          <div class="sec-lbl" data-t="twin.views"></div>
+          <div class="tw-views" id="twViews"></div>
+          <div class="row"><span class="sec-lbl grow" data-t="twin.scan.sec"></span><span class="chip chip-warn hidden" id="twSim" data-t="twin.scan.simulated"></span><span class="chip chip-warn hidden" id="twNoCal" data-t="twin.scan.uncalibrated" data-t-title="twin.scan.uncalibrated.hint"></span></div>
+          <div class="note" id="twScanNote"></div>
+          <div class="stack hidden" id="twScan">
+            <div id="twScanRows"></div>
+            <div class="slrow wide" data-t-title="twin.scan.gain.hint">
+              <span class="sl-l" data-t="twin.scan.gain"></span>
+              <input type="range" id="twGain" min="1" max="20" step="0.01" value="1"/>
+              <span class="sl-v" id="twGainV"></span>
+            </div>
+            <div class="tw-legend"><div class="tw-ramp" id="twRamp"></div><div class="tw-ticks" id="twTicks"></div></div>
+            <div class="tw-targets" id="twTargets"></div>
+          </div>
+          <div class="fold" id="twAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
+            <div id="twModelRows"></div>
+            <button class="btn btn-2 btn-wide" id="twUpdate"><span data-icon="reset"></span><span class="btn-label" data-t="twin.adv.update"></span></button>
+          </div></div></div>
+        </div>
+        <div class="rp-foot" id="twFoot">
+          <button class="btn btn-2 btn-wide" id="twBack"><span data-icon="chevron-left"></span><span class="btn-label" data-t="twin.back"></span></button>
         </div>
       </div>
 
@@ -729,6 +803,8 @@
 <script src="ui/12-figures.js"></script>
 <script src="ui/15-board.js"></script>
 <script src="ui/17-plate3d.js"></script>
+<script src="ui/18-twin.js"></script>
+<script src="ui/19-parts.js"></script>
 <script src="ui/20-trials.js"></script>
 <script src="ui/30-live.js"></script>
 <script src="ui/40-phone.js"></script>

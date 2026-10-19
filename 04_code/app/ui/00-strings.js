@@ -68,9 +68,27 @@ function setLang(lang) {
 
 // The markup carries keys; this writes their words.
 function applyStrings(root) {
-  root.querySelectorAll('[data-t]').forEach(function (el) { el.textContent = T(el.getAttribute('data-t')); });
+  root.querySelectorAll('[data-t]').forEach(function (el) { putWords(el, T(el.getAttribute('data-t'))); });
   root.querySelectorAll('[data-t-title]').forEach(function (el) { el.title = T(el.getAttribute('data-t-title')); });
   root.querySelectorAll('[data-t-ph]').forEach(function (el) { el.placeholder = T(el.getAttribute('data-t-ph')); });
+}
+
+// The words into an element. A '›' in them (a step down a menu: "Developer options › Wireless debugging") is drawn
+// as every arrow of the app is, SlantUI's arrowhead pointing right at the size of the text, never the font's chevron.
+function putWords(el, s) {
+  if (s.indexOf('›') < 0 || typeof arrowHeadPath !== 'function') { el.textContent = s; return; }
+  el.textContent = '';
+  s.split('›').forEach(function (part, i) {
+    if (i) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 't-arrow');
+      svg.setAttribute('viewBox', '0 0 6.5 4.5');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.innerHTML = '<path d="' + arrowHeadPath([6.5, 2.25], [1, 0], 6.5) + '" fill="currentColor"/>';
+      el.append(svg);
+    }
+    el.append(document.createTextNode(part));
+  });
 }
 
 loadLang('en');

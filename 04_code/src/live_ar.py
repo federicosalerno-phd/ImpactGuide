@@ -74,7 +74,9 @@ For the app:
                                                      # the stream died, a new one
     jpeg, n = ar.next_jpeg(after=n)                  # newest composed frame
     jpeg, n, t = ar.next_frame(after=n)              # the same with the time it was composed (phone_view.py)
-    ar.status()                                      # light, corners, RMS, fps, latency, timings, sources
+    ar.status()                                      # light, corners, RMS, fps, latency, timings, sources; the
+                                                     # tremble of the face drawn and as found (tremble_px,
+                                                     # tremble_raw_px: px, the last TREMBLE_S)
     ar.configure(board=..., square_mm=..., squares=..., marker_mm=..., face=..., mandible=..., axes=...,
                  opacity=..., view_rotation=..., hide_board=...)
                                                      # opacity 0-1 of the overlay (default OPACITY);
@@ -125,6 +127,7 @@ import cv2
 import numpy as np
 
 import acquisition
+import arrowhead
 import board_tracker
 import calibrate_charuco
 import live
@@ -167,8 +170,13 @@ SOFT = {"feather_px": 0.8, "smooth_px": 2.0}   # NumPy renderer only: its hard m
                                                # blurred (display px)
 COLORS = {"face": "#F5C542", "mandible": "#E6E6EC", "corners": "#58B36B", "reprojected": "#E6E6EC",
           "hidden": "#16161A"}
-HIDE = {"margin_squares": 0.5, "shrink": 12, "dim": 0.5}   # hide_board: the area around the board, the blur and
-                                                            # dimming of a frame without its own pose
+# hide_board: the area around the board at the frame's own pose (margin_squares); a frame without its own pose shortly
+# after one (at most held_s, a missed frame or two) at the pose drawn, with the wider held_margin_squares; any other
+# frame blurred (shrink) and dimmed whole, so the board in the picture is never there to be found
+HIDE = {"margin_squares": 0.5, "held_s": 0.2, "held_margin_squares": 1.0, "shrink": 12, "dim": 0.5}
+# the tips of the board's axes (display px): the one arrowhead of every drawing (arrowhead.py), length_px long, at most
+# max_share of the axis, none on an axis shorter than min_px over max_share
+ARROW = {"length_px": 13.0, "max_share": 0.35, "min_px": 5.0, "line_px": 2}
 BOARDS = ("patient", "sheet")
 BOARD_KEYS = ("board", "square_mm", "squares", "marker_mm")    # the settings that make the board
 TRACKING = {
@@ -197,6 +205,8 @@ POLL_S = 0.2                # the threads wake at least this often (shutdown)
 WAIT_FRAME_S = 0.1          # the track thread's wait for the next frame
 START_WAIT_S = 30.0         # a start() while another is under way waits for it this long
 JOIN_S = 2.0                # shutdown(), close(): each thread is waited for this long
+TREMBLE_S = 3.0             # status()["tremble_px"]: the shake of the drawn face over this last stretch of frames,
+TREMBLE_POINTS = 40         #   on this many points of it
 MJPEG_CLIENTS = 8           # MJPEG clients served at once
 MJPEG_SOCKET_S = 10.0       # a client that stops reading is dropped after this
 
@@ -934,6 +944,7 @@ class LiveAR:
         self._tm_show = deque(maxlen=30)
         self._served = deque(maxlen=60)
         self._verdicts = deque(maxlen=90)
+        self._recent = deque(maxlen=120)  # (capture time, pose drawn, pose found) of the frames tracked: the tremble
         self._skipped = 0                 # frames tracked but not drawn (the compose thread was busy)
         self._view_k = None               # quarter turns of the composed frame (_view_quarter)
         self._cpu = deque(maxlen=40)      # (wall, process CPU time) for the load
@@ -1324,6 +1335,8 @@ class LiveAR:
             models, prepared, unrenderable = self._models, self._prepared, set(self._unrenderable)
             frame_errors, last = self._frame_errors, self._last_frame_error
             cam = self._cam[2]
+            K_now = self._cam[0]
+            recent = list(self._recent)
         now = time.perf_counter()
         if prepared:
             have = {k: k in models and k not in unrenderable for k in ("face", "mandible")}
@@ -1344,6 +1357,11 @@ class LiveAR:
         if stream is None:
             st.update({"tracked": False, "fps_stream": 0.0, "fps_ar": 0.0, "fps_pose": 0.0})
             return st
+        st["tremble_px"], st["tremble_raw_px"] = (None, None)
+        if K_now is not None and recent and setup is not None and state == RUNNING:
+            X = self._model_points(setup)
+            X = X[np.linspace(0, len(X) - 1, min(TREMBLE_POINTS, len(X))).astype(int)]
+            st["tremble_px"], st["tremble_raw_px"] = tremble(recent, X, K_now, now_t=recent[-1][0])
         s = stream.stats()
         st["fps_stream"] = round(s["fps"], 1)
         st["frames"] = s["frames"]
@@ -1612,9 +1630,10 @@ class LiveAR:
         use = res.T if (res.ok and (res.sure or not s.get("wait_sure", True))) else None
         if not s.get("smooth", True) and use is not None:
             strong = True
-        verdict = filt.measure(item.t_capture, use, strong, res.noise_px, res.noise_pos_px)
+        verdict = filt.measure(item.t_capture, use, strong, res.noise_px, res.noise_pos_px, res.noise_range_mm)
         T, vis, state = filt.pose_at(item.t_capture)
         tracked, rejected = filt.tracked, filt.counts["rejected"]   # copied here: the filter is this thread's
+        age = None if filt.t_good is None else item.t_capture - filt.t_good    # since the last pose taken
         t3 = time.perf_counter()
         # the next detection: in the box around the board, or where it was last, or in the whole frame
         if res.ok and res.box is not None:
@@ -1638,6 +1657,7 @@ class LiveAR:
             self._tracked_times.append(time.perf_counter())
             self._tm_track.append(tm)
             self._verdicts.append(verdict)
+            self._recent.append((item.t_capture, T if vis > 0 else None, use))
             self._cpu.append((time.perf_counter(), time.process_time()))
             if res.ok:
                 self._pose = (item.n, res.T)
@@ -1650,7 +1670,7 @@ class LiveAR:
                 self._skipped += 1
             self._job = {"stream": stream, "item": item, "T": T, "vis": vis, "state": state, "res": res,
                          "verdict": verdict, "K": K, "dist": dist, "cam": cam, "setup": setup, "want": want,
-                         "tracked": tracked, "rejected": rejected, "t_tracked": t3}
+                         "tracked": tracked, "rejected": rejected, "t_tracked": t3, "age": age}
             self._job_cv.notify_all()
             if self.trace is not None:
                 self.trace.append({"what": "track", "n": item.n, "t": item.t, "tc": item.t_capture, "ok": res.ok,
@@ -1659,6 +1679,7 @@ class LiveAR:
                                    "verdict": verdict, "corners": res.n, "rms_px": res.rms, "source": res.source,
                                    "reanchored": res.reanchored, "shift_px": res.shift_px, "flipped": res.flipped,
                                    "noise_px": res.noise_px, "noise_pos_px": res.noise_pos_px,
+                                   "noise_range_mm": res.noise_range_mm,
                                    "recovered": res.source == "recovered",
                                    "t_done": t3, "tm": tm, "detection": None if det is None else det.n})
 
@@ -1772,11 +1793,19 @@ class LiveAR:
             kind = "measured"
         else:
             kind = "fading" if state == "fading" else "holding"
+        hidden = None
         if want.get("hide_board"):
-            self._hide(img, T if kind == "measured" else None, Kd, dist, spec)
+            # a missed frame or two: the board covered at the pose drawn, with more margin, not the whole picture
+            # blurred (that blinks); after a longer loss the pose drawn may be off the board: blurred
+            age = job.get("age")
+            held = kind != "measured" and T is not None and age is not None and age <= HIDE["held_s"]
+            hidden = self._hide(img, T if kind == "measured" or held else None, Kd, dist, spec,
+                                HIDE["held_margin_squares"] if held else HIDE["margin_squares"])
         t2 = time.perf_counter()
         drawn, masks = {}, {}
-        alpha = want["opacity"] * vis
+        with self._lock:        # the newest opacity, not the one when this frame was tracked: a slider is seen at once
+            opacity = self._want["opacity"]
+        alpha = opacity * vis
         if T is not None and T_M_B is not None and alpha > 0:
             drawn, masks = self._draw_models(img, T @ T_M_B, Kd, dist, want, alpha, job["stream"])
         t3 = time.perf_counter()
@@ -1810,27 +1839,28 @@ class LiveAR:
             if self.trace is not None:
                 self.trace.append({"what": "shown", "n": item.n, "t": item.t, "tc": item.t_capture, "t_done": t5,
                                    "kind": kind, "state": state, "vis": vis, "T": T, "drawn": drawn, "tm": tm_show,
-                                   "size": [w, h], "view": 90 * k})
+                                   "size": [w, h], "view": 90 * k, "hidden": hidden, "opacity": opacity})
             self._frame_ready.notify_all()
 
-    def _hide(self, img, T, Kd, dist, spec):
-        """hide_board: the board's area filled with a dark flat colour at the frame's own pose T, or, without one, the
-        whole picture blurred and dimmed, in place."""
+    def _hide(self, img, T, Kd, dist, spec, margin_squares=HIDE["margin_squares"]):
+        """hide_board: the board's area, grown by margin_squares, filled with a dark flat colour at the pose T, or,
+        without one, the whole picture blurred and dimmed, in place. Returns "board" or "blurred"."""
         h, w = img.shape[:2]
         if T is not None:
             nx, ny = spec["squares"]
             sq = spec["square_mm"]
-            m = HIDE["margin_squares"] * sq
+            m = margin_squares * sq
             quad = np.array([[-m, -m, 0], [nx * sq + m, -m, 0], [nx * sq + m, ny * sq + m, 0], [-m, ny * sq + m, 0]],
                             np.float64)
             if np.all(marker_pose.transform(T, quad)[:, 2] > 1.0):
                 p = marker_pose.project(quad, T, Kd, dist)
                 if np.all(np.isfinite(p)) and np.all(np.abs(p) < 8 * max(w, h)):
                     cv2.fillConvexPoly(img, np.round(p * 16).astype(np.int32), self.colors["hidden"], cv2.LINE_AA, 4)
-                    return
+                    return "board"
         k = HIDE["shrink"]
         small = cv2.resize(img, (max(1, w // k), max(1, h // k)), interpolation=cv2.INTER_AREA)
         img[:] = cv2.convertScaleAbs(cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR), alpha=HIDE["dim"])
+        return "blurred"
 
     def _view_quarter(self, T, setup, want, stream):
         """Quarter turns (clockwise) of the composed frame so that it stands the way the phone is held, as in the
@@ -1866,14 +1896,35 @@ class LiveAR:
         if np.all(marker_pose.transform(T, ends)[:, 2] > 1.0):
             p = marker_pose.project(ends, T, Kd, dist)
             if np.all(np.isfinite(p)) and np.all(np.abs(p) < 4 * max(w, h)):
-                q = np.round(p * 16).astype(np.int32)
                 for k, c in ((1, (60, 60, 230)), (2, (60, 200, 60)), (3, (230, 120, 40))):
-                    cv2.line(img, tuple(q[0]), tuple(q[k]), c, 2, cv2.LINE_AA, 4)
+                    self._arrow(img, p[0], p[k], c)
         if res is not None and res.ok and len(res.corners):
             c = (res.corners + 0.5) * s - 0.5
             inside = (c[:, 0] >= 0) & (c[:, 1] >= 0) & (c[:, 0] < w) & (c[:, 1] < h)
             for x, y in np.round(c[inside] * 16).astype(np.int32):
                 cv2.circle(img, (int(x), int(y)), 2 * 16, self.colors["corners"], -1, cv2.LINE_AA, 4)
+
+    @staticmethod
+    def _arrow(img, a, b, colour):
+        """An axis from a to b (px of img, pixel centres at whole numbers) ending in the arrowhead of every drawing
+        (arrowhead.fill: each pixel by the share the triangle covers); the line stops inside the triangle
+        (arrowhead.inset), so the two are one shape. An axis seen nearly end on is a line with no tip."""
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        d = b - a
+        n = float(np.hypot(*d))
+        if n < 1e-6:
+            return
+        u = d / n
+        length = min(ARROW["length_px"], ARROW["max_share"] * n)
+        lw = ARROW["line_px"]
+        if length < ARROW["min_px"]:
+            cv2.line(img, tuple(np.round(a * 16).astype(int)), tuple(np.round(b * 16).astype(int)), colour, lw,
+                     cv2.LINE_AA, 4)
+            return
+        stop = b - u * arrowhead.inset(length, lw)
+        cv2.line(img, tuple(np.round(a * 16).astype(int)), tuple(np.round(stop * 16).astype(int)), colour, lw,
+                 cv2.LINE_AA, 4)
+        arrowhead.fill(img, b, u, length, colour)
 
     def _status_of(self, tracked, rejected, state, kind, vis, T, cam, spec, drawn, w, h, dw, dh, processing):
         """The status after a frame was drawn (under the lock); tracked and rejected as the track thread copied them
@@ -2128,6 +2179,40 @@ def _noise(P):
         return None
     d2 = P[1:-1] - (P[:-2] + P[2:]) / 2
     return float(np.sqrt(np.mean(np.sum(d2 ** 2, axis=-1)) / 1.5))
+
+
+def tremble(rows, X, K, seconds=TREMBLE_S, now_t=None):
+    """How much the overlay shakes from frame to frame over the last `seconds` of rows (capture time, pose drawn, pose
+    found; None where there is none): the white noise of the points X projected (second differences, as _noise), px
+    at the size of K, over runs of frames that follow each other at the stream's pace. Returns (drawn, found), each
+    rounded to 0.01 px or None with fewer than 5 frames in such runs."""
+    if not rows:
+        return None, None
+    t_end = rows[-1][0] if now_t is None else now_t
+    rows = [r for r in rows if t_end - r[0] <= seconds]
+    times = np.array([r[0] for r in rows])
+    if len(times) < 5:
+        return None, None
+    step = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
+    out = []
+    for col in (1, 2):
+        d2, frames, run = [], 0, []
+        for k, r in enumerate(rows + [(None, None, None)]):
+            T = r[col]
+            if T is not None and run and r[0] - rows[run[-1]][0] <= 1.6 * step:
+                run.append(k)
+                continue
+            if len(run) >= 3:
+                P = np.array([marker_pose.project(X, rows[j][col], K) for j in run])
+                d2.append(P[1:-1] - (P[:-2] + P[2:]) / 2)
+                frames += len(run)
+            run = [k] if T is not None else []
+        if frames < 5:
+            out.append(None)
+            continue
+        D = np.concatenate(d2)
+        out.append(round(float(np.sqrt(np.mean(np.sum(D ** 2, axis=-1)) / 1.5)), 2))
+    return out[0], out[1]
 
 
 def _jumps(P, t, floor_px=15.0, factor=5.0):
@@ -2579,6 +2664,21 @@ def run_test():
     expect(all(TRACKING[k] == v for k, v in pose_filter.DEFAULTS.items()),
            f"the filter's settings in TRACKING are pose_filter.DEFAULTS ({len(pose_filter.DEFAULTS)} values, one "
            f"source)")
+    # the tremble of the readout: a pose shaken sideways by 0.1 mm at 500 mm is 0.29 px at f 1439 px; a missing pose
+    # and a gap in time split the runs, a moving pose (no shake) gives none
+    rng = np.random.default_rng(4)
+    K_t = stream_intrinsics((1920, 1440), None)[0]
+    X_t = rng.uniform(-60, 60, (40, 3))
+
+    def shaken(k, sd):
+        T = np.eye(4)
+        T[:3, 3] = [rng.normal(0, sd) + 0.5 * k, 0.0, 500.0]
+        return T
+    rows = [(k / 30 + (0.5 if k >= 100 else 0.0), None if k == 50 else shaken(k, 0.1), shaken(k, 0.0))
+            for k in range(300)]
+    got = tremble(rows, X_t, K_t, seconds=20.0)
+    expect(got[0] is not None and abs(got[0] - 0.29) < 0.05 and got[1] is not None and got[1] < 0.01,
+           f"tremble readout: {got[0]} px for a shake of 0.29 px, {got[1]} px for a steady motion")
     # registration files: the bench frame's T_M_B read; an older ground_truth result (mandible frame), a result
     # without a head frame, a reflection and a file that is not JSON refused with bad_registration
     with tempfile.TemporaryDirectory(prefix="live_ar_reg_") as tmp:
@@ -2651,6 +2751,9 @@ def run_test():
                    f"{st.get('distance_mm')} mm)")
             expect(st.get("rms_px") is not None and st["rms_px"] < 0.5 and st["corners"] >= 8,
                    f"{board}: {st.get('corners')} of {st['board']['corners']} corners, RMS {st.get('rms_px')} px")
+            trem = (st.get("tremble_px"), st.get("tremble_raw_px"))
+            expect(all(isinstance(x, float) and 0 <= x < 5 for x in trem),
+                   f"{board}: the tremble of the face reported, {trem[0]} px drawn, {trem[1]} px as found")
             expect(st.get("drawn_px", {}).get("face", 0) > 1000 and st["registration"]["source"] == "demo",
                    f"{board}: face drawn at the demo registration ({st['registration']['demo']}), "
                    f"{st.get('drawn_px', {}).get('face', 0)} px; mandible {st.get('drawn_px', {}).get('mandible', 0)} px")

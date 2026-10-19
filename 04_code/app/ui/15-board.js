@@ -15,8 +15,11 @@
 
 const BOARD_LAYOUT_DELAY_MS = 60;   // a burst of size changes (a resize being dragged) asks for one layout
 
-// The sign of a monitor, on SlantUI's 24 grid.
-ICONS.screen = { s: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/>' };
+// The sign of this monitor with the board on it, on SlantUI's 24 grid: 5 x 3 squares of 2.4, lying across, as
+// every board sign of the app (ui/01-shell.js, ICONS.board).
+ICONS.screen = { s: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/>'
+  + '<path d="M6 6.9h2.4v2.4h-2.4zM10.8 6.9h2.4v2.4h-2.4zM15.6 6.9h2.4v2.4h-2.4zM8.4 9.3h2.4v2.4h-2.4zM13.2 9.3h2.4v2.4'
+  + 'h-2.4zM6 11.7h2.4v2.4h-2.4zM10.8 11.7h2.4v2.4h-2.4zM15.6 11.7h2.4v2.4h-2.4z" fill="currentColor" stroke="none"/>' };
 
 /** The board's controls, in Calibrate and in Live AR (ids starting with cal and lv), and the board step's stage. */
 const BOARD = {
@@ -27,6 +30,16 @@ const BOARD = {
   physical: function (kind) { return kind === 'plate' || kind === 'sheet'; },
   // a board in plain words: 11 × 8 · 20,00 mm
   line: function (b) { return b.squares[0] + ' × ' + b.squares[1] + ' · ' + BOARD.mm(b.square_mm, 2) + ' mm'; },
+  // a monitor by its name and its diagonal. Short: the model alone, without the maker's codes Windows and the EDID
+  // put before it (PHI PHL BDM4037U: BDM4037U), and its inches without a decimal when they are whole (40″); else the
+  // whole name and the inches to a tenth (PHI PHL BDM4037U · 40.0″)
+  monName: function (m, short) {
+    const words = String(m.label || '').trim().split(/\s+/).filter(Boolean);
+    while (short && words.length > 1 && /^[A-Z]{3}$/.test(words[0])) words.shift();
+    const d = Number(m.diag_in), whole = Math.abs(d - Math.round(d)) < 0.05;
+    const inch = isFinite(d) && d > 0 ? fmtNum(d, short && whole ? 0 : 1) + '″' : '';
+    return [words.join(' '), inch].filter(Boolean).join(' · ') || '-';
+  },
 
   // on this monitor: what needs doing, one short line, or nothing
   warning: function (s) {
@@ -81,8 +94,9 @@ const BOARD = {
     const lay = s.layout, m = s.mon, rows = [];
     if (lay) rows.push(piRow(T('board.f.board'), BOARD.line(lay)));
     if (m) {
-      const r = piRow(T('board.f.monitor'), (m.label || '') + (m.diag_in ? ' · ' + fmtNum(m.diag_in, 1) + '″' : ''));
-      r.title = m.px[0] + ' × ' + m.px[1] + ' · ' + Tcode('board.src.', m.source, 'none');
+      // its short name on the row, the whole one with its pixels and where its size comes from on the hint
+      const r = piRow(T('board.f.monitor'), BOARD.monName(m, true));
+      r.title = BOARD.monName(m, false) + ' · ' + m.px[0] + ' × ' + m.px[1] + ' · ' + Tcode('board.src.', m.source, 'none');
       rows.push(r);
     }
     $(p + 'BdRows').replaceChildren.apply($(p + 'BdRows'), rows);
@@ -119,6 +133,7 @@ const BOARD = {
     BOARD.fill('calBdLong', (info.readings || {}).long);
     $('calBdLong').querySelectorAll('input').forEach(function (i) { i.placeholder = BOARD.mm(nominal, 1); });
     $('calBdFileL').textContent = T(kind === 'plate' ? 'board.plate.file' : 'board.sheet.file');
+    $('calBdFile').title = T(kind === 'plate' ? 'board.plate.file.hint' : 'board.sheet.file.hint');
     $('calBdShort').classList.toggle('hidden', kind !== 'plate');
     if (kind === 'plate') {
       BOARD.fill('calBdShortV', (info.readings || {}).short);
@@ -199,7 +214,7 @@ const BOARD = {
   // A change of the board; a refusal is said in this part's own words (board.err.*) when it has them.
   set: function (change) {
     askQuiet('board_set', JSON.stringify(change), function (s, bad) {
-      if (bad) { toast(errorText(bad, 'board.err.'), TOAST_LONG_MS); return; }
+      if (bad) { toast(errorText(bad, 'board.err.'), TOAST_LONG_MS, 'error'); return; }
       BOARD.render(s);
       if (change.ruler_mm !== undefined) toast(T('board.said.corrected'), TOAST_SAID_MS);
       BOARD.pageRefresh();
@@ -262,10 +277,6 @@ const BOARD = {
     $('calBdFolder').onclick = function () { ask('plate_open', 'folder'); };
     // the ruler's fold opened or closed: the length is written on the board while it is open
     $('calBdRuler').querySelector('.fold-hd').addEventListener('click', function () { setTimeout(BOARDVIEW.label, 0); });
-    // the short side's fold: its length is drawn on the plate in 3D while it is open
-    $('calBdShort').querySelector('.fold-hd').addEventListener('click', function () {
-      setTimeout(function () { PLATE3D.short = $('calBdShort').classList.contains('open'); PLATE3D.draw(); }, 0);
-    });
   },
 };
 

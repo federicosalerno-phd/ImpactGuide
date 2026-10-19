@@ -18,6 +18,14 @@ operator can act on, never SystemExit; they report through a `log` callable
 (print when none is given); the calibration results are written in one step
 (a temporary file put in place) and never hold NaN.
 
+Besides the intrinsics, a calibration says what spoils them, as codes in
+"issues" (ISSUES): a board that is not flat (fit_shape fits it as a curved
+surface and keeps the intrinsics of that model), a phone that moved inside
+itself between the photos (the optical centre free for each photo, a diagnosis
+only), corners of the image the board never reached (coverage), photos taken
+with the camera's automatic settings (photo_settings, from the EXIF). The
+corners are refined on the photo blurred a little (refine_corners).
+
 Usage:
     python calibrate_charuco.py board [--out DIR]
         printable page: PDF at 1:1 scale and PNG
@@ -27,9 +35,10 @@ Usage:
         intrinsics from a folder of photos, compared with the truth if given
     python calibrate_charuco.py check IMAGES --intrinsics FILE [--square MM --squares NXxNY --marker MM]
         start-of-session check: are the stored intrinsics still valid?
-    python calibrate_charuco.py test [--work DIR]
-        synth + calibrate + check on synthetic photos; exit code 1 on failure. DIR must be empty, missing, or a
-        folder of an earlier test (it is emptied)
+    python calibrate_charuco.py test [--work DIR] [--real PHOTOS]
+        synth + calibrate + check on synthetic photos, then a curved board, a phone held in the hand, the corners
+        of the image, the camera's settings; exit code 1 on failure. DIR must be empty, missing, or a folder of an
+        earlier test (it is emptied). PHOTOS: real photos of a curved board taken by hand in the automatic mode
 
 Real photos go in 03_data/raw/calibration/<yyyymmdd>_<mode>/, intrinsics in
 03_data/processed/calibration/intrinsics_<mode>.json. Synthetic photos and the
@@ -53,6 +62,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+import arrowhead
 
 WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "calibration"
 BOARD = {"squares": (11, 8), "square": 24.0, "marker": 18.0, "dictionary": "DICT_5X5_100"}
@@ -92,10 +103,47 @@ CHECK_FOCAL = 0.001  # relative
 CHECK_CENTRE = 2.0  # px
 OUTLIER_FACTOR = 3.0  # a view whose error is above this many times the median is dropped...
 OUTLIER_FLOOR_PX = 0.3  # ... and above this
+# The board's shape (fit_shape): a quadratic surface, z = a u^2 + b u v + c v^2 with u, v from the board's middle in
+# SHAPE_UNIT mm, fitted with the camera and the poses after the flat solve.
+SHAPE_UNIT = 100.0      # mm
+FLAT_SAG_MM = 0.2       # a board bending more than this (peak to valley of the surface off its plane) is not flat...
+FLAT_RMS_DROP = 0.2     # ... nor one whose error falls by more than this share when its shape is fitted
+# The phone kept still (fit_shape, diagnosis only): the optical centre free for each photo, mean zero. Held in the
+# hand, the lens stabiliser (or the rolling shutter) moves it by tens of px between photos.
+STILL_CENTRE_PX = 5.0   # the centre's spread past this, and past what the noise explains: the phone moved
+STILL_CHI2_Z = 3.09     # ... past the 99.9 % quantile of chi-square
+# The corners refined on the photo blurred a little (refine_corners), at REFINE_REF px on the long side (scaled with it)
+REFINE_REF = 4096
+REFINE_SIGMA = 1.5      # px, the blur
+REFINE_WIN = 13         # px, the half side of the search window at most...
+REFINE_SHARE = 0.12     # ... and at most this share of the square's side there (a marker's edge is 1/8 of it away)
+REFINE_EPS = 0.001      # px, when to stop
+REFINE_MIN_ANGLE = 60.0  # degrees: a corner whose squares are seen with sides closer than this is not refined
+# Where the board reached in the image (coverage): a grid of COVER_GRID x COVER_GRID cells, and the four corners of
+# the image, beyond COVER_CORNER of the half diagonal from the middle. A ChArUco corner is found only with the markers
+# about it whole in the photo, so the nearest a board's corners come to a corner of the image is about a square and a
+# half inside it: at 30-40 cm about 0.84 of the way for the boards of the app (calib_guide's poses for the corners).
+COVER_GRID = 3
+COVER_CORNER = 0.80
+CELL_NAMES = (("top_left", "top", "top_right"), ("left", "centre", "right"), ("bottom_left", "bottom", "bottom_right"))
+CORNER_NAMES = ("top_left", "top_right", "bottom_right", "bottom_left")
 
 # The codes of CalibrationError, for the interface (with the values in params).
 CODES = ("board_unsupported", "board_unreadable", "no_photos", "few_photos", "photo_size_mixed",
          "intrinsics_bad", "intrinsics_size", "pose_not_found")
+# What spoils a calibration, in its "issues" (the interface names them):
+#   board_not_flat   the board is curved (a curved monitor, a sheet not glued flat): shape.sag_mm, shape.focal_shift
+#   phone_not_still  the phone moved between the photos (held in the hand): centre.spread_px
+#   corners_missing  corners of the image the board never reached: coverage.missing_corners (the model is least sure
+#                    there; advice, a calibration can still be good)
+#   camera_settings  photos taken with automatic settings: settings {photo: [SETTINGS codes]}
+ISSUES = ("board_not_flat", "phone_not_still", "corners_missing", "camera_settings")
+ISSUES_NOT_GOOD = ("board_not_flat", "phone_not_still", "camera_settings")    # never a good calibration with these
+# What photo_settings and settings_problems find wrong in the camera's settings, from the EXIF (the photo is refused
+# with the reason "settings" by check_photo): exposure or white balance automatic, the AI scene or HDR on, a zoom, and
+# against the first photo of the series another ISO, exposure time, focal length (another lens) or resolution.
+SETTINGS = ("exposure_auto", "white_balance_auto", "ai_scene", "hdr", "zoom", "iso_changed", "exposure_changed",
+            "focal_changed", "size_changed")
 
 Log = Callable[[str], None]
 
@@ -287,8 +335,12 @@ def write_board(out: Path | str, square: float, log: Log | None = None) -> Path:
     y = max(oy - 4.0, 2.0)
     for x in (ox, ox + width):
         ax.plot([x, x], [oy - 0.8, max(oy - 7.0, 0.5)], color="k", lw=0.4)
-    ax.annotate("", xy=(ox, y), xytext=(ox + width, y),
-                arrowprops=dict(arrowstyle="<->", lw=0.6, color="k", shrinkA=0, shrinkB=0))
+    # the line between the two filled arrowheads of the screen board (arrowhead.py, at their size in mm), running
+    # into each one and stopping inside it
+    stop = arrowhead.inset(arrowhead.LENGTH_MM, 0.6 * 25.4 / 72)
+    ax.plot([ox + stop, ox + width - stop], [y, y], color="k", lw=0.6, solid_capstyle="butt")
+    for tip, d in ((ox, -1), (ox + width, 1)):
+        ax.add_patch(arrowhead.patch((tip, y), (d, 0), arrowhead.LENGTH_MM, facecolor="k"))
     ax.text(ox + width / 2, y, f"measure this length: {width:g} mm at 100% ({nx} squares)",
             fontsize=6.5, ha="center", va="center", bbox=dict(fc="white", ec="none", pad=1.2))
     pdf = out / f"{stem}.pdf"
@@ -360,8 +412,35 @@ def pixel_rays(K, dist, size, rows=256):
     return rays
 
 
-def board_maps(rays, R, t, origin, ppm):
-    """remap() maps from the image pixels to the page texture."""
+def bent_z(x, bend):
+    """The board's depth (mm, + into the board) at x (mm) when it is bent as a cylinder about an axis along its y:
+    bend (radius mm, x of the middle mm), its edges toward the camera as on a curved monitor; 0 when bend is None."""
+    if not bend:
+        return np.zeros_like(x)
+    radius, middle = bend
+    return -(x - middle) ** 2 / (2 * radius)
+
+
+def board_maps(rays, R, t, origin, ppm, bend=None):
+    """remap() maps from the image pixels to the page texture; bend: the board bent as bent_z says (the texture
+    keeps its x and y, a height field), else flat."""
+    if bend:
+        # the ray s [x, y, 1] in board coordinates: o + s d; met where its z is the surface's at its x
+        Rt = R.T.astype(np.float64)
+        ox, oy, oz = (float(v) for v in -Rt @ np.asarray(t, np.float64).ravel())
+        bend = (float(bend[0]), float(bend[1]))
+        x, y = rays[..., 0], rays[..., 1]
+        dx, dy, dz = ((float(Rt[k, 0]) * x + float(Rt[k, 1]) * y + float(Rt[k, 2])).astype(np.float32)
+                      for k in range(3))
+        front = dz > 1e-9
+        dz = np.where(front, dz, np.float32(1))
+        s = -oz / dz
+        for _ in range(5):
+            s = (bent_z(ox + s * dx, bend) - oz) / dz
+        front &= s > 0
+        mx = np.where(front, (ox + s * dx + float(origin[0])) * float(ppm) - 0.5, -1e4)
+        my = np.where(front, (oy + s * dy + float(origin[1])) * float(ppm) - 0.5, -1e4)
+        return mx.astype(np.float32), my.astype(np.float32)
     # the ray [x, y, 1] meets the board plane z = 0 at [X, Y, 1] ~ inv([r1 r2 t]) [x, y, 1]
     A = np.linalg.inv(np.column_stack([R[:, 0], R[:, 1], t])).astype(np.float32)
     x, y = rays[..., 0], rays[..., 1]
@@ -374,12 +453,14 @@ def board_maps(rays, R, t, origin, ppm):
     return mx.astype(np.float32), my.astype(np.float32)
 
 
-def render(page, origin, rays, R, t, rng, ppm=TEXTURE_PPM, blur: tuple[float, float] | None = None):
+def render(page, origin, rays, R, t, rng, ppm=TEXTURE_PPM, blur: tuple[float, float] | None = None, bend=None,
+           shift=None):
     """A photo of the page at pose (R, t): (image, blur sigma px, noise sigma). blur: the (lo, hi) range the
-    defocus is drawn from (SYNTH_BLUR when None)."""
+    defocus is drawn from (SYNTH_BLUR when None); bend: the board bent (bent_z); shift: (dx, dy) px the optical
+    centre moved for this photo (the image moves with it)."""
     h, w = rays.shape[:2]
     size = (w, h)
-    mx, my = board_maps(rays, R, t, origin, ppm)
+    mx, my = board_maps(rays, R, t, origin, ppm, bend)
     paper = cv2.remap(page, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     inside = cv2.remap(np.full_like(page, 255), mx, my, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -393,6 +474,9 @@ def render(page, origin, rays, R, t, rng, ppm=TEXTURE_PPM, blur: tuple[float, fl
     gx, gy = rng.uniform(-0.25, 0.25, 2)
     uu, vv = np.meshgrid(np.linspace(-0.5, 0.5, w, dtype=np.float32), np.linspace(-0.5, 0.5, h, dtype=np.float32))
     img *= 1 + gx * uu + gy * vv
+    if shift is not None and np.any(shift):
+        img = cv2.warpAffine(img, np.float32([[1, 0, shift[0]], [0, 1, shift[1]]]), size, flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
     sigma = rng.uniform(*(blur if blur is not None else SYNTH_BLUR))
     img = cv2.GaussianBlur(img, (0, 0), sigma)
     noise = rng.uniform(*SYNTH_NOISE)
@@ -401,8 +485,10 @@ def render(page, origin, rays, R, t, rng, ppm=TEXTURE_PPM, blur: tuple[float, fl
 
 
 def synth(out, n, seed, K=SYNTH_K, dist=SYNTH_DIST, size=SYNTH_SIZE, prefix="synth", board=None,
-          log: Log | None = None):
-    """n photos of the board (the A4 one unless given) taken with the camera K, dist; truth.json beside them."""
+          log: Log | None = None, bend_radius=None, centre_sd=0.0):
+    """n photos of the board (the A4 one unless given) taken with the camera K, dist; truth.json beside them.
+    bend_radius (mm): the board bent as a curved monitor about its vertical middle line (bent_z); centre_sd (px): the
+    optical centre moved for each photo by this much (normal, each way), as a phone held in the hand."""
     out = Path(out)
     rng = np.random.default_rng(seed)
     board = board or make_board()
@@ -410,17 +496,21 @@ def synth(out, n, seed, K=SYNTH_K, dist=SYNTH_DIST, size=SYNTH_SIZE, prefix="syn
     page, origin = page_image(board, ppm)
     page = cv2.GaussianBlur(page, (0, 0), 0.6)  # anti-aliasing of the texture
     rays = pixel_rays(K, dist, size)
+    nx = board.getChessboardSize()[0]
+    bend = (float(bend_radius), nx * board.getSquareLength() / 2) if bend_radius else None
     out.mkdir(parents=True, exist_ok=True)
     views = []
     for i in range(n):
         R, t = sample_pose(rng, board, K, dist, size)
-        img, blur, noise = render(page, origin, rays, R, t, rng, ppm)
+        shift = rng.normal(0, centre_sd, 2) if centre_sd else np.zeros(2)
+        img, blur, noise = render(page, origin, rays, R, t, rng, ppm, bend=bend, shift=shift)
         name = f"{prefix}_{i:03d}.jpg"
         cv2.imwrite(str(out / name), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         views.append({"image": name, "rvec": cv2.Rodrigues(R)[0].ravel().tolist(), "tvec": t.tolist(),
-                      "blur_px": round(blur, 3), "noise_grey": round(noise, 3)})
+                      "blur_px": round(blur, 3), "noise_grey": round(noise, 3),
+                      "centre_shift_px": [round(float(v), 3) for v in shift]})
     truth = {"image_size": list(size), "K": np.asarray(K).tolist(), "dist": np.asarray(dist).tolist(), "seed": seed,
-             "views": views}
+             "bend": list(bend) if bend else None, "views": views}
     write_json_atomic(out / "truth.json", truth)
     _say(log)(f"synth: {n} photos in {out}")
 
@@ -434,11 +524,67 @@ def find_images(folder):
     return paths
 
 
-def detect(paths, board, prefer=None):
+def square_axes(obj, imgp, square):
+    """The board's two sides of a square at each corner found, as vectors in the image (px): (along x, along y), N x 2
+    each, through the homography of the corners; None when it cannot be found."""
+    obj2 = np.asarray(obj, np.float64).reshape(-1, 3)[:, :2]
+    pts = np.asarray(imgp, np.float64).reshape(-1, 2)
+    if len(pts) < 4:
+        return None
+    H, _ = cv2.findHomography(obj2, pts)
+    if H is None:
+        return None
+    one = np.ones((len(obj2), 1))
+    p, ex, ey = (np.column_stack([obj2 + off, one]) @ H.T for off in ((0, 0), (square, 0), (0, square)))
+    p, ex, ey = (q[:, :2] / q[:, 2:] for q in (p, ex, ey))
+    return ex - p, ey - p
+
+
+def refine_corners(gray, obj, imgp, square):
+    """The corners the detector found, refined with cornerSubPix on the photo blurred by REFINE_SIGMA px (at
+    REFINE_REF px on its long side, scaled with it), which evens out a screen's pixels and the sensor's noise. The
+    window's half side is REFINE_WIN px at most (scaled) and REFINE_SHARE of the square's side at that corner (of the
+    nearest corner of the four squares around it, along the image's rows or columns, when the square is seen
+    slanted), so it never reaches a marker's edge; the search stops at REFINE_EPS px. A corner whose squares are seen
+    with sides closer than REFINE_MIN_ANGLE (a grazing view: the blurred corner is then biased), whose refinement
+    fails or wanders farther than half its window, keeps the detector's place. Same shape and type as imgp."""
+    pts = np.asarray(imgp, np.float32).reshape(-1, 2)
+    axes = square_axes(obj, pts, square)
+    if axes is None:
+        return imgp
+    jx, jy = axes
+    reach = np.minimum(np.abs(jx + jy).max(1), np.abs(jx - jy).max(1))      # a square's side, as far as rows go
+    cos = np.abs(np.sum(jx * jy, 1)) / np.maximum(np.linalg.norm(jx, axis=1) * np.linalg.norm(jy, axis=1), 1e-9)
+    scale = max(gray.shape[:2]) / REFINE_REF
+    g = gray.astype(np.float32)
+    if REFINE_SIGMA * scale >= 0.3:
+        g = cv2.GaussianBlur(g, (0, 0), REFINE_SIGMA * scale)
+    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, REFINE_EPS)
+    out = pts.copy()
+    for j, (p, side) in enumerate(zip(pts, reach)):
+        if not math.isfinite(side) or cos[j] > math.cos(math.radians(REFINE_MIN_ANGLE)):
+            continue
+        win = int(min(REFINE_WIN * scale, REFINE_SHARE * side))
+        if win < 2:
+            continue
+        q = p.reshape(1, 1, 2).copy()
+        try:
+            cv2.cornerSubPix(g, q, (win, win), (-1, -1), crit)
+        except cv2.error:
+            continue
+        q = q.reshape(2)
+        if np.all(np.isfinite(q)) and np.linalg.norm(q - p) < 0.5 * win:
+            out[j] = q
+    return out.reshape(np.shape(imgp)).astype(np.asarray(imgp).dtype)
+
+
+def detect(paths, board, prefer=None, refine=True):
     """Chessboard corners of every usable photo: ({name: (object points, image points)}, [(name, why skipped)],
     image size). One camera mode per folder: the photos of the size most photos have are used (of the size `prefer`,
     (w, h), when some usable photo has it: the stored calibration's, for the session check), any other size is
-    skipped with the reason "size"; size is None when no photo can be read."""
+    skipped with the reason "size"; size is None when no photo can be read. refine: the corners refined
+    (refine_corners), photos and the frames of a film alike (calib_video refines its frames the same way, so that a
+    folder of frames calibrates as its film did)."""
     detector = cv2.aruco.CharucoDetector(board)
     found, skipped, sizes = {}, [], {}
     for p in paths:
@@ -456,7 +602,10 @@ def detect(paths, board, prefer=None):
             skipped.append((p.name, "collinear corners"))
             continue
         obj, imgp = board.matchImagePoints(corners, ids)
-        found[p.name] = (obj.astype(np.float32), imgp.astype(np.float32))
+        imgp = imgp.astype(np.float32)
+        if refine:
+            imgp = refine_corners(img, obj, imgp, board.getSquareLength())
+        found[p.name] = (obj.astype(np.float32), imgp)
     if not sizes:
         return {}, skipped, None
     count = Counter(sizes[k] for k in found) or Counter(sizes.values())
@@ -519,36 +668,306 @@ def _round(v, n=4):
     return round(v, n) if math.isfinite(v) else None
 
 
+# ── the board's shape and the phone's steadiness ─────────────────────────────
+STD_NAMES = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3")
+
+
+def _shape_terms(obj, middle):
+    """u^2, u v, v^2 of each board point, u and v from the board's middle in SHAPE_UNIT mm."""
+    P = np.asarray(obj, np.float64).reshape(-1, 3)
+    u = (P[:, 0] - middle[0]) / SHAPE_UNIT
+    v = (P[:, 1] - middle[1]) / SHAPE_UNIT
+    return np.column_stack([u * u, u * v, v * v])
+
+
+def board_surface(obj, shape):
+    """The board's points on its fitted surface (fit_shape's result; unchanged when None or flat), same type."""
+    obj = np.asarray(obj)
+    if not shape or shape.get("flat", True) or not shape.get("coef_mm"):
+        return obj
+    P = obj.astype(np.float64).reshape(-1, 3).copy()
+    P[:, 2] += _shape_terms(P, shape["middle_mm"]) @ np.asarray(shape["coef_mm"], np.float64)
+    return P.reshape(obj.shape).astype(obj.dtype)
+
+
+def _sag(coef, extent, middle, n=21):
+    """Peak to valley (mm) of the quadratic surface off its best plane, over the board's extent."""
+    X, Y = np.meshgrid(np.linspace(*extent[0], n), np.linspace(*extent[1], n))
+    P = np.column_stack([X.ravel(), Y.ravel(), np.zeros(X.size)])
+    z = _shape_terms(P, middle) @ np.asarray(coef, np.float64)
+    A = np.column_stack([np.ones(X.size), X.ravel(), Y.ravel()])
+    dev = z - A @ np.linalg.lstsq(A, z, rcond=None)[0]
+    return float(dev.max() - dev.min())
+
+
+def _lm(fun, jac, x, iters=100):
+    """Levenberg-Marquardt on the normal equations with Marquardt's scaling: (x, jacobian at x)."""
+    r = fun(x)
+    cost, J, lam = float(r @ r), jac(x), 1e-4
+    for _ in range(iters):
+        A, g = J.T @ J, J.T @ r
+        D = np.diag(A).copy()
+        D[D <= 0] = 1.0
+        while True:
+            try:
+                step = np.linalg.solve(A + lam * np.diag(D), -g)
+            except np.linalg.LinAlgError:
+                step = None
+            if step is not None and np.all(np.isfinite(step)):
+                x1 = x + step
+                r1 = fun(x1)
+                c1 = float(r1 @ r1)
+                if math.isfinite(c1) and c1 <= cost:
+                    break
+            lam *= 10
+            if lam > 1e10:
+                return x, J
+        done = cost - c1 <= 1e-12 * cost
+        x, r, cost, J = x1, r1, c1, jac(x1)
+        lam = max(lam / 10, 1e-9)
+        if done:
+            break
+    return x, J
+
+
+def _bundle(obj, img, K, dist, poses, middle, shape=True, free_centre=False):
+    """Bundle adjustment of the camera (fx, fy, cx, cy, 5 distortion coefficients), the pose of each view, with the
+    board's quadratic shape (3 numbers) and the optical centre of each view (2 numbers each, mean zero) when asked.
+    obj, img: lists of N x 3, N x 2; poses: [(rvec, tvec)]. Jacobian from projectPoints (the board point's depth
+    through the translation's: d(uv)/dP = d(uv)/dt R)."""
+    nv = len(obj)
+    i_pose, i_shape = 9, 9 + 6 * nv
+    i_cen = i_shape + (3 if shape else 0)
+    npar = i_cen + (2 * nv if free_centre else 0)
+    x0 = np.zeros(npar)
+    x0[:4] = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    d0 = np.zeros(5)
+    d = np.asarray(dist, np.float64).ravel()[:5]
+    d0[:len(d)] = d
+    x0[4:9] = d0
+    for k, (r, t) in enumerate(poses):
+        x0[i_pose + 6 * k:i_pose + 6 * k + 6] = np.r_[np.ravel(r), np.ravel(t)]
+    obj = [np.asarray(o, np.float64).reshape(-1, 3) for o in obj]
+    img = [np.asarray(i, np.float64).reshape(-1, 2) for i in img]
+    terms = [_shape_terms(o, middle) for o in obj]
+    rows = np.cumsum([0] + [2 * len(o) for o in obj])
+    m = int(rows[-1]) + (2 if free_centre else 0)
+    w_mean = 100.0          # weight of the centres' mean (px) held at zero
+
+    def project(k, x):
+        Kc = np.array([[x[0], 0, x[2]], [0, x[1], x[3]], [0, 0, 1.0]])
+        if free_centre:
+            Kc[0, 2] += x[i_cen + 2 * k]
+            Kc[1, 2] += x[i_cen + 2 * k + 1]
+        P = obj[k]
+        if shape:
+            P = P.copy()
+            P[:, 2] += terms[k] @ x[i_shape:i_shape + 3]
+        p = x[i_pose + 6 * k:i_pose + 6 * k + 6]
+        uv, J = cv2.projectPoints(P, p[:3], p[3:], Kc, x[4:9])
+        return uv.reshape(-1, 2), J
+
+    def fun(x):
+        r = np.empty(m)
+        for k in range(nv):
+            r[rows[k]:rows[k + 1]] = (project(k, x)[0] - img[k]).ravel()
+        if free_centre:
+            r[rows[-1]:] = w_mean * x[i_cen:].reshape(-1, 2).mean(0)
+        return r
+
+    def jac(x):
+        J = np.zeros((m, npar))
+        for k in range(nv):
+            _, Jp = project(k, x)
+            sl = slice(rows[k], rows[k + 1])
+            J[sl, 0:4] = Jp[:, 6:10]
+            J[sl, 4:9] = Jp[:, 10:15]
+            J[sl, i_pose + 6 * k:i_pose + 6 * k + 6] = Jp[:, 0:6]
+            if shape:
+                R = cv2.Rodrigues(x[i_pose + 6 * k:i_pose + 6 * k + 3])[0]
+                J[sl, i_shape:i_shape + 3] = (Jp[:, 3:6] @ R[:, 2])[:, None] * np.repeat(terms[k], 2, axis=0)
+            if free_centre:
+                J[sl, i_cen + 2 * k:i_cen + 2 * k + 2] = Jp[:, 8:10]
+        if free_centre:
+            J[rows[-1], i_cen::2] = w_mean / nv
+            J[rows[-1] + 1, i_cen + 1::2] = w_mean / nv
+        return J
+
+    x, J = _lm(fun, jac, x0)
+    per = [project(k, x)[0] - img[k] for k in range(nv)]
+    allr = np.concatenate(per)
+    n_res = allr.size
+    s2 = float(np.sum(allr ** 2)) / max(n_res - npar + (2 if free_centre else 0), 1)
+    sd = np.sqrt(np.abs(np.diag(np.linalg.pinv(J.T @ J)))) * math.sqrt(s2)
+    return {"rms": float(np.sqrt(np.mean(np.sum(allr ** 2, 1)))),
+            "K": np.array([[x[0], 0, x[2]], [0, x[1], x[3]], [0, 0, 1.0]]), "dist": x[4:9].copy(), "sd": sd[:9],
+            "shape": x[i_shape:i_shape + 3].copy() if shape else np.zeros(3),
+            "centres": x[i_cen:].reshape(-1, 2).copy() if free_centre else None,
+            "sd_centres": sd[i_cen:].reshape(-1, 2) if free_centre else None,
+            "poses": [(x[i_pose + 6 * k:i_pose + 6 * k + 3].reshape(3, 1).copy(),
+                       x[i_pose + 6 * k + 3:i_pose + 6 * k + 6].reshape(3, 1).copy()) for k in range(nv)],
+            "per_view": [float(np.sqrt(np.mean(np.sum(r ** 2, 1)))) for r in per]}
+
+
+def _chi2_quantile(dof, z=STILL_CHI2_Z):
+    """The chi-square quantile at the normal quantile z (Wilson and Hilferty)."""
+    k = max(int(dof), 1)
+    return k * (1 - 2 / (9 * k) + z * math.sqrt(2 / (9 * k))) ** 3
+
+
+def fit_shape(views, size, K, dist, poses, square=None, centre=True):
+    """After the flat solve, the board as a quadratic surface (z = a u^2 + b u v + c v^2, u and v from its middle in
+    SHAPE_UNIT mm) fitted with the camera and the poses. The board is not flat ("flat" false) when the surface bends
+    more than FLAT_SAG_MM over the board (peak to valley off its plane: on a curved monitor the sagitta, width^2 /
+    (8 radius)) or the error falls by more than FLAT_RMS_DROP with it; then the intrinsics of this model are the ones
+    to keep. square (mm): the board reaches one square beyond its outer corners (else the corners' extent is used).
+
+    centre: then, as a diagnosis only, the optical centre free for each photo (mean zero) on top of the shape: a phone
+    held in the hand moves it (lens stabiliser, rolling shutter). Its spread (px) is the RMS of the offsets with the
+    part the noise explains taken away (each offset weighed by its precision); "still" is false when it is above
+    STILL_CENTRE_PX and the offsets are beyond chance (chi-square past its 99.9 % quantile).
+
+    Returns {"flat", "sag_mm", "rms_flat_px", "rms_shape_px", "drop" (share), "focal_shift" (relative change of the
+    focal length from the flat model), "coef_mm", "middle_mm", "extent_mm", "K", "dist", "std" {fx ... k3},
+    "per_view_rms_px", "centre" (None, or {"spread_px", "max_px", "rms_px", "chi2", "dof", "still", "per_view_px"}),
+    "_poses" {name: (rvec, tvec)} of the shape model}; with "fitted" false (and flat) when the fit could not be
+    made."""
+    names = list(views)
+    obj = [np.asarray(views[n][0], np.float64).reshape(-1, 3) for n in names]
+    img = [np.asarray(views[n][1], np.float64).reshape(-1, 2) for n in names]
+    K, dist = np.asarray(K, np.float64), np.asarray(dist, np.float64).ravel()
+    sq_flat = sum(float(np.sum(view_rms((o, i), K, dist, poses[n])[1] ** 2)) for n, o, i in zip(names, obj, img))
+    npts = sum(len(o) for o in obj)
+    rms_flat = math.sqrt(sq_flat / max(npts, 1))
+    allp = np.vstack(obj)
+    pad = float(square) if square else 0.0
+    extent = [[float(allp[:, 0].min() - pad), float(allp[:, 0].max() + pad)],
+              [float(allp[:, 1].min() - pad), float(allp[:, 1].max() + pad)]]
+    middle = [float(np.mean(extent[0])), float(np.mean(extent[1]))]
+    out = {"fitted": False, "flat": True, "sag_mm": None, "rms_flat_px": round(rms_flat, 4), "rms_shape_px": None,
+           "drop": None, "focal_shift": None, "coef_mm": None, "middle_mm": [round(v, 3) for v in middle],
+           "extent_mm": [[round(v, 3) for v in e] for e in extent], "centre": None}
+    try:
+        q = _bundle(obj, img, K, dist, [poses[n] for n in names], middle, shape=True)
+    except (cv2.error, np.linalg.LinAlgError, ValueError):
+        return out
+    if not (math.isfinite(q["rms"]) and q["rms"] <= rms_flat + 1e-9):
+        return out
+    sag = _sag(q["shape"], extent, middle)
+    drop = 1 - q["rms"] / rms_flat if rms_flat > 0 else 0.0
+    f_flat, f_shape = (K[0, 0] + K[1, 1]) / 2, (q["K"][0, 0] + q["K"][1, 1]) / 2
+    out.update({"fitted": True, "flat": not (sag > FLAT_SAG_MM or drop > FLAT_RMS_DROP), "sag_mm": round(sag, 4),
+                "rms_shape_px": round(q["rms"], 4), "drop": round(drop, 4),
+                "focal_shift": round(float(f_shape / f_flat - 1), 6),
+                "coef_mm": [round(float(c), 6) for c in q["shape"]], "K": q["K"].tolist(), "dist": q["dist"].tolist(),
+                "std": {k: _round(s) for k, s in zip(STD_NAMES, q["sd"])},
+                "per_view_rms_px": {n: _round(e) for n, e in zip(names, q["per_view"])},
+                "_poses": dict(zip(names, q["poses"]))})
+    if not centre or len(names) < 3:
+        return out
+    try:
+        c = _bundle(obj, img, q["K"], q["dist"], q["poses"], middle, shape=True, free_centre=True)
+    except (cv2.error, np.linalg.LinAlgError, ValueError):
+        return out
+    off, sd = c["centres"], c["sd_centres"]
+    var = np.sum(sd ** 2, 1)
+    ok = np.isfinite(var) & (var > 0) & np.all(np.isfinite(off), 1)
+    if ok.sum() < 3:
+        return out
+    n2, var = np.sum(off[ok] ** 2, 1), var[ok]
+    w = 1 / var
+    spread = math.sqrt(max(0.0, float(np.sum(w * (n2 - var)) / np.sum(w))))
+    chi2 = float(np.sum((off[ok] / sd[ok]) ** 2))
+    dof = 2 * (int(ok.sum()) - 1)
+    out["centre"] = {"spread_px": round(spread, 3), "max_px": round(float(np.sqrt(n2.max())), 3),
+                     "rms_px": round(c["rms"], 4), "chi2": round(chi2, 2), "dof": dof,
+                     "still": not (spread > STILL_CENTRE_PX and chi2 > _chi2_quantile(dof)),
+                     "per_view_px": {n: [round(float(a), 2), round(float(b), 2)] for n, (a, b) in zip(names, off)}}
+    return out
+
+
+def coverage(points, size):
+    """Where in the image the board's corners fell: points, a list of N x 2 arrays (px; one per photo) or one array.
+    {"cells": COVER_GRID x COVER_GRID counts (rows from the top), "corners": {name: count} of the four corners of the
+    image (beyond COVER_CORNER of the half diagonal, CORNER_NAMES), "missing_cells", "missing_corners": the names
+    (CELL_NAMES, CORNER_NAMES) with none, "reach": the farthest point as a share of the half diagonal}."""
+    w, h = size
+    if isinstance(points, np.ndarray):
+        points = [points]
+    arrs = [np.asarray(p, np.float64).reshape(-1, 2) for p in points]
+    pts = np.vstack(arrs) if arrs else np.zeros((0, 2))
+    n = COVER_GRID
+    cells = np.zeros((n, n), int)
+    np.add.at(cells, (np.clip((pts[:, 1] / h * n).astype(int), 0, n - 1),
+                      np.clip((pts[:, 0] / w * n).astype(int), 0, n - 1)), 1)
+    cx, cy = (w - 1) / 2, (h - 1) / 2
+    r = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) / math.hypot(cx, cy)
+    far = r > COVER_CORNER
+    left, top = pts[:, 0] < cx, pts[:, 1] < cy
+    corners = {"top_left": far & left & top, "top_right": far & ~left & top, "bottom_right": far & ~left & ~top,
+               "bottom_left": far & left & ~top}
+    corners = {k: int(np.sum(corners[k])) for k in CORNER_NAMES}
+    names = CELL_NAMES if n == 3 else [[f"r{i}c{j}" for j in range(n)] for i in range(n)]
+    return {"cells": cells.tolist(), "corners": corners,
+            "missing_cells": [names[i][j] for i in range(n) for j in range(n) if not cells[i, j]],
+            "missing_corners": [k for k in CORNER_NAMES if not corners[k]],
+            "reach": round(float(r.max()), 3) if len(r) else 0.0}
+
+
 def calibrate(views, size, exclude=(), square=None):
     """Calibrate on the views but the excluded ones (chosen by hand), drop the views with an error above 3 times the
     median, calibrate again. With square (mm), where on the board the error is (corner_residuals). Every view, used
     or not, gets its error under the final model (per_view_all_px: PnP for those left out). Raises CalibrationError
-    few_photos with fewer than MIN_VIEWS usable photos."""
+    few_photos with fewer than MIN_VIEWS usable photos.
+
+    After each flat solve fit_shape fits the board's shape: a board that is not flat keeps the intrinsics, errors and
+    poses of the model with its shape (rms_px is then that model's, rms_flat_px the flat one's) and its errors
+    choose the views dropped. The result also holds "shape" (fit_shape: sag_mm, rms_flat_px, rms_shape_px, drop,
+    focal_shift ...), "centre" (the optical centre free for each photo: spread_px, still ...), "coverage" (where the
+    board reached in the image, coverage()) and "issues" (codes of ISSUES)."""
     exclude = sorted(set(exclude) & set(views))
     use = {k: v for k, v in views.items() if k not in exclude}
     if len(use) < MIN_VIEWS:
         raise CalibrationError("few_photos", f"only {len(use)} usable photos, at least {MIN_VIEWS} needed",
                                n=len(use), need=MIN_VIEWS)
     rms, K, dist, std, per_view, poses = solve(use, size)
-    limit = max(OUTLIER_FACTOR * float(np.median(list(per_view.values()))), OUTLIER_FLOOR_PX)
-    dropped = sorted(k for k, e in per_view.items() if e > limit)
+    shape = fit_shape(use, size, K, dist, poses, square, centre=False)
+    errs = per_view if shape["flat"] else shape["per_view_rms_px"]
+    limit = max(OUTLIER_FACTOR * float(np.median(list(errs.values()))), OUTLIER_FLOOR_PX)
+    dropped = sorted(k for k, e in errs.items() if e > limit)
     if dropped and len(use) - len(dropped) >= MIN_VIEWS:
         use = {k: v for k, v in use.items() if k not in dropped}
         rms, K, dist, std, per_view, poses = solve(use, size)
     else:
         dropped = []
-    every = {k: (float(per_view[k]) if k in per_view else view_rms(v, K, dist)[0]) for k, v in views.items()}
+    shape = fit_shape(use, size, K, dist, poses, square)
+    shape_poses = shape.pop("_poses", None)
+    std = {k: _round(s) for k, s in zip(STD_NAMES, std)}
+    if not shape["flat"]:
+        K, dist, std = np.array(shape["K"]), np.array(shape["dist"]), shape["std"]
+        per_view, rms, poses = shape["per_view_rms_px"], shape["rms_shape_px"], shape_poses
+    for k in ("K", "dist", "std", "per_view_rms_px"):
+        shape.pop(k, None)
+    on = {k: (board_surface(v[0], shape), v[1]) for k, v in views.items()}      # the board's points as fitted
+    every = {k: (float(per_view[k]) if per_view.get(k) is not None else view_rms(v, K, dist)[0])
+             for k, v in on.items()}
+    centre = shape.pop("centre")
+    cover = coverage([v[1] for v in use.values()], size)
+    issues = [code for code, bad in (("board_not_flat", not shape["flat"]),
+                                     ("phone_not_still", centre is not None and not centre["still"]),
+                                     ("corners_missing", bool(cover["missing_corners"]))) if bad]
     out = {
-        "image_size": list(size), "K": K.tolist(), "dist": dist.tolist(),
-        "rms_px": round(float(rms), 4), "n_views": len(use),
+        "image_size": list(size), "K": np.asarray(K).tolist(), "dist": np.asarray(dist).ravel().tolist(),
+        "rms_px": round(float(rms), 4), "rms_flat_px": shape["rms_flat_px"], "n_views": len(use),
         "n_corners": int(sum(len(v[0]) for v in use.values())),
-        "std": {k: _round(s) for k, s in zip(["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3"], std)},
+        "std": std,
         "per_view_rms_px": {k: _round(e) for k, e in per_view.items()},
         "per_view_all_px": {k: _round(e) for k, e in sorted(every.items())},
         "dropped": dropped, "excluded": exclude, "limit_px": round(limit, 4),
+        "shape": shape, "centre": centre, "coverage": cover, "issues": issues,
     }
     if square:
-        out["residuals"] = corner_residuals(use, poses, K, dist, float(square))
+        out["residuals"] = corner_residuals({k: on[k] for k in use}, poses, K, dist, float(square))
     return out
 
 
@@ -643,16 +1062,102 @@ def blur_limit(long_side):
     return max(BLUR_MIN_PX, BLUR_PX * long_side / max(SYNTH_SIZE))
 
 
-def check_photo(path, board, size=None):
+# ── the camera's settings, from the EXIF ─────────────────────────────────────
+EXIF_IFD = 0x8769
+MAKER_JSON = 0x9999     # Xiaomi's camera notes, JSON: Hdr, AIScene, zoomMultiple, OpMode
+
+
+def _num(v):
+    """A number of the EXIF (int, float, rational, or the first of a tuple), or None."""
+    if isinstance(v, (tuple, list)):
+        v = v[0] if v else None
+    try:
+        v = float(v)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def photo_settings(path):
+    """The camera's settings of a photo, from its EXIF (Pillow): {"known": false} when it has none (a synthetic photo,
+    a frame of a film), else {"known": true, "program" (ExposureProgram: 1 manual, 2 automatic ...), "white_balance"
+    (0 automatic, 1 manual), "iso", "exposure_s", "focal_mm", "zoom" (the camera notes' zoomMultiple, else
+    DigitalZoomRatio), "ai_scene" (0 off), "hdr" ("off" ...), "mode" (the camera notes' OpMode), "gain_map" (an Ultra
+    HDR JPEG: kept as information, the photo itself is the plain one), "pixels" (width x height), "model"}; a value
+    the photo does not carry is None."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            ex = im.getexif()
+            e = ex.get_ifd(EXIF_IFD)
+            pixels = int(im.size[0] * im.size[1])
+            xmp = im.info.get("xmp") or b""
+    except Exception:           # any file Pillow cannot read: nothing known (OpenCV judges the photo itself)
+        return {"known": False}
+    if not e:
+        return {"known": False}
+    notes = {}
+    raw = e.get(MAKER_JSON) or ex.get(MAKER_JSON)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    if isinstance(raw, str):
+        with contextlib.suppress(ValueError):
+            got = json.loads(raw.strip("\x00 "))
+            notes = got if isinstance(got, dict) else {}
+    zoom = _num(notes.get("zoomMultiple"))
+    if zoom is None:
+        zoom = _num(e.get(41988))           # DigitalZoomRatio, 0 when not used
+        zoom = 1.0 if zoom == 0 else zoom
+    program, wb, ai = _num(e.get(34850)), _num(e.get(41987)), _num(notes.get("AIScene"))
+    hdr = notes.get("Hdr")
+    model = ex.get(272)
+    return {"known": True, "program": None if program is None else int(program),
+            "white_balance": None if wb is None else int(wb), "iso": _num(e.get(34855)),
+            "exposure_s": _num(e.get(33434)), "focal_mm": _num(e.get(37386)), "zoom": zoom,
+            "ai_scene": None if ai is None else int(ai), "hdr": None if hdr is None else str(hdr),
+            "mode": notes.get("OpMode"), "gain_map": (b"GainMap" if isinstance(xmp, bytes) else "GainMap") in xmp,
+            "pixels": pixels, "model": str(model).strip("\x00 ") if model else None}
+
+
+def settings_problems(s, first=None):
+    """What is wrong in a photo's settings (photo_settings) for a calibration, as codes of SETTINGS: exposure or white
+    balance automatic, the AI scene, HDR or a zoom on; against the first photo of the series (its settings, when
+    given) another ISO, exposure time, focal length or resolution. Nothing when the EXIF is not known."""
+    if not s or not s.get("known"):
+        return []
+    out = []
+    if s.get("program") is not None and s["program"] != 1:
+        out.append("exposure_auto")
+    if s.get("white_balance") is not None and s["white_balance"] != 1:
+        out.append("white_balance_auto")
+    if s.get("ai_scene"):
+        out.append("ai_scene")
+    if s.get("hdr") is not None and s["hdr"].strip().lower() not in ("off", "0", "false", ""):
+        out.append("hdr")
+    if s.get("zoom") is not None and abs(s["zoom"] - 1) > 0.01:
+        out.append("zoom")
+    f = first if first and first.get("known") else None
+    if f:
+        for key, code, rel in (("iso", "iso_changed", 0.0), ("exposure_s", "exposure_changed", 0.01),
+                               ("focal_mm", "focal_changed", 0.002), ("pixels", "size_changed", 0.0)):
+            a, b = s.get(key), f.get(key)
+            if a is not None and b is not None and abs(a - b) > rel * abs(b) + 1e-9:
+                out.append(code)
+    return out
+
+
+def check_photo(path, board, size=None, first=None):
     """The check of one photo as it arrives: can it go into the calibration? {"ok", "why" (none: no board found,
     few: fewer than MIN_CORNERS corners or all on one line ("collinear" then true), size: another size than the
-    photos before it (the phone held another way), blur: blurred past blur_limit, or its sharpness could not be
-    measured on any corner, unreadable), "corners", "of", "blur_px", "size", "points" (where the corners are,
-    fractions of the width and height, at most 120)}."""
+    photos before it (the phone held another way), settings: the camera not set by hand (settings_problems; first:
+    the first photo of the series, its path or its photo_settings, for what must not change), blur: blurred past
+    blur_limit, or its sharpness could not be measured on any corner, unreadable), "corners", "of", "blur_px", "size",
+    "points" (where the corners are, fractions of the width and height, at most 120), "coverage" (where the corners
+    fell, coverage(); None without corners), "settings" (photo_settings with "problems": the codes)}."""
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     nx, ny = board.getChessboardSize()
     out = {"ok": False, "why": "", "corners": 0, "of": (nx - 1) * (ny - 1), "blur_px": None, "size": None,
-           "points": []}
+           "points": [], "coverage": None, "settings": None}
     if img is None:
         out["why"] = "unreadable"
         return out
@@ -661,6 +1166,22 @@ def check_photo(path, board, size=None):
     if size and list(size) != [w, h]:
         out["why"] = "size"
         return out
+    settings = photo_settings(path)
+    if isinstance(first, (str, os.PathLike)):
+        first = photo_settings(first)
+    problems = settings_problems(settings, first)
+    out["settings"] = {**settings, "problems": problems}
+    out["why"] = _board_why(img, board, out)
+    if problems:
+        out["why"] = "settings"
+    out["ok"] = not out["why"]
+    return out
+
+
+def _board_why(img, board, out):
+    """check_photo's judgement of the board in a photo (none, blur, few or ""), filling corners, points, coverage,
+    collinear and blur_px of out."""
+    h, w = img.shape[:2]
     corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(img)
     n = 0 if ids is None else len(ids)
     out["corners"] = n
@@ -668,9 +1189,9 @@ def check_photo(path, board, size=None):
         pts = corners.reshape(-1, 2)
         k = np.linspace(0, n - 1, min(n, 120)).astype(int)
         out["points"] = [[round(float(x / w), 4), round(float(y / h), 4)] for x, y in pts[k]]
+        out["coverage"] = coverage([pts], (w, h))
     if n == 0:
-        out["why"] = "none"
-        return out
+        return "none"
     collinear = bool(board.checkCharucoCornersCollinear(ids))
     out["collinear"] = collinear
     if n >= 4 and not collinear:        # blurred is said before few: a blur also loses corners
@@ -680,13 +1201,10 @@ def check_photo(path, board, size=None):
         # a blur that could not be measured (every patch at the border or without contrast) is never said as a
         # blur: the photo is judged by its corners below, which a real blur loses
         if math.isfinite(b) and b > blur_limit(max(w, h)):
-            out["why"] = "blur"
-            return out
+            return "blur"
     if n < MIN_CORNERS or collinear:
-        out["why"] = "few"
-        return out
-    out["ok"] = True
-    return out
+        return "few"
+    return ""
 
 
 def model_difference(K1, d1, K2, d2, size, step=32):
@@ -730,6 +1248,21 @@ def summary(cal, skipped, log: Log | None = None):
         say(f"dropped {name}: per-view error above 3 times the median")
     for name in cal.get("excluded", []):
         say(f"left out {name}: chosen by hand")
+    sh, ce, co = cal.get("shape") or {}, cal.get("centre"), cal.get("coverage")
+    if sh.get("fitted"):
+        say(f"board shape: bends {sh['sag_mm']:.2f} mm; RMS flat {sh['rms_flat_px']:.3f} px, with the shape "
+            f"{sh['rms_shape_px']:.3f} px; focal length {100 * sh['focal_shift']:+.2f} % with the shape"
+            + ("" if sh["flat"] else "  NOT FLAT: the intrinsics of the curved board are kept"))
+    if ce:
+        say(f"optical centre free for each photo: RMS {ce['rms_px']:.3f} px, the centre spreads {ce['spread_px']:.1f} "
+            f"px (at most {ce['max_px']:.1f} px)" + ("" if ce["still"] else "  THE PHONE MOVED"))
+    if co:
+        say(f"the board reached {100 * co['reach']:.0f} % of the way to the image's corners"
+            + (f"; never in the corners {', '.join(co['missing_corners'])}" if co["missing_corners"] else ""))
+    for name, codes in (cal.get("settings") or {}).items():
+        say(f"settings of {name}: {', '.join(codes)}")
+    if cal.get("issues"):
+        say("issues: " + ", ".join(cal["issues"]))
 
 
 def print_compare(c, log: Log | None = None):
@@ -747,14 +1280,26 @@ def _read_json(path, code):
 
 def run_calibrate(images, out, truth, square, squares=None, marker=None, exclude=(), log: Log | None = None):
     """Calibrates on the photos of a folder (CalibrationError no_photos, few_photos); with `out` the result is written
-    there in one step; with `truth` it is compared with it. Reports through `log` (print when None)."""
+    there in one step; with `truth` it is compared with it. Reports through `log` (print when None). "settings":
+    {photo: codes of SETTINGS} of the photos used whose camera settings are wrong (against the first one used for
+    what must not change), and then the issue camera_settings."""
     board = make_board(square, squares, marker)
-    views, skipped, size = detect(find_images(images), board)
+    paths = find_images(images)
+    views, skipped, size = detect(paths, board)
     if size is None:
         raise CalibrationError("few_photos", "no photo can be read", n=0, need=MIN_VIEWS)
     cal = calibrate(views, size, exclude, board.getSquareLength())
+    wrong, first = {}, None
+    for p in paths:
+        if p.name in cal["per_view_rms_px"]:
+            s = photo_settings(p)
+            first = first or (s if s.get("known") else None)
+            if problems := settings_problems(s, first):
+                wrong[p.name] = problems
+    if wrong:
+        cal["issues"].append("camera_settings")
     cal = {"images": str(Path(images)), "date": date.today().isoformat(), "board": board_spec(board),
-           "skipped": dict(skipped), **cal}
+           "skipped": dict(skipped), **cal, "settings": wrong}
     summary(cal, skipped, log)
     if truth:
         cal["error"] = compare(cal, _read_json(truth, "intrinsics_bad"))
@@ -837,9 +1382,10 @@ def _raises(fn, code):
     return False
 
 
-def run_test(work):
+def run_test(work, real=None):
     """Synthetic end-to-end test: 40 calibration photos, then two session checks; then the failures a library must
-    report as codes, never by leaving the process."""
+    report as codes, never by leaving the process; then what spoils a calibration (test_quality; real: a folder of
+    photos known to be of a curved board, taken by hand in the automatic mode)."""
     try:
         work = test_folder(work)
     except ValueError as e:
@@ -863,6 +1409,7 @@ def run_test(work):
     moved = run_check(work / "check_refocused", work / "synth_intrinsics.json", BOARD["square"])[0]
     ok = ok and same and not moved
     ok = test_failures(work) and ok
+    ok = test_quality(work, cal, real) and ok
     print("test: " + ("PASS" if ok else "FAIL"))
     return ok
 
@@ -947,6 +1494,130 @@ def test_failures(work):
     return not fails
 
 
+def _with_exif(src, dst, program, white_balance, iso, exposure_s, notes):
+    """A copy of a photo carrying the EXIF of a phone's camera (Pillow), for the settings tests."""
+    from PIL import Image
+    with Image.open(src) as im:
+        exif = Image.Exif()
+        exif[272] = "test phone"
+        ifd = exif.get_ifd(EXIF_IFD)
+        ifd.update({34850: program, 41987: white_balance, 34855: iso, 33434: exposure_s, 37386: 4.941, 41988: 1.0,
+                    MAKER_JSON: json.dumps(notes)})
+        im.save(dst, exif=exif, quality=92)
+
+
+def _spread(shifts):
+    """RMS (px) of the optical centre's offsets from their mean."""
+    s = np.asarray(shifts, np.float64)
+    return float(np.sqrt(np.mean(np.sum((s - s.mean(0)) ** 2, 1))))
+
+
+def test_quality(work, cal, real=None):
+    """What spoils a calibration: a board bent as a 3000R monitor, the optical centre moving between the photos, the
+    corners of the image never reached, the camera's automatic settings; the refined corners against the truth; the
+    good synthetic calibration (cal, of work/synth) said free of them. real: a folder of photos known to be of a
+    curved board, taken by hand in the camera's automatic mode, whose issues must all be said."""
+    fails = []
+
+    def expect(good, what):
+        print(("ok    " if good else "FAIL  ") + what, flush=True)
+        if not good:
+            fails.append(what)
+
+    quiet = [].append
+    sh, ce = cal["shape"], cal["centre"]
+    expect(sh["fitted"] and sh["flat"] and sh["sag_mm"] < 0.05 and ce is not None and ce["still"]
+           and not set(cal["issues"]) & set(ISSUES_NOT_GOOD),
+           f"a flat board and a still phone: flat (bends {sh['sag_mm']:.3f} mm, error {sh['rms_flat_px']:.3f} -> "
+           f"{sh['rms_shape_px']:.3f} px with the shape), still (the centre spreads {ce and ce['spread_px']} px); "
+           f"issues {cal['issues']}, the board reached {100 * cal['coverage']['reach']:.0f} % of the way to the "
+           f"image's corners")
+    # the refined corners against the truth
+    truth = json.loads((work / "synth" / "truth.json").read_text(encoding="utf-8"))
+    K, d = np.array(truth["K"]), np.array(truth["dist"])
+    paths = find_images(work / "synth")[:12]
+    board = make_board()
+    raw, fine = detect(paths, board, refine=False)[0], detect(paths, board)[0]
+    err = {"raw": [], "fine": []}
+    for v in truth["views"]:
+        name = v["image"]
+        if name in raw and name in fine:
+            true = cv2.projectPoints(raw[name][0].astype(np.float64), np.array(v["rvec"]), np.array(v["tvec"]), K,
+                                     d)[0].reshape(-1, 2)
+            for key, got in (("raw", raw), ("fine", fine)):
+                err[key].append(np.linalg.norm(got[name][1].reshape(-1, 2) - true, axis=1))
+    e0, e1 = np.concatenate(err["raw"]), np.concatenate(err["fine"])
+    r0, r1 = (float(np.sqrt(np.mean(e ** 2))) for e in (e0, e1))
+    expect(r1 <= r0 and e1.max() <= e0.max() + 0.05,
+           f"refined corners of a printed board against the truth: RMS {r0:.4f} -> {r1:.4f} px, at most "
+           f"{e0.max():.3f} -> {e1.max():.3f} px ({len(e1)} corners)")
+    # a board bent as a 3000R monitor
+    synth(work / "curved", 16, seed=4, bend_radius=3000.0, log=quiet)
+    c = run_calibrate(work / "curved", None, work / "curved" / "truth.json", BOARD["square"], log=quiet)
+    sag = (BOARD["squares"][0] * BOARD["square"]) ** 2 / (8 * 3000.0)
+    s, fx = c["shape"], c["error"]["fx_rel"]
+    flat_fx = (1 + fx) / (1 + s["focal_shift"]) - 1
+    expect("board_not_flat" in c["issues"] and abs(s["sag_mm"] - sag) < 0.3 and abs(fx) < MAX_FOCAL_ERROR
+           and s["rms_flat_px"] > 3 * c["rms_px"] and abs(flat_fx) > 5 * MAX_FOCAL_ERROR,
+           f"a board bent as a 3000R monitor: not flat, bends {s['sag_mm']:.2f} mm (truly {sag:.2f}), error "
+           f"{s['rms_flat_px']:.3f} -> {c['rms_px']:.3f} px; focal length off the truth {100 * fx:+.3f} % with the "
+           f"shape, {100 * flat_fx:+.2f} % without; issues {c['issues']}")
+    # the optical centre moving between the photos, as a phone held in the hand
+    synth(work / "held", 16, seed=5, centre_sd=15.0, log=quiet)
+    h = run_calibrate(work / "held", None, None, BOARD["square"], log=quiet)
+    held = json.loads((work / "held" / "truth.json").read_text(encoding="utf-8"))
+    true_spread = _spread([v["centre_shift_px"] for v in held["views"]])
+    got = h["centre"]["spread_px"] if h["centre"] else math.nan
+    expect("phone_not_still" in h["issues"] and "board_not_flat" not in h["issues"]
+           and abs(got - true_spread) < 0.35 * true_spread,
+           f"the optical centre moving between the photos: the phone moved, the centre spreads {got:.1f} px (truly "
+           f"{true_spread:.1f}); the board still flat; issues {h['issues']}")
+    # the corners of the image
+    w, hh = SYNTH_SIZE
+    middle = np.array([[0.5 * w, 0.5 * hh], [0.3 * w, 0.4 * hh], [0.7 * w, 0.6 * hh]])
+    c0 = coverage([middle], SYNTH_SIZE)
+    c1 = coverage([middle, np.array([[w - 30.0, 25.0]])], SYNTH_SIZE)
+    expect(c0["missing_corners"] == list(CORNER_NAMES) and "top_right" in c0["missing_cells"]
+           and c1["missing_corners"] == ["top_left", "bottom_right", "bottom_left"] and c1["corners"]["top_right"] == 1
+           and "top_right" not in c1["missing_cells"],
+           f"corners of the image never reached are named: {c0['missing_corners']}; with one point in the top right "
+           f"corner {c1['missing_corners']}")
+    one = check_photo(paths[0], board)
+    expect(one["ok"] and one["coverage"] is not None and sum(map(sum, one["coverage"]["cells"])) == one["corners"]
+           and one["settings"] == {"known": False, "problems": []},
+           f"a photo's check says where its corners fell (reach {one['coverage'] and one['coverage']['reach']}); "
+           f"without EXIF its settings are not judged")
+    # the camera's settings, from the EXIF
+    ex = work / "exif"
+    ex.mkdir()
+    _with_exif(paths[0], ex / "auto.jpg", 2, 0, 125, 0.02, {"Hdr": "on", "AIScene": 4, "zoomMultiple": 2})
+    _with_exif(paths[0], ex / "pro.jpg", 1, 1, 100, 0.02, {"Hdr": "off", "AIScene": 0, "zoomMultiple": 1})
+    _with_exif(paths[0], ex / "pro_iso.jpg", 1, 1, 200, 0.02, {"Hdr": "off", "AIScene": 0, "zoomMultiple": 1})
+    a = check_photo(ex / "auto.jpg", board)
+    p = check_photo(ex / "pro.jpg", board, first=ex / "pro.jpg")
+    q = check_photo(ex / "pro_iso.jpg", board, first=photo_settings(ex / "pro.jpg"))
+    expect(a["why"] == "settings" and not a["ok"] and a["corners"] == one["corners"]
+           and set(a["settings"]["problems"]) == {"exposure_auto", "white_balance_auto", "ai_scene", "hdr", "zoom"}
+           and p["ok"] and p["settings"]["problems"] == [] and q["why"] == "settings"
+           and q["settings"]["problems"] == ["iso_changed"],
+           f"camera settings from the EXIF: automatic mode refused ({a['settings']['problems']}), the manual one "
+           f"taken, another ISO than the first photo refused ({q['settings']['problems']})")
+    if real:
+        real = Path(real)
+        square, squares, marker = folder_board(real) or (BOARD["square"], None, None)
+        r = run_calibrate(real, None, None, square, squares, marker, log=quiet)
+        rs, rc = r["shape"], r["centre"] or {}
+        first = check_photo(find_images(real)[0], make_board(square, squares, marker))
+        expect({"board_not_flat", "phone_not_still", "camera_settings"} <= set(r["issues"])
+               and first["why"] == "settings",
+               f"{real.name}: {r['n_views']} photos, error {rs['rms_flat_px']:.3f} px flat, {r['rms_px']:.3f} px with "
+               f"the shape (bends {rs['sag_mm']:.2f} mm, focal length {100 * rs['focal_shift']:+.2f} %), "
+               f"{rc.get('rms_px', math.nan):.3f} px with the centre free (it spreads {rc.get('spread_px')} px); "
+               f"fx {r['K'][0][0]:.1f} px; issues {r['issues']}; its first photo refused for "
+               f"{first['settings']['problems']}")
+    return not fails
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -972,6 +1643,8 @@ def main():
         a.add_argument("--marker", type=float, help="marker size, mm (default: board.json, else 3/4 of the square)")
     a = sub.add_parser("test")
     a.add_argument("--work", type=Path, default=WORK / "selftest")
+    a.add_argument("--real", type=Path, help="also a folder of photos of a curved board taken by hand in the camera's "
+                                             "automatic mode: each of these must be said")
     args = ap.parse_args()
 
     try:
@@ -990,7 +1663,7 @@ def main():
             else:
                 sys.exit(0 if run_check(args.images, args.intrinsics, square, squares, marker)[0] else 1)
         elif args.cmd == "test":
-            sys.exit(0 if run_test(args.work) else 1)
+            sys.exit(0 if run_test(args.work, args.real) else 1)
     except CalibrationError as e:
         sys.exit(f"calibrate_charuco: {e.code}: {e}")
 
