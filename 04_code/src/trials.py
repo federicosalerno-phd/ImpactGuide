@@ -43,10 +43,10 @@ the log and can be corrected there without touching raw files.
                                  bytes, SHA-256
         trial_log.lock           only while a program writes the log
         t001/
-            t001_ref_scan_az40.ply   reference scans, only when a reference
-            t001_ref_scan_az55.ply   precedes the impact
-            t001_scan_az40.ply       post-impact scans, arm at 40 and 55 degrees
-            t001_scan_az55.ply
+            t001_ref_scan_az55.ply   reference scans, only when a reference
+            t001_ref_scan_az70.ply   precedes the impact
+            t001_scan_az55.ply       post-impact scans, arm at 55 and 70 degrees
+            t001_scan_az70.ply       (arm positions 2 and 3)
             t001_photo_az40.jpg      photos from the 4 arm positions
             t001_photo_az55.jpg
             t001_photo_az70.jpg
@@ -269,7 +269,7 @@ class Config:
     seed: int = 20261020
     washers_per_side: int = 3
     reposition_mm: float = 3.0  # cap shift since the last reference
-    scan_az: tuple = (40, 55)  # arm positions, camera azimuth in degrees
+    scan_az: tuple = (55, 70)  # arm positions 2 and 3 (the scanner's field), camera azimuth in degrees
     photo_az: tuple = (40, 55, 70, 85)
     video_az: tuple = (35, 95)
     video_min_s: float = 7.0
@@ -1744,7 +1744,7 @@ def run_test(work: Path | str = WORK) -> int:
     keys = [st.key for st in run.steps(dr)]
     names = sorted(p.name for p in (raw / "campaign" / dr).iterdir())
     expect(keys.index("drape_video") < keys.index("drape_off") < keys.index("photo_az40") < keys.index("video")
-           < keys.index("scan_az40") < keys.index("spheres")
+           < keys.index(f"scan_az{cfg.scan_az[0]}") < keys.index("spheres")
            and names == sorted(n for st in run.steps(dr) for n in st.files)
            and len([n for n in names if "_ref_" not in n]) == 12
            and file_name(dr, "photo", 40, drape=True) in names and file_name(dr, "video", drape=True) in names,
@@ -1774,14 +1774,14 @@ def run_test(work: Path | str = WORK) -> int:
 
     run.find("t003", file_name("t003", "photo", 40))[0].unlink()
     (t3 / "IMG_20261020_101112.jpg").write_bytes(b"x")
-    run.find("t003", file_name("t003", "scan", 55))[0].write_bytes(b"")
+    run.find("t003", file_name("t003", "scan", cfg.scan_az[1]))[0].write_bytes(b"")
     (t3 / "t003_video.mov").write_bytes(b"x")
     got = set(run.missing("t003"))
     want = {("missing", "t003_photo_az40.jpg"), ("unexpected", "IMG_20261020_101112.jpg"),
-            ("empty", "t003_scan_az55.ply"), ("unexpected", "t003_video.mov")}
+            ("empty", file_name("t003", "scan", cfg.scan_az[1])), ("unexpected", "t003_video.mov")}
     expect(got == want, "completeness: missing photo, stray file, empty scan, wrong video suffix")
-    (t3 / file_name("t003", "scan", 40)).write_bytes(b"fake but longer")
-    expect(("changed", "t003_scan_az40.ply") in run.missing("t003", deep=True),
+    (t3 / file_name("t003", "scan", cfg.scan_az[0])).write_bytes(b"fake but longer")
+    expect(("changed", file_name("t003", "scan", cfg.scan_az[0])) in run.missing("t003", deep=True),
            "deep completeness: a raw file whose size is not the one filed is said")
 
     import cv2

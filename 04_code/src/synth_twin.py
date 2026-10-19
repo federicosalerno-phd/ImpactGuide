@@ -1208,16 +1208,31 @@ def in_image(m, K, size, pts):
     return ok & (u >= -0.5) & (v >= -0.5) & (u <= size[0] - 0.5) & (v <= size[1] - 0.5)
 
 
+def scan_positions(sa):
+    """The arm positions the trials scan from (trials.Config.scan_az, camera azimuths: the protocol's own), as
+    indices of the scene's arm positions (sensor_arm camera_deg)."""
+    import trials
+    cam = [float(a) for a in sa["camera_deg"]]
+    return [min(range(len(cam)), key=lambda k: abs(cam[k] - float(az))) for az in trials.Config().scan_az]
+
+
 def scanner_poses(tw):
-    """Scanner camera at the two scan positions (camera 40 and 55 deg), from cam_scanner_2 turned about the pivot."""
+    """Scanner camera at the trials' scan positions (scan_positions), each the scene's own camera there
+    (cam_scanner_<k>, placed by the bench's script with the scanner and its wedge as built); a scene without them:
+    cam_scanner_2 turned about the pivot."""
     if SCANNER_CAM not in tw.objs:
         return [], 0.0, 0.0
-    c0 = mat(tw.objs[SCANNER_CAM].matrix_world.normalized()) @ np.diag([1.0, -1.0, -1.0, 1.0])
+    flip = np.diag([1.0, -1.0, -1.0, 1.0])
+    c0 = mat(tw.objs[SCANNER_CAM].matrix_world.normalized()) @ flip
     piv = np.array(tw.sa["pivot"], np.float64)
     out = []
-    for phi in tw.sa["arm_deg"][:2]:
-        R = rotation((0, 0, 1), phi - tw.sa["shown_deg"])
-        out.append(about(R, piv) @ c0)
+    for k in scan_positions(tw.sa):
+        own = tw.objs.get(f"cam_scanner_{k + 1}")
+        if own is not None:
+            out.append(mat(own.matrix_world.normalized()) @ flip)
+        else:
+            R = rotation((0, 0, 1), tw.sa["arm_deg"][k] - tw.sa["shown_deg"])
+            out.append(about(R, piv) @ c0)
     tx = math.tan(tw.objs[SCANNER_CAM].data.angle_x / 2)
     return out, tx, tx * 0.75          # single capture 200 x 150 mm
 

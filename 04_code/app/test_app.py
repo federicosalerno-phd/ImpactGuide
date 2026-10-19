@@ -522,8 +522,9 @@ def test_backend(app, work, calibration=True):
            f"settings of drape slot {slot['slot']} chosen by hand: it fills that slot")
     t3, keys = d.run_trial()
     names = sorted(p.name for p in (work / "raw" / "campaign" / t3).iterdir())
-    order = [k for k in keys if k in ("drape_video", "drape_off", "photo_az40", "video", "scan_az40")]
-    expect(order == ["drape_video", "drape_off", "photo_az40", "video", "scan_az40"]
+    scan0 = f"scan_az{trials.Config().scan_az[0]}"
+    order = [k for k in keys if k in ("drape_video", "drape_off", "photo_az40", "video", scan0)]
+    expect(order == ["drape_video", "drape_off", "photo_az40", "video", scan0]
            and trials.file_name(t3, "photo", 85, drape=True) in names and trials.file_name(t3, "video", drape=True) in names
            and len([n for n in names if "_ref_" not in n]) == 12,
            f"{t3}: drape trial, {len(names)} files, with and without the drape, scans last")
@@ -730,10 +731,12 @@ def test_twin(d, work, scanned):
     s = d.call("twin_state", json.dumps({"mode": "trials"}))
     plan = d.call("trials_state")["trial"]
     t = s["trial"]
+    first = d.call("trials_state")["steps"][0]["key"]          # the arm where the first step is taken
+    arm = int(first.rsplit("_az", 1)[1]) if "_az" in first else 40
     expect(t and t["trial"] == plan["trial"] and t["holder"] == plan["holder"]
            and t["angle_deg"] == float(plan["angle_deg"]) and t["direction_deg"] == float(plan["direction_deg"])
-           and t["arm_az"] == 40 and abs(s["phone"]["aspect"] - 4080 / 3072) < 1e-3,
-           f"twin: the setting of the trial to do ({t and t['trial']}: holder, hole, direction, arm at 40°)")
+           and t["arm_az"] == arm and abs(s["phone"]["aspect"] - 4080 / 3072) < 1e-3,
+           f"twin: the setting of the trial to do ({t and t['trial']}: holder, hole, direction, arm at {arm}°)")
     keys = [x["key"] for x in d.call("trials_state")["steps"]]
     expect(s.get("steps") == keys and s.get("step") == 0 and "release" in keys
            and s.get("arm", {}).get("video_az") and s["arm"].get("photo_az") and s["arm"].get("video_deg_s"),
@@ -2182,7 +2185,7 @@ def test_ui(work, shots):
             # pictures at the moments that show the most
             if v.startswith("shoot drape_photo_az40") or v.startswith("shoot photo_az40"):
                 QTimer.singleShot(1400, lambda: grab("ui_02_photo_received" if "drape" not in v else "ui_03_drape_photo"))
-            if v.startswith("waiting scan_az40") and "ui_04_scan_wait" not in taken:
+            if v.startswith("waiting scan_az") and "ui_04_scan_wait" not in taken:
                 grab("ui_04_scan_wait")
             if v == "start":
                 QTimer.singleShot(900, lambda: grab("ui_01_trial_started"))

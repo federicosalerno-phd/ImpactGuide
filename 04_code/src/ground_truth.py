@@ -48,6 +48,8 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
+
+import trials                   # the protocol: the arm positions the scans are taken from
 from scipy.spatial.transform import Rotation
 
 SPHERE_D = 15.0
@@ -668,7 +670,8 @@ def unit(v):
 # the bench; the board 57 mm in front of the incisors facing the phone (left, front, up), the A1 ball behind it.
 SCENE = {"R_W_mandible": rot_x(-92.3745), "board_W": (15.0, -150.0, -35.0), "board_out": (0.5, -0.8, 0.35),
          "ball_M": (22.5, 50.0, 35.0), "face": ((0.0, -55.0, -45.0), 60.0),
-         "views_deg": (40.0, 55.0), "elevation_deg": 5.0, "range_mm": 320.0, "baseline_mm": 100.0,
+         "views_deg": tuple(float(a) for a in trials.Config().scan_az),
+         "elevation_deg": 5.0, "range_mm": 320.0, "baseline_mm": 100.0,
          "posts": {"marker": (1.8, [(0.7071, -0.7071, 0.0), (-0.7071, -0.7071, 0.0), (-1.0, 0.0, 0.0)]),
                    "mandible": (3.0, None)}}            # post radius and direction from the sphere (None: to the hub)
 HUB_MANDIBLE = (46.0, 107.1597, -54.9717)               # hub of the head rig posts, mandible frame
@@ -761,8 +764,8 @@ def sample_sphere(c, j, centres, O, cams, rng, radius, spacing, noise, post, the
 
 def synthetic_scan(T_W_M, T_W_mandible, rng, noise=0.05, spacing=0.17, merged=True, clutter=True, dense=False,
                    jitter=True, rigs=RIGS, radius=SPHERE_D / 2):
-    """Simulated EinScan-SP scan (one shot per arm position, 40 and 55 deg) of the two rigs placed by T_W_M and
-    T_W_mandible.
+    """Simulated EinScan-SP scan (one shot per scan position of the protocol, trials.Config.scan_az) of the two
+    rigs placed by T_W_M and T_W_mandible.
 
     Model: projector on the optical axis, cameras 100 mm to each side, 320 mm from the sphere centroid; a point is
     measured if the projector and one camera see it under 75 deg at most and no other sphere hides it; depth noise
