@@ -38,6 +38,7 @@ const TWIN = {
   sweeping: 0,          // the video's sweep running (its frame request)
   SWEEP_HOLD_S: 0.6,    // the arm a moment at each end of the sweep
   SWEEP_SHADOW_MS: 90,  // its shadows drawn again at most this often
+  DECAL: /layout|_ink$|^print_|_print$|_mark$|_logo|engraving/,   // materials of markings laid on a surface
   blend: null,          // the cables between the arm's positions (false: their meshes do not allow it)
   sweepMesh: null,
   shadowKey: '', targetsKey: '',
@@ -95,7 +96,7 @@ const TWIN = {
     // leaves the ready view
     TWIN.viewer = VIEW3D.create($('tw3d'), $('tw3dCanvas'), {
       margin: 1.04, dir: [0.42, -0.78, 0.46], up: [0, 0, 1], front: [0, 1, 0], failed: TWIN.fail,
-      name: function (n) { return PARTS.name(n); },
+      name: function (n) { return PARTS.name(n); }, material: function (m) { return PARTS.material(m); }, mm: 1,
       camera: function () { TWIN.look('phone' + TWIN.armIndex(TWIN.armAz)); },
       changed: function () { if (TWIN.view) { TWIN.view = ''; TWIN.marks(); } } });
     if (!TWIN.viewer) { TWIN.failed = true; return false; }
@@ -240,6 +241,11 @@ const TWIN = {
         emissiveIntensity: st, side: THREE.DoubleSide };
       // a cloth's sheen (the cap) as Blender's: the physical material, for that one
       const sh = m.extras && m.extras.sheen;
+      // the markings printed or laid on a surface (the board's layout, inks, engravings, logos) drawn a little nearer
+      // than the surface they lie on: never flickering through it in specks
+      if (TWIN.DECAL.test(opts.name)) {
+        Object.assign(opts, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
+      }
       if (sh) return new THREE.MeshPhysicalMaterial(Object.assign(opts, { sheen: new THREE.Color(sh[0], sh[1], sh[2]) }));
       return new THREE.MeshStandardMaterial(opts);
     });

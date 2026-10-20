@@ -90,6 +90,30 @@ const PARTS = {
     [/^black$/, 'ChArUco print', 'Stampa ChArUco', 'Impression ChArUco', 'Impresión ChArUco', 'ChArUco-Druck', 'ChArUco 印刷图案'],
   ],
   LANGS: ['en', 'it', 'fr', 'es', 'de', 'zh'],
+  // what a part is made of, by the name of its material in the scene: [pattern, en, it, fr, es, de, zh]
+  MATERIALS: [
+    [/^(aluminium|anodised|profile|slot_cover)$/, 'Aluminium', 'Alluminio', 'Aluminium', 'Aluminio', 'Aluminium', '铝'],
+    [/^petg_/, 'PETG', 'PETG', 'PETG', 'PETG', 'PETG', 'PETG'],
+    [/^pla_/, 'PLA', 'PLA', 'PLA', 'PLA', 'PLA', 'PLA'],
+    [/^tpu_/, 'TPU', 'TPU', 'TPU', 'TPU', 'TPU', 'TPU'],
+    [/^pom_/, 'POM', 'POM', 'POM', 'POM', 'POM', 'POM'],
+    [/^ptfe$/, 'PTFE', 'PTFE', 'PTFE', 'PTFE', 'PTFE', 'PTFE'],
+    [/^(steel|black_oxide|screw_dark_grey|washer|zinc)$/, 'Steel', 'Acciaio', 'Acier', 'Acero', 'Stahl', '钢'],
+    [/^brass$/, 'Brass', 'Ottone', 'Laiton', 'Latón', 'Messing', '黄铜'],
+    [/^sintered_bronze$/, 'Sintered bronze', 'Bronzo sinterizzato', 'Bronze fritté', 'Bronce sinterizado', 'Sinterbronze', '烧结青铜'],
+    [/magnet$/, 'Magnet', 'Magnete', 'Aimant', 'Imán', 'Magnet', '磁铁'],
+    [/^silicone/, 'Silicone', 'Silicone', 'Silicone', 'Silicona', 'Silikon', '硅胶'],
+    [/^bone$/, 'Bone model', 'Modello d\'osso', 'Modèle osseux', 'Modelo óseo', 'Knochenmodell', '骨模型'],
+    [/^wood$/, 'Wood', 'Legno', 'Bois', 'Madera', 'Holz', '木材'],
+    [/^rubber/, 'Rubber', 'Gomma', 'Caoutchouc', 'Goma', 'Gummi', '橡胶'],
+    [/^(fabric_|drape$|velcro_)/, 'Fabric', 'Tessuto', 'Tissu', 'Tela', 'Stoff', '织物'],
+  ],
+  material: function (tech) {
+    const row = PARTS.MATERIALS.find(function (r) { return r[0].test(String(tech || '')); });
+    if (!row) return '';
+    const k = PARTS.LANGS.indexOf(typeof LANG === 'string' ? LANG : 'en');
+    return row[1 + Math.max(0, k)] || row[1];
+  },
 
   // the scene's name of a part in words, in the page's language
   name: function (tech) {

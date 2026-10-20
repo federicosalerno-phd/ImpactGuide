@@ -11,10 +11,10 @@
 // 7 top (Ctrl: the opposite sides), 9 the other side, 5 perspective or
 // orthographic, 2 4 6 8 turn by 15 degrees (Ctrl: move), + and - zoom, 0 the
 // camera's view (where the page has one), the period frames what is selected;
-// Home frames everything. A click of the left button selects a part: it lightens a
-// little in a thin soft glow of the page's accent colour, fading in, its name in
-// words beside it; the part under the pointer has a lighter hint of it; a click on
-// nothing or Alt+A selects nothing. Top right, Blender's navigation gizmo as Blender
+// Home frames everything. A click of the left button selects a part: it stays as it
+// is while the rest of the model fades a little behind a veil, its name in words on
+// a small tag tied to the point clicked; the part under the pointer only lightens a
+// touch; a click on nothing, Esc or Alt+A let go of it. Top right, Blender's navigation gizmo as Blender
 // 5 draws it: the axes with their letters (a click looks along one, a drag turns),
 // the lens that zooms and the hand that moves, the camera, perspective or not. At
 // the start, and for every new model, the whole model is framed, turning about its
@@ -122,13 +122,12 @@ const VIEW3D = {
   KEY_ZOOM: 1.2,        // the keypad's + and -
   CLICK_PX: 4,          // a press that moves less than this is a click: it selects
   FIT_POINTS: 40000,    // points of the model a view that frames it looks at
-  HL_IN_S: 0.14,        // s, a highlight coming in...
-  HL_OUT_S: 0.22,       // ... and going
-  HL_LIGHT: 0.16,       // a highlighted part this much lighter (towards white)...
-  HL_RIM: 0.45,         // ... its edge within in the accent colour this solid...
-  HL_GLOW: 0.85,        // ... and a glow of it outside, this solid at the edge, gone in about 4 px
-  HL_SPREAD: 1.5,       // px between the samples of the blur that makes the glow
-  HL_HOVER: 0.5,        // the part under the pointer: half of it
+  HL_IN_S: 0.18,        // s, a highlight coming in, and going
+  HL_OUT_S: 0.18,
+  HL_VEIL: 0.32,        // what is not selected behind a veil of the view's colour this thick
+  HL_HOVER_LIGHT: 0.08, // the part under the pointer this much lighter
+  HL_HOVER: 1,          // (the pointer's highlight comes in as far as a selection's)
+  TAG_GAP: 26,          // px between a part and its name's tag
   HOVER_MS: 50,         // the part under the pointer looked for at most this often
   CHUNK: 256,           // triangles a click looks into by one box  SLEEP_MS: 3000,       // the box off screen this long: its GL context is given back
   // the navigation gizmo top right, as Blender 5 draws it (view3d_gizmo_navigate.cc, view3d_gizmo_navigate_type.cc,
@@ -272,9 +271,9 @@ const VIEW3D = {
 
   // what the highlight draws with, made once: the black of everything (for the depth) and a colour for each of
   // three highlighted parts (red, green, blue: a channel each) in the mask, a little nearer than their own surface;
-  // and the pass that lays it over the picture: inside a part the picture a little lighter, around it a thin soft
-  // glow in the page's accent colour. The mask is blurred first (a Gaussian about 3 px across): a lone pixel of
-  // it is no part, so it lightens nothing and glows nothing
+  // and the pass that lays it over the picture: no outline, the part selected left as it is while everything else
+  // fades a little behind a veil of the view's own colour (less colour, a little see-through), the part under the
+  // pointer only a touch lighter. The mask is softened over a pixel at its edges
   kitMade: null,
   kit: function () {
     if (VIEW3D.kitMade) return VIEW3D.kitMade;
@@ -286,24 +285,23 @@ const VIEW3D = {
     const paints = [paint(0xff0000), paint(0x00ff00), paint(0x0000ff)];
     const m = new THREE.ShaderMaterial({
       uniforms: { mask: { value: null }, px: { value: new THREE.Vector2() }, amt: { value: new THREE.Vector3() },
-                  accent: { value: new THREE.Color() } },
+                  sel: { value: new THREE.Vector3() }, veil: { value: new THREE.Color() } },
       vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
-      fragmentShader: 'uniform sampler2D mask; uniform vec2 px; uniform vec3 amt; uniform vec3 accent; varying vec2 vUv;'
-        + 'void main() { vec3 c = texture2D(mask, vUv).rgb; vec3 b = vec3(0.0); float ws = 0.0;'
-        + ' for (int i = -3; i <= 3; i++) for (int j = -3; j <= 3; j++) {'
-        + '  float w = exp(-float(i * i + j * j) / 4.3);'
-        + '  b += w * texture2D(mask, vUv + vec2(float(i), float(j)) * px).rgb; ws += w; }'
-        + ' b /= ws;'
-        // a part's own pixels (a lone pixel of the mask is none), its edge within, the glow outside it; a small hole
-        // in it (a screw of another part in front, a slot) is not its outside: no glow there, no dots
-        + ' vec3 inside = c * smoothstep(0.15, 0.4, b), rim = inside * (1.0 - smoothstep(0.5, 0.78, b));'
-        + ' vec3 halo = (1.0 - c) * smoothstep(0.02, 0.5, b) * (1.0 - smoothstep(0.45, 0.65, b));'
-        + ' float light = max(max(inside.r * amt.x, inside.g * amt.y), inside.b * amt.z) * '
-        + VIEW3D.HL_LIGHT.toFixed(3) + ';'
-        + ' float glow = max(max(rim.r * amt.x, rim.g * amt.y), rim.b * amt.z) * ' + VIEW3D.HL_RIM.toFixed(3)
-        + '  + max(max(halo.r * amt.x, halo.g * amt.y), halo.b * amt.z) * ' + VIEW3D.HL_GLOW.toFixed(3) + ';'
-        + ' float a = light + glow; if (a < 0.003) discard;'
-        + ' gl_FragColor = vec4((vec3(light) + accent * glow) / a, min(a, 1.0)); }',
+      // amt: how far each channel's highlight has come in; sel: 1 for a selection's channel, 0 for the pointer's.
+      // Everything but the selected part veiled (a part let go and one taken cross over); the pointer's part
+      // lighter
+      fragmentShader: 'uniform sampler2D mask; uniform vec2 px; uniform vec3 amt; uniform vec3 sel; uniform vec3 veil;'
+        + ' varying vec2 vUv;'
+        + 'void main() { vec3 b = texture2D(mask, vUv).rgb * 0.25'
+        + '  + (texture2D(mask, vUv + vec2(px.x, 0.0)).rgb + texture2D(mask, vUv - vec2(px.x, 0.0)).rgb'
+        + '   + texture2D(mask, vUv + vec2(0.0, px.y)).rgb + texture2D(mask, vUv - vec2(0.0, px.y)).rgb) * 0.125'
+        + '  + (texture2D(mask, vUv + px).rgb + texture2D(mask, vUv - px).rgb'
+        + '   + texture2D(mask, vUv + vec2(px.x, -px.y)).rgb + texture2D(mask, vUv - vec2(px.x, -px.y)).rgb) * 0.0625;'
+        + ' vec3 out_ = sel * amt * (1.0 - b), lit = (1.0 - sel) * amt * b;'
+        + ' float v = max(max(out_.x, out_.y), out_.z) * ' + VIEW3D.HL_VEIL.toFixed(3) + ';'
+        + ' float h = max(max(lit.x, lit.y), lit.z) * ' + VIEW3D.HL_HOVER_LIGHT.toFixed(3) + ';'
+        + ' float a = v + h; if (a < 0.002) discard;'
+        + ' gl_FragColor = vec4((veil * v + vec3(h)) / a, min(a, 1.0)); }',
       transparent: true, depthTest: false, depthWrite: false });
     const s = new THREE.Scene();
     s.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), m));
@@ -417,7 +415,7 @@ VIEW3D.proto = {
   set: function (obj) {
     const v = this;
     v.hl = null; v.sel = null;
-    v.label.style.display = 'none'; v.label.style.opacity = 0; v.dot.style.opacity = 0;
+    v.tag.style.visibility = 'hidden'; v.tag.style.opacity = 0; v.lead.style.opacity = 0;
     v.root.children.slice().forEach(function (c) { v.root.remove(c); VIEW3D.free(c); });
     v.root.add(obj);
     VIEW3D.chunkAll(obj);
@@ -831,18 +829,27 @@ VIEW3D.proto = {
     const box = new THREE.Box3();
     const f = v.pointsFlat(parts), q = new THREE.Vector3();
     for (let i = 0; i < f.length; i += 3) box.expandByPoint(q.set(f[i], f[i + 1], f[i + 2]));
+    const hit = pick.hit || pick.mesh, mat = (hit && hit.material && hit.material.name) || '';
     return { name: pick.name, kind: kind, parts: parts, box: box, anchor: pick.point || box.getCenter(new THREE.Vector3()),
-             a: 0, goal: 1, layer: 0 };
+             a: 0, goal: 1, layer: 0, material: mat };
   },
 
-  // the name of what is selected beside it: its own words (the page's map of names), at the point clicked
+  // the name of what is selected: a small tag with its name in words (the page's map of names) and, lighter, what
+  // it is made of (when the page knows) and its largest size; tied by a thin line to the point clicked
   labelFor: function (s) {
-    const v = this, l = v.label;
-    if (!s) { l.style.opacity = 0; return; }
-    l.textContent = v.o.name ? v.o.name(s.name) : s.name;
-    l.style.display = '';
-    l.style.opacity = 0;
-    l.__w = l.offsetWidth; l.__h = l.offsetHeight;       // measured once, not at every frame
+    const v = this, t = v.tag;
+    if (!s) { t.style.opacity = 0; v.lead.style.opacity = 0; return; }
+    v.label.textContent = v.o.name ? v.o.name(s.name) : s.name;
+    const size = s.box.isEmpty() ? 0 : Math.max.apply(null, s.box.getSize(new THREE.Vector3()).toArray()) * (v.o.mm || 1);
+    const big = size >= 20, mm = big ? Math.round(size) : Math.round(size * 10) / 10;
+    const made = v.o.material ? v.o.material(s.material) : '';
+    const said = size ? (typeof fmtNum === 'function' ? fmtNum(mm, big ? 0 : 1) : String(mm)) + ' mm' : '';
+    v.info.textContent = [made, said].filter(Boolean).join(' \u00b7 ');
+    v.info.style.display = v.info.textContent ? '' : 'none';
+    t.style.visibility = 'visible';
+    t.style.opacity = 0;
+    t.__w = t.offsetWidth; t.__h = t.offsetHeight;       // measured once, not at every frame
+    s.side = '';                                         // where it stands, chosen at its first frame
   },
 
   // a frame's highlight: the fades a step on; the mask (the highlighted parts where they are seen, each in a
@@ -914,14 +921,16 @@ VIEW3D.proto = {
       r.setRenderTarget(null);
       r.setClearColor(clear, alpha);
     }
-    const u = kit.quad.material.uniforms, amt = [0, 0, 0];
-    list.forEach(function (s, i) { amt[i] = VIEW3D.ease(s.a) * (s.kind === 'hov' ? VIEW3D.HL_HOVER : 1); });
+    const u = kit.quad.material.uniforms, amt = [0, 0, 0], sel = [0, 0, 0];
+    list.forEach(function (s, i) { amt[i] = VIEW3D.ease(s.a) * (s.kind === 'hov' ? VIEW3D.HL_HOVER : 1); sel[i] = s.kind === 'hov' ? 0 : 1; });
     u.mask.value = v.maskRT.texture;
-    u.px.value.set(VIEW3D.HL_SPREAD * pr / size.x, VIEW3D.HL_SPREAD * pr / size.y);   // as wide at any scale
+    u.px.value.set(1 / size.x, 1 / size.y);
+    u.sel.value.set(sel[0], sel[1], sel[2]);
     u.amt.value.set(amt[0], amt[1], amt[2]);
-    u.accent.value.copy(VIEW3D.accent());
-    r.setScissor(rect.x / pr, rect.y / pr, rect.w / pr, rect.h / pr);
-    r.setScissorTest(true);
+    u.veil.value.copy(v.viewColor || new THREE.Color(1, 1, 1));
+    // a selection veils the whole view; the pointer's part only lightens its own place
+    const whole = sel.some(function (x) { return x; });
+    if (!whole) { r.setScissor(rect.x / pr, rect.y / pr, rect.w / pr, rect.h / pr); r.setScissorTest(true); }
     r.render(kit.quad.scene, kit.quad.cam);
     r.setScissorTest(false);
     r.autoClear = auto;
@@ -952,18 +961,46 @@ VIEW3D.proto = {
     return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
   },
 
-  // the name beside the point clicked, above and to its right, inside the box; faded with the highlight
+  // the tag beside the part, on the side chosen when it was selected where there is room (right, left, above, below
+  // the part as the screen shows it; a big part: near the point clicked), inside the box; its line from the point
+  // clicked to the tag's nearest edge; it follows the part as the view turns (in fractions of a pixel: no
+  // shaking), faded with the highlight
   labelPlace: function (s) {
-    const v = this, l = v.label;
-    if (!s || s.a <= 0) { l.style.opacity = 0; if (!s) l.style.display = 'none'; return; }
+    const v = this, t = v.tag, L = v.lead;
+    if (!s || s.a <= 0) {
+      t.style.opacity = 0; L.style.opacity = 0;
+      if (!s) t.style.visibility = 'hidden';
+      return;
+    }
     const p = s.anchor.clone().project(v.eye);
-    if (p.z > 1 || p.z < -1) { l.style.opacity = 0; return; }
-    const x = (p.x + 1) / 2 * v.w, y = (1 - p.y) / 2 * v.h, lw = l.__w || l.offsetWidth, lh = l.__h || l.offsetHeight;
-    const lx = Math.max(6, Math.min(v.w - lw - 6, x + 10)), ly = Math.max(6, Math.min(v.h - lh - 6, y - lh - 10));
-    l.style.transform = 'translate(' + Math.round(lx) + 'px,' + Math.round(ly) + 'px)';
-    l.style.opacity = VIEW3D.ease(s.a);
-    v.dot.style.transform = 'translate(' + Math.round(x - 3) + 'px,' + Math.round(y - 3) + 'px)';
-    v.dot.style.opacity = VIEW3D.ease(s.a);
+    if (p.z > 1 || p.z < -1) { t.style.opacity = 0; L.style.opacity = 0; return; }
+    const ax = (p.x + 1) / 2 * v.w, ay = (1 - p.y) / 2 * v.h, W = t.__w || t.offsetWidth, H = t.__h || t.offsetHeight;
+    const gap = VIEW3D.TAG_GAP, m = 8;
+    // the part on the screen
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const b = s.box, q = new THREE.Vector3();
+    [b.min.x, b.max.x].forEach(function (x) { [b.min.y, b.max.y].forEach(function (y) { [b.min.z, b.max.z].forEach(function (z) {
+      q.set(x, y, z).project(v.eye);
+      const sx = (q.x + 1) / 2 * v.w, sy = (1 - q.y) / 2 * v.h;
+      x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
+    }); }); });
+    if (!s.side) {
+      s.side = x1 + gap + W + m <= v.w ? 'right' : x0 - gap - W >= m ? 'left' : y0 - gap - H >= m ? 'top'
+        : y1 + gap + H + m <= v.h ? 'bottom' : 'near';
+    }
+    let x = ax + gap, y = ay - H - gap;
+    if (s.side === 'right') { x = x1 + gap; y = ay - H / 2; }
+    else if (s.side === 'left') { x = x0 - gap - W; y = ay - H / 2; }
+    else if (s.side === 'top') { x = ax - W / 2; y = y0 - gap - H; }
+    else if (s.side === 'bottom') { x = ax - W / 2; y = y1 + gap; }
+    x = Math.max(m, Math.min(v.w - W - m, x)); y = Math.max(m, Math.min(v.h - H - m, y));
+    const ex = Math.max(x, Math.min(x + W, ax)), ey = Math.max(y, Math.min(y + H, ay)), o = VIEW3D.ease(s.a);
+    t.style.transform = 'translate3d(' + x.toFixed(2) + 'px,' + y.toFixed(2) + 'px,0)';
+    t.style.opacity = o;
+    L.style.opacity = o;
+    v.leadLine.setAttribute('x1', ax.toFixed(2)); v.leadLine.setAttribute('y1', ay.toFixed(2));
+    v.leadLine.setAttribute('x2', ex.toFixed(2)); v.leadLine.setAttribute('y2', ey.toFixed(2));
+    v.leadDot.setAttribute('cx', ax.toFixed(2)); v.leadDot.setAttribute('cy', ay.toFixed(2));
   },
 
   // ── the gizmo, the name, the keys ──────────────────────────────────────────────────────────────────────────
@@ -1037,19 +1074,27 @@ VIEW3D.proto = {
     if (v.o.camera) tool('camera', '', function () { v.o.camera(); });
     tool('persp', '', function () { v.setOrtho(!v.ortho); if (v.o.changed) v.o.changed(); v.gizmoTools(); });
     v.box.append(svg);
-    // the name of what is selected, beside the point clicked (a small dot of the accent colour)
-    const label = document.createElement('div');
-    label.className = 'v3-name';
-    label.style.cssText = 'position:absolute;left:0;top:0;padding:4px 10px;border-radius:99px;'
-      + 'background:var(--overlay, rgba(240,240,244,0.95));color:var(--text-1, #111);font-size:13px;font-weight:600;'
-      + 'line-height:18px;box-shadow:0 1px 6px var(--shadow, rgba(0,0,0,0.25));pointer-events:none;display:none;'
-      + 'white-space:nowrap;opacity:0;will-change:transform,opacity';
-    const dot = document.createElement('div');
-    dot.style.cssText = 'position:absolute;left:0;top:0;width:6px;height:6px;border-radius:50%;'
-      + 'background:var(--accent, #d6a531);box-shadow:0 0 0 1.5px var(--surface-0, #fff);pointer-events:none;opacity:0';
-    v.box.append(dot, label);
-    v.label = label;
-    v.dot = dot;
+    // the name of what is selected: a small tag (its name, and lighter what it is made of and its size), tied by a
+    // thin line to the point clicked
+    const lead = document.createElementNS(ns, 'svg');
+    lead.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible;'
+      + 'opacity:0;color:var(--text-1, #222)';
+    v.leadLine = el('line', { stroke: 'currentColor', 'stroke-width': 1, 'stroke-opacity': 0.55 }, lead);
+    v.leadDot = el('circle', { r: 2.6, fill: 'currentColor', stroke: 'var(--surface-0, #fff)', 'stroke-width': 1.2 }, lead);
+    const tag = document.createElement('div');
+    tag.className = 'v3-tag';
+    tag.style.cssText = 'position:absolute;left:0;top:0;padding:6px 12px 7px;border-radius:12px;max-width:260px;'
+      + 'background:var(--overlay, rgba(240,240,244,0.95));color:var(--text-1, #111);pointer-events:none;'
+      + 'box-shadow:0 2px 10px var(--shadow, rgba(0,0,0,0.22));opacity:0;visibility:hidden;will-change:transform,opacity;'
+      + 'display:flex;flex-direction:column;gap:1px';
+    const name = document.createElement('span');
+    name.style.cssText = 'font-size:13px;font-weight:600;line-height:17px;white-space:nowrap;overflow:hidden;'
+      + 'text-overflow:ellipsis';
+    const info = document.createElement('span');
+    info.style.cssText = 'font-size:11.5px;line-height:15px;color:var(--text-3, #777);white-space:nowrap';
+    tag.append(name, info);
+    v.box.append(lead, tag);
+    v.tag = tag; v.lead = lead; v.label = name; v.info = info;
     v.gizmoPlace();
     // the axis under the pointer, as Blender finds it: within the disc, the nearest axis's end (the one pointing
     // at the eye left out while the view looks along it); a click looks along it, a drag turns (on the disc), zooms
@@ -1274,6 +1319,7 @@ VIEW3D.proto = {
     else if (c === 'NumpadDecimal') { v.frameSelected(); v.used = performance.now(); }
     else if (c === 'Home') { v.moved = true; v.fit(v.goal.q.clone(), v.bounds); v.used = performance.now(); }
     else if (c === 'KeyA' && e.altKey) v.select(null);
+    else if (c === 'Escape' && v.sel) v.select(null);
     else return false;
     if (c !== 'Numpad0' && c !== 'KeyA' && v.o.changed) v.o.changed();    // a view of the keys is the hand's own
     return true;
@@ -1388,7 +1434,8 @@ const PLATE3D = {
     PLATE3D.viewer = VIEW3D.create($('bd3d'), $('bd3dCanvas'), { margin: 1.1, dir: [-0.179, 0.796, 0.579],
                                                                  up: [0, 1, 0], front: [0, 0, -1],
                                                                  failed: PLATE3D.fail,
-                                                                 name: function (n) { return PARTS.name(n); } });
+                                                                 name: function (n) { return PARTS.name(n); },
+                                                                 mm: 1000 });     // the plate's GLB is in metres
     if (!PLATE3D.viewer) { PLATE3D.failed = true; return false; }
     GLB.load(PLATE3D.URL, true, function (res) {
       if (!PLATE3D.viewer) return;
