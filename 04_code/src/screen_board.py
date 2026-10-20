@@ -369,6 +369,8 @@ def estimate(qt, win=None):
         key = "-".join(str(v) for v in (qt.get("manufacturer"), qt.get("model"), qt.get("serial")) if v) or qt["device"]
     label = (edid.get("name") or (edid.get("texts") or [""])[-1] or f"{edid.get('make', '')} {edid.get('product', '')}"
              .strip() or " ".join(v for v in (qt.get("manufacturer"), qt.get("model")) if v) or qt["device"])
+    # a word with no letter nor digit is a placeholder (Qt's manufacturer "-" for a monitor without EDID): left out
+    label = " ".join(w for w in str(label).split() if any(c.isalnum() for c in w)) or qt["device"]
     size_mm = [px[0] * pitch, px[1] * pitch] if pitch else None
     return {"device": qt["device"], "key": f"{key}-{px[0]}x{px[1]}",
             "legacy_key": f"{legacy}-{px[0]}x{px[1]}" if legacy and legacy != key else None,
@@ -721,6 +723,10 @@ def test_pitch():
     c = estimate(*fake((0, 0, 1920, 1080), 1.0, (344, 193), name="laptop2"))
     expect(default_monitor([a, b]) == a["key"] and default_monitor([b, a, c]) == c["key"],
            "default monitor: the smaller one; of two alike, the one that is not the main")
+    qt4k, _ = fake((0, 0, 2560, 1440), 1.5, (878, 485), name="PHI PHL BDM4037U")
+    qt4k.update(manufacturer="-", device="PHL BDM4037U")
+    got = estimate(qt4k, None)["label"]
+    expect(got == "PHI PHL BDM4037U", f"a monitor without EDID, Qt's manufacturer '-': named {got!r}, no dash")
     # a ruler check replaces the pitch, for that monitor only
     lay = layout(a["px"], a["pitch_mm"])
     new = ruler_pitch(lay, lay["width_mm"] * 1.004)

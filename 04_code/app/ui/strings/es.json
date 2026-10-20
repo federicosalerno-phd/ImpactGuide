@@ -722,7 +722,7 @@
   "live.light.none": "Ningún tablero a la vista",
   "live.status.sec": "Estado",
   "live.f.corners": "Esquinas",
-  "live.f.corners.v": "{0}/{1} · {2} marcadores",
+  "live.f.corners.v": "{0}/{1} · {2} marcas",
   "live.f.rms": "RMS, límite {0} px",
   "live.f.px": "{0} px",
   "live.f.distance": "Distancia",

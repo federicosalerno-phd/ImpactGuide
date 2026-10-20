@@ -699,6 +699,33 @@ class Worker:
         return {"type": "error", "where": "handle", "what": f"unknown message {kind}"}
 
 
+def _watch_parent(connected):
+    """The worker ends on its own when the live view's process is gone (even killed, with no quit said) or when
+    nobody connects within START_S: blocked in accept() it would otherwise outlive both."""
+    try:
+        parent = int(os.environ.get("IMPACTGUIDE_CHECK_PARENT", "0"))
+    except ValueError:
+        parent = 0
+    handle = None
+    if parent and os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x00100000, False, parent) or None        # SYNCHRONIZE
+    t0 = time.monotonic()
+
+    def watch():
+        while True:
+            if handle is not None and k32.WaitForSingleObject(handle, 1000) == 0:
+                logger.info("the live view is gone: worker ends")
+                os._exit(0)
+            if handle is None:
+                time.sleep(1.0)
+            if not connected.is_set() and time.monotonic() - t0 > START_S:
+                logger.info("nobody connected: worker ends")
+                os._exit(0)
+    threading.Thread(target=watch, daemon=True, name="parent").start()
+
+
 def serve(address, key):
     """The worker's loop: two connections from the live view (commands in, results out), one message at a time."""
     from multiprocessing.connection import Listener
@@ -715,10 +742,13 @@ def serve(address, key):
     except ImportError:
         pass
     t0 = time.perf_counter()
+    connected = threading.Event()
+    _watch_parent(connected)
     with Listener(address, family="AF_PIPE", authkey=key) as lst:
         logger.info("listening (%.1f s)", time.perf_counter() - t0)
         cmd = lst.accept()
         res = lst.accept()
+        connected.set()
         try:
             cfg = cmd.recv()
             logger.info("loading %s (%.1f s)", cfg, time.perf_counter() - t0)
@@ -1071,6 +1101,7 @@ class RegistrationCheck:
         address = rf"\\.\pipe\impactguide-check-{os.getpid()}-{secrets.token_hex(6)}"
         env = dict(os.environ)
         env["IMPACTGUIDE_CHECK_KEY"] = key.hex()
+        env["IMPACTGUIDE_CHECK_PARENT"] = str(os.getpid())
         env.setdefault("PYTHONIOENCODING", "utf-8")
         for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             env.setdefault(k, str(WORKER_THREADS))     # the worker leaves cores to the live view
