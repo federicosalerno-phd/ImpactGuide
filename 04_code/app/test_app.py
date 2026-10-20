@@ -2032,6 +2032,15 @@ def away_origin(app):
 def native_scale(app):
     """The display scaling of the screen at the top left of the desktop, as Windows has it (Qt's own factor, if one
     is set in the environment, taken out)."""
+    if os.name == "nt":     # asked of Windows now: Qt's screens stay as they were if the displays changed meanwhile
+        import ctypes
+        from ctypes import wintypes
+        u, s = ctypes.windll.user32, ctypes.windll.shcore
+        u.MonitorFromPoint.restype = ctypes.c_void_p
+        mon = u.MonitorFromPoint(wintypes.POINT(0, 0), 1)       # MONITOR_DEFAULTTOPRIMARY
+        x, y = ctypes.c_uint(), ctypes.c_uint()
+        if mon and s.GetDpiForMonitor(ctypes.c_void_p(mon), 0, ctypes.byref(x), ctypes.byref(y)) == 0 and x.value:
+            return x.value / 96.0
     screen = next((s for s in app.screens() if s.geometry().contains(0, 0)), None) or app.primaryScreen()
     return screen.devicePixelRatio() / float(os.environ.get("QT_SCALE_FACTOR") or 1.0)
 
