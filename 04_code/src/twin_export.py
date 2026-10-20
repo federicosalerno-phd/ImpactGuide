@@ -631,12 +631,75 @@ def extras(frames):
     if T is not None:
         ex["T_W_mandible"] = rows(T, 6)
     ex["lamps"], ex["world"] = lamps(), world()
+    rd = rig_design()                   # the six spheres and the board's frame, for ground_truth.py
+    if rd is not None:
+        ex["rig_design"] = rd
     cen = spheres_centroid()
     sp = scanner_poses(o, cen, ex.get("arm", {}))
     if sp:
         ex["scanner_poses"] = sp
         ex["spheres_centroid"] = [round(float(x), 4) for x in cen]
     return ex
+
+
+def board_frame(ob):
+    """T_W_M of the marker's board object: origin at the outer corner of the print's grid, x along its columns, y
+    along its rows, z = x cross y (its texture's corners, as synth_twin.py has it; the grid of marker_pose.BOARD);
+    None when its texture has no corners."""
+    import ast
+    import re
+    text = (Path(__file__).with_name("marker_pose.py")).read_text(encoding="utf-8")
+    spec = ast.literal_eval(re.search(r"^BOARD = (\{.*\})$", text, re.M).group(1))
+    me, mw = ob.data, ob.matrix_world
+    if me.uv_layers.active is None:
+        return None
+    uv = me.uv_layers.active.data
+    # the faces that carry the print (an area in the texture), and the texture laid on them: world = (u, v, 1) A
+    U, P = [], []
+    for poly in me.polygons:
+        q = [uv[i].uv for i in poly.loop_indices]
+        area = 0.5 * abs(sum(q[i][0] * q[i - 1][1] - q[i - 1][0] * q[i][1] for i in range(len(q))))
+        if area > 1e-8:
+            for i in poly.loop_indices:
+                U.append((uv[i].uv[0], uv[i].uv[1], 1.0))
+                P.append(tuple(mw @ me.vertices[me.loops[i].vertex_index].co))
+    if len(U) < 3:
+        return None
+    U, P = np.array(U), np.array(P)
+    A = np.linalg.lstsq(U, P, rcond=None)[0]
+    if np.sqrt(((U @ A - P) ** 2).sum(1).mean()) > 0.05:        # not one flat print
+        return None
+    du, dv, o = A
+    tl = o + dv                                                 # the texture's corner (0, 1)
+    x, y = du / np.linalg.norm(du), -dv / np.linalg.norm(dv)
+    origin = tl + (x + y) * (np.linalg.norm(du) - spec["squares"] * spec["square_mm"]) / 2
+    T = np.eye(4)
+    T[:3, :3] = np.stack([x, y, np.cross(x, y)], 1)
+    T[:3, 3] = origin
+    return T
+
+
+def rig_design():
+    """The reference spheres as the scene has them, for ground_truth.py: the centre of each gt_sphere_* shown, by its
+    name without the design's suffix (marker_1..3, mandible_1..3), and the frame M of the board beside the marker's
+    spheres (board_frame), in the bench's world; None unless exactly those six are shown."""
+    sp, coll = {}, {}
+    for ob in present():
+        if ob.type == "MESH" and ob.name.startswith("gt_sphere_"):
+            base = ob.name[len("gt_sphere_"):].split("__")[0]
+            if base in sp:
+                return None             # two designs shown at once
+            sp[base] = [round(float(x), 4) for x in ob.matrix_world.translation]
+            coll[base] = {c.name for c in ob.users_collection}
+    if sorted(sp) != [f"{r}_{k}" for r in ("mandible", "marker") for k in (1, 2, 3)]:
+        return None
+    out = {"spheres": sp}
+    boards = [ob for ob in present() if ob.type == "MESH" and ob.name.startswith(BOARD)]
+    boards.sort(key=lambda ob: not ({c.name for c in ob.users_collection} & coll["marker_1"]))
+    T = board_frame(boards[0]) if boards else None
+    if T is not None:
+        out["board"], out["T_W_M"] = boards[0].name, rows(T, 6)
+    return out
 
 
 def spheres_centroid():

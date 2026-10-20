@@ -109,6 +109,10 @@ OUTLIER_MAX_SHARE = 0.25  # at most this share of the views is dropped (more is 
 SHAPE_UNIT = 100.0      # mm
 FLAT_SAG_MM = 0.2       # a board bending more than this (peak to valley of the surface off its plane) is not flat...
 FLAT_RMS_DROP = 0.2     # ... nor one whose error falls by more than this share when its shape is fitted
+# The shape is used (its intrinsics kept) as soon as it explains the photos better than the noise could: the drop of
+# the squared error with its 3 numbers, against the noise left (an F test), past SHAPE_F. A warp of 0.1 mm, flat
+# enough to pass, moves the focal length of the flat model by about 0.15 %.
+SHAPE_F = 10.0
 # The phone kept still (fit_shape, diagnosis only): the optical centre free for each photo, mean zero. Held in the
 # hand, the lens stabiliser (or the rolling shutter) moves it by tens of px between photos.
 STILL_CENTRE_PX = 5.0   # the centre's spread past this, and past what the noise explains: the phone moved
@@ -681,10 +685,17 @@ def _shape_terms(obj, middle):
     return np.column_stack([u * u, u * v, v * v])
 
 
+def shape_used(shape):
+    """Whether a fit_shape result keeps the model with the board's shape: a board not flat, or a shape that tells
+    (SHAPE_F); a result of before SHAPE_F counts by its "flat" alone."""
+    return bool(shape and shape.get("coef_mm") and (shape.get("used") or not shape.get("flat", True)))
+
+
 def board_surface(obj, shape):
-    """The board's points on its fitted surface (fit_shape's result; unchanged when None or flat), same type."""
+    """The board's points on its fitted surface (fit_shape's result; unchanged when None or its shape not used),
+    same type."""
     obj = np.asarray(obj)
-    if not shape or shape.get("flat", True) or not shape.get("coef_mm"):
+    if not shape_used(shape):
         return obj
     P = obj.astype(np.float64).reshape(-1, 3).copy()
     P[:, 2] += _shape_terms(P, shape["middle_mm"]) @ np.asarray(shape["coef_mm"], np.float64)
@@ -845,7 +856,7 @@ def fit_shape(views, size, K, dist, poses, square=None, centre=True):
     extent = [[float(allp[:, 0].min() - pad), float(allp[:, 0].max() + pad)],
               [float(allp[:, 1].min() - pad), float(allp[:, 1].max() + pad)]]
     middle = [float(np.mean(extent[0])), float(np.mean(extent[1]))]
-    out = {"fitted": False, "flat": True, "sag_mm": None, "rms_flat_px": round(rms_flat, 4), "rms_shape_px": None,
+    out = {"fitted": False, "flat": True, "used": False, "f_test": None, "sag_mm": None, "rms_flat_px": round(rms_flat, 4), "rms_shape_px": None,
            "drop": None, "focal_shift": None, "coef_mm": None, "middle_mm": [round(v, 3) for v in middle],
            "extent_mm": [[round(v, 3) for v in e] for e in extent], "centre": None}
     try:
@@ -857,7 +868,12 @@ def fit_shape(views, size, K, dist, poses, square=None, centre=True):
     sag = _sag(q["shape"], extent, middle)
     drop = 1 - q["rms"] / rms_flat if rms_flat > 0 else 0.0
     f_flat, f_shape = (K[0, 0] + K[1, 1]) / 2, (q["K"][0, 0] + q["K"][1, 1]) / 2
-    out.update({"fitted": True, "flat": not (sag > FLAT_SAG_MM or drop > FLAT_RMS_DROP), "sag_mm": round(sag, 4),
+    flat = not (sag > FLAT_SAG_MM or drop > FLAT_RMS_DROP)
+    left = max(2 * npts - (9 + 6 * len(names) + 3), 1)       # residuals less the numbers of the model with the shape
+    ssr_flat, ssr_shape = rms_flat ** 2 * npts, q["rms"] ** 2 * npts
+    f_test = (ssr_flat - ssr_shape) / 3 / (ssr_shape / left) if ssr_shape > 0 else math.inf
+    out.update({"fitted": True, "flat": flat, "used": bool(not flat or f_test > SHAPE_F),
+                "f_test": round(float(min(f_test, 1e9)), 2), "sag_mm": round(sag, 4),
                 "rms_shape_px": round(q["rms"], 4), "drop": round(drop, 4),
                 "focal_shift": round(float(f_shape / f_flat - 1), 6),
                 "coef_mm": [round(float(c), 6) for c in q["shape"]], "K": q["K"].tolist(), "dist": q["dist"].tolist(),
@@ -925,9 +941,9 @@ def calibrate(views, size, exclude=(), square=None):
     (corner_residuals). Every view, used or not, gets its error under the final model (per_view_all_px: PnP for those
     left out). Raises CalibrationError few_photos with fewer than MIN_VIEWS usable photos.
 
-    After each flat solve fit_shape fits the board's shape: a board that is not flat keeps the intrinsics, errors and
-    poses of the model with its shape (rms_px is then that model's, rms_flat_px the flat one's) and its errors
-    choose the views dropped. The result also holds "shape" (fit_shape: sag_mm, rms_flat_px, rms_shape_px, drop,
+    After each flat solve fit_shape fits the board's shape: a board that is not flat, or whose shape tells beyond the
+    noise (SHAPE_F, "used"), keeps the intrinsics, errors and poses of the model with its shape (rms_px is then that
+    model's, rms_flat_px the flat one's) and its errors choose the views dropped. The result also holds "shape" (fit_shape: sag_mm, rms_flat_px, rms_shape_px, drop,
     focal_shift ...), "centre" (the optical centre free for each photo: spread_px, still ...), "coverage" (where the
     board reached in the image, coverage()), "issues" (codes of ISSUES) and "limit_px" (the last outlier limit)."""
     exclude = sorted(set(exclude) & set(views))
@@ -940,7 +956,7 @@ def calibrate(views, size, exclude=(), square=None):
     while True:
         rms, K, dist, std, per_view, poses = solve(use, size)
         shape = fit_shape(use, size, K, dist, poses, square, centre=False)
-        errs = per_view if shape["flat"] else shape["per_view_rms_px"]
+        errs = shape["per_view_rms_px"] if shape_used(shape) else per_view
         limit = max(OUTLIER_FACTOR * float(np.median(list(errs.values()))), OUTLIER_FLOOR_PX)
         worst = max(errs, key=lambda k: errs[k])
         if errs[worst] <= limit or len(use) - 1 < MIN_VIEWS or len(dropped) >= most:
@@ -951,7 +967,7 @@ def calibrate(views, size, exclude=(), square=None):
     shape = fit_shape(use, size, K, dist, poses, square)
     shape_poses = shape.pop("_poses", None)
     std = {k: _round(s) for k, s in zip(STD_NAMES, std)}
-    if not shape["flat"]:
+    if shape_used(shape):
         K, dist, std = np.array(shape["K"]), np.array(shape["dist"]), shape["std"]
         per_view, rms, poses = shape["per_view_rms_px"], shape["rms_shape_px"], shape_poses
     for k in ("K", "dist", "std", "per_view_rms_px"):
@@ -1354,7 +1370,8 @@ def run_check(images, intrinsics, square, squares=None, marker=None, log: Log | 
     board = make_board(square, squares, marker)
     stored, mine = ref.get("board") or {}, board_spec(board)
     shape = ref.get("shape") if isinstance(ref.get("shape"), dict) else None
-    curved = bool(shape and not shape.get("flat", True) and shape.get("coef_mm") and shape.get("middle_mm"))
+    curved = bool(shape and shape.get("coef_mm") and shape.get("middle_mm")
+                  and (shape.get("used") or not shape.get("flat", True)))
     same_board = (list(stored.get("squares") or []) == mine["squares"]
                   and abs(float(stored.get("square_mm") or 0) - mine["square_mm"]) < 1e-6)
     shape_used = "flat" if not curved else "stored" if same_board else "other_board"
@@ -1617,11 +1634,23 @@ def test_quality(work, cal, real=None):
            f"a board bent as a 3000R monitor: not flat, bends {s['sag_mm']:.2f} mm (truly {sag:.2f}), error "
            f"{s['rms_flat_px']:.3f} -> {c['rms_px']:.3f} px; focal length off the truth {100 * fx:+.3f} % with the "
            f"shape, {100 * flat_fx:+.2f} % without; issues {c['issues']}")
+    # a board warped by 0.1 mm only, under FLAT_SAG_MM: its shape is still used, the focal length kept right (a flat
+    # board's is not)
+    W = BOARD["squares"][0] * BOARD["square"]
+    synth(work / "warped", 16, seed=5, bend_radius=W ** 2 / (8 * 0.1), log=quiet)
+    c = run_calibrate(work / "warped", work / "warped_intrinsics.json", work / "warped" / "truth.json",
+                      BOARD["square"], log=quiet)
+    s, fx = c["shape"], c["error"]["fx_rel"]
+    expect(s["sag_mm"] < FLAT_SAG_MM and s["used"] and not sh["used"] and abs(fx) < MAX_FOCAL_ERROR
+           and abs(s["focal_shift"]) > abs(fx),
+           f"a board warped by 0.1 mm: its shape used (F {s['f_test']}, a flat board's {sh['f_test']}), bends "
+           f"{s['sag_mm']:.3f} mm, focal length off the truth {100 * fx:+.3f} % (shape shift "
+           f"{100 * s['focal_shift']:+.3f} %)")
     # the session check of that calibration, on new photos of the same bent board: the board with its stored shape
     synth(work / "curved_check", 10, seed=6, bend_radius=3000.0, prefix="check", log=quiet)
     ok_c, rep = run_check(work / "curved_check", work / "curved_intrinsics.json", BOARD["square"], log=quiet)
     flat_ref = json.loads((work / "curved_intrinsics.json").read_text(encoding="utf-8"))
-    flat_ref["shape"] = {**flat_ref["shape"], "flat": True}
+    flat_ref["shape"] = {**flat_ref["shape"], "flat": True, "used": False}
     write_json_atomic(work / "curved_as_flat.json", flat_ref)
     ok_f, rep_f = run_check(work / "curved_check", work / "curved_as_flat.json", BOARD["square"], log=quiet)
     flat_ref["shape"]["flat"] = False

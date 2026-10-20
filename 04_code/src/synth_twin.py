@@ -926,7 +926,7 @@ def face_weights(tw, out):
     if path.exists():
         z = np.load(path)
         if (int(z["vertex_count"]) == n and np.allclose(z["probe"], tw.face_w0[:: max(n // 50, 1)], atol=1e-4)
-                and "cap_sig" in z and np.allclose(z["cap_sig"], cap_sig, atol=1e-2)):
+                and "cap_sig" in z and np.allclose(z["cap_sig"], cap_sig, atol=1e-2) and "outer" in z):
             return z["w"]
     sv, sf = world_mesh(tw.objs[SPLINT])
     bvh = BVHTree.FromPolygons(sv.tolist(), sf.tolist())
@@ -963,7 +963,8 @@ def face_weights(tw, out):
     w = fm.weights(tw.face_w0, tw.face_n0, inside, d_mouth, d_border, d_cap)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, w=w, d_mouth=d_mouth.astype(np.float32), d_border=d_border.astype(np.float32),
-                        covered=covered, vertex_count=n, probe=tw.face_w0[:: max(n // 50, 1)], cap_sig=cap_sig)
+                        covered=covered, vertex_count=n, probe=tw.face_w0[:: max(n // 50, 1)], cap_sig=cap_sig,
+                        outer=outer)    # outer skin; the rest (rim, back and inner skin) is the cut of the shell
     print(json.dumps({"weights": {"mouth_vertices": int(near.sum()), "border_vertices": int(border.sum()),
                                   "outer_vertices": int(outer.sum()), "under_cap_vertices": int(covered.sum()),
                                   "weight_mean": round(float(w.mean()), 3), "weight_zero": round(float((w == 0).mean()), 3)}}))

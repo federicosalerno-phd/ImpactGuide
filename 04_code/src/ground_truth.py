@@ -41,6 +41,7 @@ import argparse
 import csv
 import itertools
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -136,6 +137,87 @@ def load_calibration(path=None):
     if set(rigs) != set(RIGS) or any(t.shape != (3, 3) for t in rigs.values()) or set(labels) - set(radii):
         raise ValueError(f"{path.name}: not a rig calibration (the rigs {sorted(RIGS)} and a radius per sphere)")
     return {**c, "rigs": rigs, "radii": radii}
+
+
+# The rigs as the bench scene has them: the twin's export writes RIG_DESIGN at each export of the scene (the six
+# spheres and the board's frame M in the bench's world, twin.py, twin_export.py), read again whenever it changes
+# (refresh_rigs, in place: every default argument rigs=RIGS sees it); without it the built-in RIGS_BUILT_IN.
+# rig_status() says which, and when the scene changed after it or the rig calibration is of other spheres.
+RIG_DESIGN = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "protocol" / "rig_design.json"
+RIGS_BUILT_IN = {k: v.copy() for k, v in RIGS.items()}
+RIG_TOL_MM = 1.0        # a rig calibration whose distances differ from the design's by more is of other spheres
+_DESIGN = {"key": None, "info": None}
+
+
+def design_rigs(path=None):
+    """The rig templates of a rig design file: the marker's spheres in the board frame M (its T_W_M; without it in
+    the board frame of the nominal scene, placed where the bench has them relative to the head), the head's in the
+    mandible frame (its T_W_mandible); with the scene, its time and version. None without a usable file."""
+    path = Path(RIG_DESIGN if path is None else path)
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        sp = d["spheres"]
+        T_mand = np.asarray(d["T_W_mandible"], np.float64)
+        W_mk = np.array([sp[f"marker_{k}"] for k in (1, 2, 3)], np.float64)
+        W_hd = np.array([sp[f"mandible_{k}"] for k in (1, 2, 3)], np.float64)
+        T_M = np.asarray(d["T_W_M"], np.float64) if d.get("T_W_M") is not None else None
+        if T_mand.shape != (4, 4) or W_mk.shape != (3, 3) or W_hd.shape != (3, 3) or \
+                (T_M is not None and T_M.shape != (4, 4)):
+            raise ValueError("shapes")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if T_M is not None:
+        marker, frame = transform(inverse(T_M), W_mk), "board"
+    else:
+        S_mand, S_M = scene_poses_nominal()
+        marker, frame = transform(inverse(S_M) @ S_mand @ inverse(T_mand), W_mk), "nominal"
+    return {"rigs": {"marker": marker, "mandible": transform(inverse(T_mand), W_hd)}, "marker_frame": frame,
+            "T_W_M": T_M, "T_W_mandible": T_mand, "scene": d.get("scene_path") or "",
+            "scene_mtime": d.get("scene_mtime"), "version": d.get("version"), "path": str(path)}
+
+
+def refresh_rigs(path=None):
+    """RIGS as the rig design file has it now (the built-in rigs without one), changed in place key by key. Returns
+    the design read, None for the built-in rigs."""
+    path = Path(RIG_DESIGN if path is None else path)
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(path), None, None)
+    if key != _DESIGN["key"]:
+        info = design_rigs(path) if key[1] is not None else None
+        new = info["rigs"] if info else RIGS_BUILT_IN
+        for k in ("marker", "mandible"):
+            RIGS[k] = np.asarray(new[k], np.float64).copy()
+        _DESIGN.update(key=key, info=info)
+    return _DESIGN["info"]
+
+
+def rigs_match(a, b, tol=RIG_TOL_MM):
+    """Two sets of rig templates of the same spheres: every distance inside a rig within tol."""
+    return all(np.abs(np.sort(rig_distances(a[n])) - np.sort(rig_distances(b[n]))).max() <= tol for n in b)
+
+
+def rig_status(calibration=None, path=None):
+    """What the rigs are taken from: source scene (the rig design file) or built_in; scene_changed: the scene was saved
+    after the file was written (its new spheres not read yet: the twin exports it again two minutes after a save);
+    calibration_other: the rig calibration is of spheres placed otherwise (a distance off by more than RIG_TOL_MM)."""
+    info = refresh_rigs(path)
+    out = {"source": "scene" if info else "built_in", "scene_changed": False, "calibration_other": False,
+           "version": info.get("version") if info else None, "marker_frame": info["marker_frame"] if info else ""}
+    if info and info.get("scene") and info.get("scene_mtime"):
+        try:
+            out["scene_changed"] = Path(info["scene"]).stat().st_mtime > float(info["scene_mtime"]) + 1.0
+        except (OSError, ValueError, TypeError):
+            pass
+    try:
+        cal = load_calibration(calibration)
+    except (ValueError, KeyError, TypeError):
+        cal = None
+    if cal is not None:
+        out["calibration_other"] = not rigs_match(cal["rigs"], RIGS)
+    return out
 
 
 # ---------------------------------------------------------------- transforms
@@ -512,11 +594,16 @@ def measure(scans, reference=None, X=None, Y=None, rigs=CALIBRATED, radii=CALIBR
         scans = [scans]
     clouds = [load_cloud(s) if isinstance(s, (str, Path)) else np.asarray(s, np.float64) for s in scans]
     views, used, info, warnings = [], [], [], []
+    refresh_rigs()                      # the rigs as the bench scene has them now
     wants = [isinstance(x, str) and x == CALIBRATED for x in (rigs, radii)]
     cal = load_calibration(calibration) if any(wants) else None
     if any(wants) and cal is None:
         warnings.append("no rig calibration (python ground_truth.py calibrate): design rigs and free sphere radii")
-    if wants[0]:
+    if wants[0] and cal is not None and not rigs_match(cal["rigs"], RIGS):
+        # the spheres were moved after the calibration: the design's rigs, with the calibrated radii
+        warnings.append("rig calibration of spheres placed otherwise: the design's rigs used (calibrate again)")
+        rigs = RIGS
+    elif wants[0]:
         rigs = cal["rigs"] if cal else RIGS
     elif rigs is None:
         rigs = RIGS
@@ -704,6 +791,16 @@ HUB_MANDIBLE = (46.0, 107.1597, -54.9717)               # hub of the head rig po
 
 
 def scene_poses():
+    """T_W_mandible and T_W_M of the simulated scene: the mandible of SCENE, the board where the bench scene has it
+    relative to the head (the rig design file), else the nominal one."""
+    T_mand, T_M = scene_poses_nominal()
+    info = refresh_rigs()
+    if info and info["marker_frame"] == "board":
+        T_M = T_mand @ inverse(info["T_W_mandible"]) @ info["T_W_M"]
+    return T_mand, T_M
+
+
+def scene_poses_nominal():
     """T_W_mandible and T_W_M of the nominal scene."""
     n_out = unit(SCENE["board_out"])
     z = -n_out
@@ -959,6 +1056,66 @@ def selftest(trials=200, noise=0.05, seed=0, merged=True, dense=False, radii=Non
     return ok, stats, fails
 
 
+def rig_design_test(tmp, check, cal_path, frame):
+    """The rigs read from a rig design file as the twin's export writes it: the board's frame and the head as the
+    scene has them, the head's spheres then tilted in the scene and read again with no change of code, a scan of the
+    tilted rig identified, the scene saved after the file and a calibration of the spheres of before both said."""
+    global RIG_DESIGN
+    real = RIG_DESIGN
+    RIG_DESIGN = tmp / "rig_design.json"
+    try:
+        scene = tmp / "bench.blend"
+        scene.write_bytes(b"scene")
+        T_mand, T_M = scene_poses_nominal()
+        Tw = pose(rot_x(-92.3745), [0.0, 96.364, 16.66])               # the bench's world: the hinge elsewhere
+        Tb = Tw @ inverse(T_mand) @ T_M                                # the board where the nominal scene has it
+        mk, hd = RIGS_BUILT_IN["marker"], RIGS_BUILT_IN["mandible"]
+
+        def write(head_tilt_deg):
+            Q = pose(Rotation.from_rotvec([np.radians(head_tilt_deg), 0.0, 0.0]).as_matrix(), np.zeros(3))
+            c = hd.mean(0)
+            H = transform(Tw @ pose(np.eye(3), c) @ Q @ pose(np.eye(3), -c), hd)       # the head frame tilted
+            sp = {f"marker_{k + 1}": transform(Tb, mk)[k].tolist() for k in range(3)}
+            sp.update({f"mandible_{k + 1}": H[k].tolist() for k in range(3)})
+            RIG_DESIGN.write_text(json.dumps({"spheres": sp, "T_W_M": Tb.tolist(), "T_W_mandible": Tw.tolist(),
+                                              "scene_path": str(scene), "scene_mtime": scene.stat().st_mtime,
+                                              "version": 1}), encoding="utf-8")
+            t = time.time() + head_tilt_deg      # a new time for each version of the file
+            os.utime(RIG_DESIGN, (t, t))
+        write(0.0)
+        info = refresh_rigs()
+        check(info and info["marker_frame"] == "board" and np.allclose(RIGS["marker"], mk, atol=1e-6)
+              and np.allclose(RIGS["mandible"], hd, atol=1e-6) and rig_status(cal_path)["source"] == "scene",
+              "rig design file: the marker's spheres in the board's frame, the head's in the mandible frame")
+        write(12.0)
+        refresh_rigs()
+        moved = float(np.abs(RIGS["mandible"] - hd).max())
+        Tm2, TM2 = scene_poses()
+        clouds, _ = synthetic_scan(TM2, Tm2, np.random.default_rng(3))
+        r = measure(clouds, rigs=CALIBRATED, radii=None, calibration=tmp / "none.json", T_B_mandible=frame)
+        check(moved > 2 and np.allclose(rig_distances(RIGS["mandible"]), rig_distances(hd), atol=1e-6)
+              and r["n_views_used"] >= 1,
+              f"rig design file: the head's spheres tilted in the scene read again with no change of code "
+              f"({moved:.1f} mm), a scan of them identified")
+        st = rig_status(cal_path)
+        check(not st["scene_changed"], "rig status: the scene not saved after the file")
+        t = time.time() + 60
+        os.utime(scene, (t, t))
+        st2 = rig_status(cal_path)
+        check(st2["scene_changed"], "rig status: the scene saved after the file is said (its spheres not read yet)")
+        # a calibration of spheres placed otherwise: said, and the design's rigs taken
+        bad = json.loads(Path(cal_path).read_text(encoding="utf-8"))
+        bad["rigs"]["mandible"] = (np.asarray(bad["rigs"]["mandible"]) * [1.0, 1.0, 1.1]).tolist()
+        odd = tmp / "rig_calibration_other.json"
+        odd.write_text(json.dumps(bad), encoding="utf-8")
+        r2 = measure(clouds, calibration=odd, T_B_mandible=frame)
+        check(rig_status(odd)["calibration_other"] and any("placed otherwise" in w for w in r2["warnings"]),
+              "rig status: a calibration of spheres placed otherwise is said; the design's rigs are used")
+    finally:
+        RIG_DESIGN = real
+        refresh_rigs()
+
+
 def quick_test():
     """Checks of the targets table, of the two head frames and of the result files, a few seconds. Returns the list
     of the failed checks."""
@@ -1059,6 +1216,7 @@ def quick_test():
         except ValueError:
             few = not (Path(tmp) / "few.json").exists()
         check(few, f"calibrate: refused with fewer than {MIN_CALIBRATION_SCANS} scans, nothing written")
+        rig_design_test(Path(tmp), check, cal_path, frame)
     ok, stats, n_fail = selftest(trials=1, noise=5.0, verbose=False)
     check(not ok and n_fail == 1 and np.isnan(stats["centre"]["p95"]), "selftest: every trial failed gives FAIL, no crash")
     print(f"{len(fails)} failed" if fails else "all passed")

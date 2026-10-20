@@ -117,6 +117,9 @@ def state_seed(key):
 def run(a):
     face = rf.load_face()
     ren = MaskRenderer(face.v, face.f)
+    cut = sd.cut_triangles(face.v, face.f)     # the cut of the silicone shell, when the meshes carry it
+    if cut is not None:
+        ren._cut_triangles = cut
     net = rf.Refiner(face=face)
     scale = sigma_scale(net, face)
     print(f"sigma scale from validation: {scale}", flush=True)

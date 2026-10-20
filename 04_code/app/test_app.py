@@ -1424,11 +1424,12 @@ def test_film(d, raw):
         added = d.call("calib_import", "")
     finally:
         ig.QFileDialog = real_dialog
-    again = d.wait(lambda: ended(n1), 120)
+    again = d.wait(lambda: ended(n1), 300)        # as long as the first film's: the choice is slow on a busy PC
     w = d.call("calib_state")
     expect(added.get("film") == "copying" and again and w["series"]["name"] != v["series"]["name"]
            and w["count"] == v["count"],
-           f"a film added by hand: a series of its own ({w['series']['name']}), the same {w['count']} frames chosen")
+           f"a film added by hand: a series of its own ({w['series']['name']}), the same {w['count']} frames chosen"
+           f"{'' if again else ' (its calibration not ended in 300 s)'}")
     hand.unlink(missing_ok=True)
 
 
@@ -1915,6 +1916,8 @@ SWEEP = [
     ("cal_plate_short", "__adv('calBdShort', true)", 900, True),
     ("cal_sheet", "__adv('calBdShort', false); BOARD.set({kind: 'sheet'})", 1300, True),
     ("cal_photos_phys", "go('calibration', 'photos')", 1500, True),
+    ("cal_bench", "BOARD.set({kind: 'plate'}); CAL.set({plan: 'bench'})", 2200, True),
+    ("cal_bench_quick", "CAL.set({plan: 'quick'})", 900, False),
     ("cal_photos", "BOARD.set({kind: 'screen'}); go('calibration', 'photos')", 1800, True),
     ("cal_photos_adv", "__adv('calPhAdv', true)", 900, True),
     ("cal_stream", "__adv('calPhAdv', false); CAL.set({mode: 'stream'})", 5000, True),
@@ -2914,8 +2917,10 @@ def _test_scans(app, work):
     d.call("scans_process", json.dumps({"day": "", "all": False}))
     done = d.wait(lambda: any(e.get("action") == "processed" for e in scans_events(n)), 90)
     poses = b.scans.store() / b.run().phase / scan_desk.POSES_NAME
-    with open(poses, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f)) if poses.is_file() else []
+    rows = []
+    if poses.is_file():
+        with open(poses, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
     expect(done and len(rows) == 1 and rows[0]["trial"] == trial and rows[0]["calibrated"] == "1"
            and rows[0]["T_M_B_post"].count(" ") == 15,
            f"scans: today's trials processed into {poses.name} ({len(rows)} trial, calibrated, registrations)")

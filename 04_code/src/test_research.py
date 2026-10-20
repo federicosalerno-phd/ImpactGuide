@@ -1,7 +1,8 @@
 """Quick checks of the correction, the conformal test and the statistics of the evaluations: the distance field beyond
 its crop, one scale of millimetres per pixel, the conformal splits by sample, the seeds of the test samples, the
-paired tests by sample with the Holm adjustment, and each corrected view set once in the criterion of the view
-guidance. CPU, a few seconds, no data needed.
+paired tests by sample with the Holm adjustment, each corrected view set once in the criterion of the view
+guidance, the trimmed residuals and the views needed, the detection threshold, and the known occluders rendered with
+the face against the labels of the twin (skipped without the twin dataset). Under a minute.
 
     python 04_code/src/test_research.py
 """
@@ -190,6 +191,56 @@ def test_trimmed_and_views():
     check(cut.tolist() == [True, True, False, False, False, False], "cut edge: triangles on an open border only")
 
 
+def test_occluders():
+    """Known occluders rendered with the face (occlusion.py) against the exact labels of twin photos: the occluders
+    in front agree with the marker and interface labels, and the face pixels taken out are those labels."""
+    if not (rf.SYNTH / "meshes" / "occluders.npz").exists():
+        print("skip  occluders (no twin dataset)")
+        return
+    import occlusion as oc
+    import synth_data as sd
+    face = rf.load_face()
+    npz = np.load(rf.SYNTH / "meshes" / "occluders.npz")
+    rens, seen = {}, set()
+    for fr in sd.frames(sd.sessions(rf.SYNTH)[0]):
+        if fr["mode"] != "photo" or fr["view"] != "p1" or fr["interface"] in seen:
+            continue
+        seen.add(fr["interface"])
+        if fr["interface"] not in rens:
+            rens[fr["interface"]] = oc.OccludedRenderer(face.v, face.f, oc.Occluders.from_twin(npz, fr["interface"]))
+        d = sd.load(sd.sessions(rf.SYNTH)[0], fr)
+        r = rens[fr["interface"]].render(d["K"], d["dist"], d["T_C_B"], tuple(fr["size"]), T_C_M=d["T_C_M"])
+        lab = d["labels"]
+        known, other = np.isin(lab, (2, 4)), np.isin(lab, (3, 5, 6, 7, 9))     # marker, interface; not modelled
+        f, k = r.front & ~other, known & ~other
+        iou = (f & k).sum() / max((f | k).sum(), 1)
+        full = (r.mask > 0) | r.hidden
+        prec = (r.hidden & known).sum() / max(r.hidden.sum(), 1)
+        rec = (known & full & r.hidden).sum() / max((known & full).sum(), 1)
+        check(iou > 0.98 and prec > 0.98 and rec > 0.98 and r.hidden.any(),
+              f"{fr['interface']} {fr['image']}: rendered occluders against the labels (IoU {iou:.3f}; face pixels taken "
+              f"out: {prec:.3f} labelled, {rec:.3f} of the labelled found; {int(r.hidden.sum())} px)")
+        check(not np.any(r.mask[r.ignore & (r.mask > 0)] == 0) and r.ignore[r.front].all(), "ignore mask covers the occluders")
+
+
+def test_shell_cut():
+    """The cut of a closed shell from the outer-skin flag of the meshes: triangles off the outer skin are cut, and
+    correct.py takes the given triangles instead of the open borders."""
+    import synth_data as sd
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "meshes").mkdir()
+        full = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1]])
+        np.savez(Path(tmp) / "meshes" / "face_phantom_full.npz", vertices=full)
+        np.savez(Path(tmp) / "meshes" / "face_weights.npz", outer=np.array([1, 1, 1, 1, 0, 0], bool))
+        f = np.array([[0, 1, 2], [1, 3, 2], [0, 4, 1], [1, 4, 5]])
+        cut = sd.cut_triangles(full + 0.01, f, tmp)
+        check(cut is not None and cut.tolist() == [False, False, True, True], f"cut of the shell: {cut}")
+        np.savez(Path(tmp) / "meshes" / "face_weights.npz", w=np.ones(6))
+        check(sd.cut_triangles(full, f, tmp) is None, "meshes without the outer flag: no cut")
+    ren = type("R", (), {"f": f, "_cut_triangles": np.array([False, True, False, False])})()
+    check(co.cut_triangles(ren).tolist() == [False, True, False, False], "correct.py takes the given cut")
+
+
 def test_tau():
     """tau of the detection: the largest threshold that still flags 95% of the lost registrations of the validation."""
     rng = np.random.default_rng(7)
@@ -205,7 +256,7 @@ def test_tau():
 
 if __name__ == "__main__":
     for t in (test_field_beyond_crop, test_one_scale, test_conformal_groups, test_seeds, test_statistics,
-              test_trimmed_and_views, test_tau):
+              test_trimmed_and_views, test_tau, test_shell_cut, test_occluders):
         t()
     print(f"{len(FAILED)} failed" if FAILED else "all passed")
     sys.exit(1 if FAILED else 0)

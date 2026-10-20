@@ -907,6 +907,8 @@ VIEW3D.proto = {
       rt.scissor.set(rect.x, rect.y, rect.w, rect.h);
       rt.scissorTest = true;
       r.setRenderTarget(rt);
+      const sky = v.scene.background;          // (the mask has no sky behind it)
+      v.scene.background = null;
       v.scene.overrideMaterial = kit.black;
       r.render(v.scene, mc);
       v.scene.overrideMaterial = null;
@@ -916,6 +918,7 @@ VIEW3D.proto = {
         r.render(v.scene, mc);
         s.parts.forEach(function (m) { m.layers.mask = 0; });
       });
+      v.scene.background = sky;
       rt.viewport.set(0, 0, size.x, size.y);
       rt.scissorTest = false;
       r.setRenderTarget(null);

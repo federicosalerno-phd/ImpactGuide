@@ -175,14 +175,16 @@ def slots(run: trials.Run, trial: str, rows: list[dict] | None = None) -> list[d
     caller; read here when None)."""
     if rows is None:
         steps = run.steps(trial)
+        cfg = run.config_for(run.log.row(trial))
     else:
         i = next((i for i, r in enumerate(rows) if r["trial"] == trial), None)
         if i is None:
             return []
-        steps = trials.trial_steps(run.config, rows[i], rows[i - 1] if i else None)
+        cfg = run.config_for(rows[i])       # the settings the trial started under (config_version), not today's
+        steps = trials.trial_steps(cfg, rows[i], rows[i - 1] if i else None)
     out = []
     for st in steps:
-        s = slot_of(st.key, run.config)
+        s = slot_of(st.key, cfg)
         if s:
             s["file"] = st.files[0]
             out.append(s)
@@ -315,8 +317,9 @@ def view_summary(result: dict | None, path: Path, sha: str, cal: str, seconds: f
            "measured": now_iso(), "seconds": round(seconds, 2), "cal": cal}
     if result is None:
         m = re.search(r"(\d+) spheres found", error)
-        out.update(ok=False, n_spheres=int(m.group(1)) if m else 0, identified=False,
-                   why="few_spheres" if m else "not_identified", arm={"arm": None})
+        differ = "not identified" in error          # all found, their distances not the design's
+        out.update(ok=False, n_spheres=int(m.group(1)) if m else (6 if differ else 0), identified=False,
+                   why="few_spheres" if m else ("rigs_differ" if differ else "not_identified"), arm={"arm": None})
         return out
     info = (result.get("views") or [{}])[0]
     out.update(ok=True, n_spheres=int(info.get("n_spheres", 6)), identified=True, why="",
@@ -571,6 +574,7 @@ class Desk:
             out_slots.append({"key": s["key"], "when": s["when"], "az": s["az"], "arm": s["arm"], "state": state,
                               "file": p.name if p else "", "filed": bool(p) and filed(self.run, trial, s) is not None,
                               "n_spheres": (v or {}).get("n_spheres"), "arm_seen": seen.get("arm"),
+                              "why": (v or {}).get("why", ""),
                               "exported": (v or {}).get("exported", ""),
                               "arm_off": bool(seen.get("arm") and s["arm"] and seen["arm"] != s["arm"])})
         before_trial, before_which = self.before_of(trial, rows)
@@ -627,6 +631,20 @@ class Desk:
                 "slots": out_slots, "before": {"trial": before_trial, "which": before_which, "state": b_state},
                 "result": res, "todo": todo}
 
+    def _trial_config(self, trial: str, rows: dict | list | None = None) -> trials.Config:
+        """The settings a logged trial started under (trials.Run.config_for); today's for a trial not in the log.
+        rows: the log as read by the caller, {trial: row} or a list of rows."""
+        if isinstance(rows, dict):
+            row = rows.get(trial)
+        else:
+            row = next((r for r in rows if r["trial"] == trial), None) if rows else None
+        if row is None:
+            try:
+                row = self.run.log.row(trial)
+            except trials.NotFound:
+                return self.run.config
+        return self.run.config_for(row)
+
     def result(self, trial, log, rows, data, b_set, p_set, measure) -> dict:
         """The displacement of the trial from its sets of before and after: rotation, shift of the marker, the error
         at each target, the cap's shift since the last reference."""
@@ -641,7 +659,7 @@ class Desk:
                "tre_max_mm": round(d["tre_max_mm"], 4), "tre_mean_mm": round(d["tre_mean_mm"], 4),
                "calibrated": bool(p_set.get("calibrated")) and bool(b_set.get("calibrated")),
                "warnings": sorted(set(p_set.get("warnings", []) + b_set.get("warnings", []))),
-               "cap_limit_mm": float(self.run.config.reposition_mm),
+               "cap_limit_mm": float(self._trial_config(trial, rows).reposition_mm),
                "cap_from": "holder" if trials.cap_point_M() is not None else "scene" if pts["cap"] is not None
                else "spheres", "measured": p_set.get("measured", "")}
         ref = self.last_reference(trial, rows)

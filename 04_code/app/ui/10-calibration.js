@@ -123,6 +123,8 @@ const CAL = {
     });
     $('calPlanQ').textContent = fmtNum(s.plans.quick.n, 0);
     $('calPlanA').textContent = fmtNum(s.plans.accurate.n, 0);
+    if (s.plans.bench) $('calPlanB').textContent = fmtNum(s.plans.bench.n, 0);
+    const bench = !check && s.plan === 'bench';
     $('calPhotosSub').textContent = T(check ? 'cal.photos.sub.check' : stream ? 'cal.photos.sub.stream'
       : film ? 'cal.photos.sub.video' : 'cal.photos.sub');
 
@@ -147,7 +149,9 @@ const CAL = {
     // what to change before the next photo: the camera's settings the last one was refused for, else a phone that
     // moved in the last calibration (kept still on a stand); the camera in Pro with its focus set by hand
     const last = s.series && s.series.same ? s.series.last : null;
+    // the bench: before the first photo what to set up (the guide says the seat and the arm angle of each stop)
     const warn = last && last.why === 'settings' ? Tcode('cal.set.', (last.problems || [])[0], 'exposure_auto')
+      : bench ? (!n ? T('cal.ph.bench') : '')
       : s.moved ? T('cal.ph.stand') : '';
     $('calPhWarn').textContent = warn;
     $('calPhWarn').classList.toggle('hidden', !warn);
@@ -230,7 +234,10 @@ const CAL = {
     const hold = s.moved ? 'cal.auto.hold.stand' : 'cal.auto.hold';
     const word = !on ? 'cal.auto.key' : { off: 'cal.auto.off', none: 'cal.auto.none', far: 'cal.auto.far',
       hold: hold, wait: hold, ready: 'cal.auto.ready' }[a.state] || 'cal.auto.none';
-    $('calAutoSay').textContent = T(word);
+    // the bench: the arm to the stop shown, or the seat the board stands in when it is the wrong one
+    const bench = on && s.plan === 'bench' && s.kind !== 'check' && a.state === 'far';
+    $('calAutoSay').textContent = !bench ? T(word) : a.seat && s.next && s.next.seat
+      ? T('cal.auto.bench.seat', a.seat, s.next.seat) : T('cal.auto.bench.far');
     $('calAutoSay').classList.toggle('near', on && (a.state === 'hold' || a.state === 'wait' || a.state === 'ready'));
   },
 
@@ -513,7 +520,11 @@ const CAL = {
     } else if (e.type === 'calib_film') {
       // a film for a calibration: recording, its frames being chosen, then chosen (the calibration follows by itself)
       if (e.action === 'choosing') workOn('cal_film', 'pill.film.choosing');
-      if (e.action === 'chosen') { workOff('cal_film'); toast(T('cal.film.chosen', fmtNum(e.n, 0), fmtNum(e.seconds, 0))); }
+      if (e.action === 'chosen') {
+        workOff('cal_film');
+        toast(T('cal.film.chosen', fmtNum(e.n, 0), fmtNum(e.seconds, 0))
+          + (e.slower ? ' · ' + T('cal.film.slower', fmtNum(e.slower, 0)) : ''));
+      }
       CAL.refresh();
     } else if (e.type === 'live' && livePurpose(e) === 'calibration') {
       // the stream of the streaming mode (the Live AR view never handles these)

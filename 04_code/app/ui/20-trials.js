@@ -553,6 +553,7 @@ const TRIALS = {
     $('cfgWashers').value = c.washers_per_side;
     $('cfgRepos').value = c.reposition_mm;
     $('cfgHigh').checked = !!c.highspeed;
+    $('cfgSets').value = c.repetitions;          // pre-impact: the sets of positions
     TRIALS.cfgPreview();
   },
 
@@ -578,9 +579,10 @@ const TRIALS = {
     TRIALS.cfg = C;
     $('cfgPhase').value = C.phase;
     TRIALS.fillCfg(C.config);
-    // the pre-impact sets have no matrix of impacts to set here (pre_impact.py sequence --sets N)
+    // the pre-impact sets have no matrix of impacts: only their number, under Advanced
     const pre = C.phase === 'pre_impact';
-    ['cfgHolders', 'cfgAngles', 'cfgDirections', 'cfgReps', 'cfgDrape', 'cfgPreview', 'cfgAdv', 'cfgApply', 'cfgReset'].forEach(function (id) {
+    $('cfgPreAdv').classList.toggle('hidden', !pre);
+    ['cfgHolders', 'cfgAngles', 'cfgDirections', 'cfgReps', 'cfgDrape', 'cfgPreview', 'cfgAdv'].forEach(function (id) {
       const el = $(id);
       const box = el.closest('.field') || (el.parentElement.classList.contains('row') ? el.parentElement : el);
       box.classList.toggle('hidden', pre);
@@ -606,7 +608,8 @@ const TRIALS = {
   },
 
   applyCfg: function () {
-    ask('config_apply', JSON.stringify(TRIALS.readCfg()), function (C) {
+    const pre = TRIALS.cfg && TRIALS.cfg.phase === 'pre_impact';
+    ask('config_apply', JSON.stringify(pre ? { repetitions: Number($('cfgSets').value) } : TRIALS.readCfg()), function (C) {
       if (!C) return;
       TRIALS.renderCfg(C);
       toast(T('cfg.applied', C.totals.slots, C.totals.pending), TOAST_SAID_MS);

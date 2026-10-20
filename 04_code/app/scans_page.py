@@ -296,6 +296,7 @@ class ScansPage:
                "folder": str(folder or ""), "folder_ok": bool(folder and folder.is_dir()),
                "formats": [s.lstrip(".").upper() for s in acquisition.SCAN_SUFFIXES],
                "watching": bool(folder) and self.waits(), "calibration": desk.calibration_state(),
+               "rigs": gt.rig_status(self.calibration()),
                "trials": [{k: r.get(k, "") for k in ("trial", "holder", "angle_deg", "direction_deg", "status")}
                           for r in listed],
                "busy": self.busy(), "measuring": any(w == f"measure:{trial}" for w in self.busy()),

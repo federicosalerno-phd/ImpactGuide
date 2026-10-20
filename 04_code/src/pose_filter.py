@@ -55,7 +55,8 @@ DEFAULTS = {
     "min_cutoff_hz": 2.0,     # smoothing while still: lower is calmer and slower to settle
     "beta": 1.0,              # cutoff added per px/s of the model's speed past the dead band: higher lags less
     "turn_beta": 1.0,         #   the same for the turn about the line of sight
-    "tilt_beta": 0.25,        #   and for the tilt, the noisy channel
+    "tilt_beta": 0.1,         #   and for the tilt, the noisy channel (20/10: from 0.25, the patient board's clip
+                              #   shakes 5 % less moving, error 6 % lower at its fast end, no lag; the large one alike)
     "d_cutoff_hz": 2.0,       # smoothing of that speed
     "lead": True,             # moving, the filter carries the pose on by its speed first: no lag at a steady speed
     "still_px_s": 8.0,        # dead band at least this (px/s at the stream size): slower is noise, not motion

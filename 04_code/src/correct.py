@@ -192,12 +192,16 @@ class Problem:
         out = []
         for v in self.views:
             T = v.T_C_M @ self.T0 @ self.delta(R, s)
-            r = self.renderer.render(v.K, v.dist, T, v.size)
+            if getattr(self.renderer, "wants_marker_pose", False):     # occlusion.OccludedRenderer
+                r = self.renderer.render(v.K, v.dist, T, v.size, T_C_M=v.T_C_M)
+            else:
+                r = self.renderer.render(v.K, v.dist, T, v.size)
             self.ms += r.ms
             self.renders += 1
             X = self.lift(v, T, r, step)
             out.append({"X": X, "mask": r.mask, "scale": sc.mm_per_px(v.K, T, self.renderer.v),
-                        "A": (v.T_C_M @ self.T0)[:3, :3], "b": (v.T_C_M @ self.T0)[:3, 3]})
+                        "A": (v.T_C_M @ self.T0)[:3, :3], "b": (v.T_C_M @ self.T0)[:3, 3],
+                        "ignore": getattr(r, "ignore", None)})
         return out
 
     def lift(self, v, T, r, step):
@@ -210,6 +214,8 @@ class Problem:
             return np.empty((0, 3))
         p = np.vstack(cs)
         p = p[v.keep[p[:, 1], p[:, 0]]]
+        if getattr(r, "ignore", None) is not None:      # rendered occluders: no points along them
+            p = p[~r.ignore[p[:, 1], p[:, 0]]]
         fid = r.faces[p[:, 1] - y0, p[:, 0] - x0]
         p, fid = p[fid >= 0], fid[fid >= 0]
         if self.cut_faces is not None:      # the silhouette only: not the cut edge of the mesh
@@ -312,7 +318,12 @@ class Problem:
         return keep
 
     def view_scores(self, data):
-        return [sc.view_score(v.observed, d["mask"], d["scale"], v.ignore) for v, d in zip(self.views, data)]
+        out = []
+        for v, d in zip(self.views, data):
+            ign = v.ignore if d.get("ignore") is None else (d["ignore"] if v.ignore is None
+                                                             else (np.asarray(v.ignore) > 0) | d["ignore"])
+            out.append(sc.view_score(v.observed, d["mask"], d["scale"], ign))
+        return out
 
     def covariance(self, R, s, data, kappa=1.0):
         """Laplace covariance of the update: kappa sigma^2 (J^T W J)^-1 from the outline residuals alone, or with a

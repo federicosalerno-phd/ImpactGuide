@@ -5,7 +5,8 @@ it runs on simulated data before the pilot (test, synthetic) and on the pilot's 
 Model (model). The swinging part read from the bench scene (Blender in the background, on a copy of the scene, never
 saved): every mesh under pendulum_swing that the renders show (design alternatives left out), solid, with the density
 of its material (DENSITY): mass, centre of mass, moment of inertia about the axle, period of small swings, radius of
-the impact point (the nose of the tip) and the effective mass there. The same run reads the square marker holder P1:
+the impact point and the effective mass there. The impact point is the scene's strike point, checked against the nose
+of the tip (the nose itself when the two are more than STRIKE_TOL_MM apart). The same run reads the square marker holder P1:
 the ChArUco frame M of its label (as marker_pose.py: origin at the outer corner of the first square, x along the
 printed columns, y along the rows, z into the board) and, in M, the cap's strike point, its centroid and axis and the
 three sphere centres. Written to 03_data/processed/protocol/pendulum_model.json and marker_holder.json; the strike point
@@ -103,6 +104,7 @@ WASHER = "pendulum_mass_washer_l1"
 P1SQ = {"label": "marker_charuco__p1sq", "cap": "marker_strike_cap__p1sq", "holder": "marker_holder__p1sq",
         "spheres": [f"gt_sphere_marker_{i}__p1sq" for i in (1, 2, 3)]}
 BOARD_MM = 45.0                 # the printed squares: 5 x 9 mm (marker_pose.BOARD), inside the 50 mm label image
+STRIKE_TOL_MM = 1.0             # the scene's strike point within this of the pendulum's nose: it is the contact
 # share of the pendulum's energy that enters the marker, per direction (rigid impact, restitution 0.5, 100 g effective
 # at the tip against the marker's 31 / 21 / 15 g at the cap about its joint)
 TRANSFER = {0: 0.40, 45: 0.33, 90: 0.26}
@@ -226,20 +228,27 @@ def blender_model():
     co, tv, _, _ = mesh_of(bpy.data.objects[TIP])
     rel = co - pivot
     apex = co[np.argmax(rel @ h)]                   # the nose's point that touches the cap
-    ra = apex - pivot
+    # the contact: the scene's strike point (the bench writes it), checked against the nose; a point of the scene
+    # more than STRIKE_TOL_MM off the nose is not the contact of the parts as they stand, and the nose is used
+    sp = bpy.context.scene.get("strike_point")
+    sp = np.array(list(sp), np.float64) if sp is not None else None
+    gap = float(np.linalg.norm(sp - apex)) if sp is not None else None
+    contact, source = (sp, "scene") if gap is not None and gap <= STRIKE_TOL_MM else (apex, "tip")
+    ra = contact - pivot
     r_impact = float(np.linalg.norm(ra - (ra @ axis) * axis))
     washer = None
     if WASHER in bpy.data.objects:
         wco, wtv, wtm, wmats = mesh_of(bpy.data.objects[WASHER])
         washer = abs(mass_properties(wco, wtv, [density_of(wmats[i]) or DENSITY["steel"] for i in wtm])[0])
-    scene_strike = bpy.context.scene.get("strike_point")
     model = {"pivot_W": pivot.tolist(), "axis_W": axis.tolist(), "h_W": h.tolist(), "tip_apex_W": apex.tolist(),
-             "mass_g": m_tot, "com_W": (pivot + com).tolist(),
+             "contact_W": contact.tolist(), "contact_from": source, "mass_g": m_tot, "com_W": (pivot + com).tolist(),
              "c_h_mm": float(com @ h), "c_z_mm": float(com @ z), "c_axis_mm": float(com @ axis),
              "inertia_g_mm2": inertia_about(S_tot, axis), "impact_radius_mm": r_impact,
              "washer_g": washer, "parts": parts, "unknown_density": unknown,
-             "scene_strike_point_W": list(scene_strike) if scene_strike is not None else None}
-    model["holder"] = holder_p1sq(bpy, mesh_of, apex)
+             "scene_strike_point_W": sp.tolist() if sp is not None else None, "scene_strike_to_nose_mm": gap}
+    model["holder"] = holder_p1sq(bpy, mesh_of, contact)
+    if model["holder"] is not None:
+        model["holder"].update(contact_from=source, scene_strike_to_nose_mm=gap)
     return model
 
 

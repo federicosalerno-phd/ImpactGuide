@@ -8,12 +8,27 @@ mm_per_px below), truncated at TRUNC_MM so that spurious outline pieces do not w
 the mean of the two directed means. Outline pixels near the image border or on known occluders (ignore mask) are left
 out. Score of several views: mean of the view scores.
 
-Threshold tau: 95th percentile of the score on pre-impact images (threshold); registration lost when the score is
-above tau. detection() gives AUC, sensitivity and specificity against the true label (mean TRE without correction above
-2 mm).
+The one definition of the alarm, for the live view and for the analyses alike:
+  score     view_score with trim=TRIM (the largest TRIM of the distances of each direction left out: a drape or a hand
+            moves a stretch of the outline, a misalignment all of it); several views: their mean (score());
+  label     registration lost when the mean target error without correction is above LOST_MM;
+  tau       tau_lost(): the largest threshold that still flags at least SENSITIVITY of the lost registrations of the
+            validation data; one value, in THRESHOLD_FILE (save_threshold(), written by the analysis that chooses
+            it, python live_check.py tau), read by the live view and the analyses (load_threshold()).
+threshold() (the 95th percentile before the impact) stays as the threshold of a simple change. detection() gives AUC,
+sensitivity and specificity at a threshold against the label.
 """
+import json
+from pathlib import Path
+
 import cv2
 import numpy as np
+
+TRIM = 0.2         # the score of the alarm: trimmed mean (view_score(trim=TRIM))
+LOST_MM = 2.0      # a registration is lost above this mean target error without correction
+SENSITIVITY = 0.95  # tau flags at least this share of the lost registrations of the validation data
+THRESHOLD_FILE = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "detection" / "threshold.json"
+TAU_DEFAULT_MM = 0.67   # until the file is there (twin validation sweeps of 20/10/2026)
 
 TRUNC_MM = 3.0     # distances above this count as this
 BORDER_PX = 5      # outline pixels this close to the image border are left out
@@ -86,8 +101,43 @@ def score(view_scores):
 
 
 def threshold(pre_impact_scores, q=95.0):
-    """tau: q-th percentile of the score on pre-impact images."""
+    """The threshold of a simple change: q-th percentile of the score on pre-impact images."""
     return float(np.percentile(pre_impact_scores, q))
+
+
+def tau_lost(scores, lost, sensitivity=SENSITIVITY):
+    """tau: the largest threshold at which at least `sensitivity` of the lost registrations score above it (a score
+    above tau flags the registration), midway between the lost scores just below and just above it. NaN without
+    lost ones."""
+    s = np.sort(np.asarray(scores, float)[np.asarray(lost, bool)])
+    if not len(s):
+        return float("nan")
+    allowed = len(s) - int(np.ceil(sensitivity * len(s) - 1e-9))      # lost scores that may stay at or below tau
+    if allowed >= len(s):
+        return float(s[-1])
+    below = s[s < s[allowed]]           # ties with the first score that must stay above tau stay above it too
+    return float((below[-1] + s[allowed]) / 2) if len(below) else float(s[allowed] - 1e-6)
+
+
+def save_threshold(tau_mm, path=THRESHOLD_FILE, **info):
+    """Writes tau (mm) with what it was chosen on (info: data, statistic, counts, date) to the threshold file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = {"tau_mm": round(float(tau_mm), 4), "trim": TRIM, "lost_mm": LOST_MM, "sensitivity": SENSITIVITY, **info}
+    path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
+
+
+def load_threshold(path=THRESHOLD_FILE):
+    """(tau in mm, the file's content) from the threshold file; TAU_DEFAULT_MM and {} when it is missing or bad."""
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+        tau = float(d["tau_mm"])
+        if np.isfinite(tau) and tau > 0:
+            return tau, d
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return TAU_DEFAULT_MM, {}
 
 
 def roc_auc(scores, labels):

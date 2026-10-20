@@ -477,6 +477,7 @@
           <div class="mlist" id="calPlans">
             <div class="mitem" data-plan="quick" tabindex="0" role="button"><span class="mitem-name" data-t="cal.plan.quick"></span><span class="mbadge" id="calPlanQ"></span></div>
             <div class="mitem" data-plan="accurate" tabindex="0" role="button"><span class="mitem-name" data-t="cal.plan.accurate"></span><span class="mbadge" id="calPlanA"></span></div>
+            <div class="mitem" data-plan="bench" tabindex="0" role="button" data-t-title="cal.plan.bench.hint"><span class="mitem-name" data-t="cal.plan.bench"></span><span class="mbadge" id="calPlanB"></span></div>
           </div>
           <div class="count card" id="cpCard">
             <div class="count-n"><span id="cpN">0</span><span class="count-of" id="cpOf"></span></div>
@@ -776,6 +777,10 @@
             <div class="row" data-t-title="cfg.seed.hint"><input class="input" type="number" id="cfgSeed" step="1"/></div>
             <label class="toggle" data-t-title="cfg.highspeed.hint"><input type="checkbox" id="cfgHigh"/><span data-t="cfg.highspeed"></span></label>
           </div></div></div>
+          <!-- pre-impact: only the number of sets of positions -->
+          <div class="fold hidden" id="cfgPreAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
+            <div class="field" data-t-title="cfg.sets.hint"><span class="field-n" data-t="cfg.sets"></span><input class="input" type="number" id="cfgSets" min="1" step="1"/></div>
+          </div></div></div>
         </div>
         <div class="rp-foot">
           <button class="btn btn-2 btn-wide" id="cfgReset" data-t-title="cfg.reset.hint"><span data-icon="reset"></span><span class="btn-label" data-t="cfg.reset"></span></button>
@@ -837,6 +842,7 @@
         </div>
         <div class="rp-scroll stack">
           <div class="live-state slim" id="scWatch"><span class="live-dot" id="scWatchDot"></span><span class="lk-word" id="scWatchW"></span></div>
+          <div class="callout callout-warn hidden" id="scRigWarn"></div>
           <button class="btn btn-2 btn-wide hidden" id="scFolderBtn" type="button"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
           <button class="btn btn-2 btn-wide hidden" id="scSim" type="button" data-t-title="scans.sim.hint"><span class="btn-label" data-t="scans.sim"></span></button>
           <div class="stack hidden" id="scPick">

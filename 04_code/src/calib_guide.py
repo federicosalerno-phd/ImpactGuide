@@ -23,7 +23,9 @@ page draws it so for a physical board).
 
 PLANS: quick (15 poses: the five views at 35 degrees, the four corners of the photo, two turns, the edges at two
 distances), accurate (40: eight directions at 25 and 35 degrees, the nine places of the screen, turns, the four corners
-of the photo, near views, as the calibration protocol asks), check (10: the session check). Each plan covers tilts in
+of the photo, near views, as the calibration protocol asks), check (10: the session check); bench (calib_bench: the
+phone on the arm, the plate in the three seats of the board holder, a step for each seat and stop of the arm). Each
+plan of the phone held by hand (HAND) covers tilts in
 every direction, the whole image and its four corners, and the three distances. No pose is tilted more than MAX_TILT:
 past it the board is deep enough to leave the depth of field of the phone's f/1.5 lens at 30-40 cm.
 
@@ -57,6 +59,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import calib_bench
 import calibrate_charuco
 
 WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "calib_guide"
@@ -124,8 +127,10 @@ PLANS = {
     "check": [P("front", 0), P("left", 35), P("right", 35), P("above", 35), P("below", 35)]
     + [P(v, 30, at, "far") for v, at in _CORNERS] + [P("front", 0, dist="near", roll=25)],
 }
+PLANS["bench"] = calib_bench.STEPS      # the phone on the arm, the plate in the seats of the board holder
+HAND = ("quick", "accurate", "check")   # the plans of poses of the phone (the others: calib_bench)
 # what the counter allows of each plan: at least `min` photos kept to calibrate, at most the plan's length
-LIMITS = {"quick": {"min": 12}, "accurate": {"min": 30}, "check": {"min": 8}}
+LIMITS = {"quick": {"min": 12}, "accurate": {"min": 30}, "check": {"min": 8}, "bench": {"min": 22}}
 
 
 def limits(plan):
@@ -285,8 +290,11 @@ def findable(pose, spec, mode="photo"):
 def guide(pose, spec, mode="photo", n=0, plan="quick"):
     """What the page draws for a pose: the screen's aspect; the board's outline and its black squares as the phone's
     screen shows them, in fractions of the screen's width and height (x right, y down; parts may lie outside it); and
-    the side view: yaw and pitch (degrees), the distance (cm), the roll."""
+    the side view: yaw and pitch (degrees), the distance (cm), the roll. A step of the bench (calib_bench): its seat
+    and arm angle too."""
     K, (w, h) = camera(mode)
+    if pose.get("view") == "bench":
+        return calib_bench.guide(pose, spec, K, (w, h), n, plan, len(PLANS[plan]))
     W, H = board_mm(spec)
     pose = placed(pose, (W, H), mode)
     T = camera_pose(pose, (W, H), mode)
@@ -438,6 +446,9 @@ def photo(plan, i, spec, kind, mode="photo", lay=None, rng=None, size=None):
     page, origin, ppm = texture(kind, spec, lay)
     page = cv2.GaussianBlur(page, (0, 0), 0.6)
     pose = placed(PLANS[plan][i % len(PLANS[plan])], board_mm(spec), mode, K, (w, h))
+    if pose.get("view") == "bench":         # the bench: the arm and the seat as they come, nothing held by hand
+        T = calib_bench.camera_pose(pose, rng)
+        return calibrate_charuco.render(page, origin, rays, T[:3, :3], T[:3, 3], rng, ppm)[0]
     j = jittered(pose, rng)
     d = distances(board_mm(spec), mode)[pose["dist"]] * j["dist_mul"]
     T = camera_pose(free_pose(j["yaw"], j["pitch"], j["at"], d, j["roll"]), board_mm(spec), mode, K, (w, h))
@@ -513,7 +524,7 @@ def cmd_test(a):
     # every pose of every plan keeps enough of each board in view, in both modes
     for name, kind, spec, lay in boards():
         for mode in CAMERAS:
-            for plan in PLANS:
+            for plan in HAND:
                 low = [(i, seen(p, spec, mode)[0]) for i, p in enumerate(PLANS[plan])
                        if seen(p, spec, mode)[0] < MIN_SEEN]
                 expect(not low, f"{name}, {mode}, {plan} ({len(PLANS[plan])} poses): every pose keeps at least "
@@ -587,7 +598,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("show")
-    a.add_argument("--plan", choices=list(PLANS), default="quick")
+    a.add_argument("--plan", choices=list(HAND), default="quick")
     a.add_argument("--mode", choices=list(CAMERAS), default="photo")
     a = sub.add_parser("test")
     a.add_argument("--work", type=Path, default=WORK / "selftest")     # a folder of the test's own

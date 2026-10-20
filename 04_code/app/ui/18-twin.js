@@ -39,6 +39,11 @@ const TWIN = {
   SWEEP_HOLD_S: 0.6,    // the arm a moment at each end of the sweep
   SWEEP_SHADOW_MS: 90,  // its shadows drawn again at most this often
   DECAL: /layout|_ink$|^print_|_print$|_mark$|_logo|engraving/,   // materials of markings laid on a surface
+  SKIN_SHEEN: 0.35,     // the silicone's sheen...
+  SKIN_GLOW: 0.06,      // ... and the share of its colour it gives back in its shadows
+  PANEL_LIGHT: 0.45,    // the light panels' own light on the bench (each a soft spot from its diffuser)
+  PANEL_REACH_MM: 1600,
+  SKY: ['#ffffff', '#e4e7ec'],    // behind the bench: from the top of the view to its bottom
   blend: null,          // the cables between the arm's positions (false: their meshes do not allow it)
   sweepMesh: null,
   shadowKey: '', targetsKey: '',
@@ -112,7 +117,13 @@ const TWIN = {
       if (ok && v.r !== had) TWIN.setup(v.r);
       return ok;
     };
-    v.background = function () { v.viewColor = TWIN.backdrop(); if (v.r) v.r.setClearColor(v.viewColor, 1); v.gizmoDraw(); };
+    // behind the bench a soft light sky, lighter at the top (SKY); the gizmo and the veil take its middle colour
+    v.background = function () {
+      v.scene.background = TWIN.sky();
+      v.viewColor = new THREE.Color(TWIN.SKY[0]).lerp(new THREE.Color(TWIN.SKY[1]), 0.5);
+      if (v.r) v.r.setClearColor(v.viewColor, 1);
+      v.gizmoDraw();
+    };
     v.background();
     window.addEventListener('pagehide', function () { if (TWIN.viewer) TWIN.viewer.dispose(); TWIN.viewer = null; });
     return true;
@@ -123,14 +134,16 @@ const TWIN = {
   fail: function () {
     TWIN.message(T('twin.no_gl'));
     clearTimeout(TWIN.retry);
+    // asked again less and less often (2 s, then twice as long each time, at most 30 s): no storm of new contexts
+    TWIN.retryMs = Math.min(30000, TWIN.retryMs ? TWIN.retryMs * 2 : TWIN.RETRY_MS);
     TWIN.retry = setTimeout(function again() {
       if (!TWIN.viewer || !TWIN.showing()) return;
       TWIN.viewer.draw();
       TWIN.retry = setTimeout(function () {
-        if (TWIN.viewer && TWIN.viewer.r) TWIN.message(TWIN.url ? '' : $('twMsg').textContent);
-        else TWIN.retry = setTimeout(again, TWIN.RETRY_MS);
+        if (TWIN.viewer && TWIN.viewer.r) { TWIN.retryMs = 0; TWIN.message(TWIN.url ? '' : $('twMsg').textContent); }
+        else TWIN.retry = setTimeout(again, TWIN.retryMs);
       }, 200);
-    }, TWIN.RETRY_MS);
+    }, TWIN.retryMs);
   },
 
   // opened from the trial's page (mode trials) or as the Scans step of Scans and results
@@ -250,6 +263,14 @@ const TWIN = {
         Object.assign(opts, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
       }
       if (sh) return new THREE.MeshPhysicalMaterial(Object.assign(opts, { sheen: new THREE.Color(sh[0], sh[1], sh[2]) }));
+      // the silicone face as skin looks: a soft warm sheen at grazing angles and a faint waxy coat, a little light
+      // of its own colour in its shadows (the light it carries under its surface)
+      if (opts.name === 'silicone_face') {
+        const c = opts.color;
+        return new THREE.MeshPhysicalMaterial(Object.assign(opts, {
+          sheen: new THREE.Color(1, 0.62, 0.5).multiplyScalar(TWIN.SKIN_SHEEN), clearcoat: 0.12, clearcoatRoughness: 0.55,
+          emissive: c.clone().multiplyScalar(TWIN.SKIN_GLOW), emissiveIntensity: 1 }));
+      }
       return new THREE.MeshStandardMaterial(opts);
     });
     const TYPES = { 5120: Int8Array, 5122: Int16Array, 5123: Uint16Array, 5125: Uint32Array, 5126: Float32Array };
@@ -336,10 +357,51 @@ const TWIN = {
       v.scene.add(d, d.target);
       TWIN.lights.push(d);
     });
+    TWIN.panelLights(c);
     const w = (x.world && x.world.light) || [0.3, 0.3, 0.3];
     v.hemi.color.setRGB(w[0], w[1], w[2]);
     v.hemi.groundColor.setRGB(w[0], w[1], w[2]);
     v.hemi.intensity = v.scene.environment ? 0 : 1;
+  },
+
+  // the light panels lit as on the bench: from each diffuser (its own triangles' middle) a soft wide spot towards
+  // the face and the marker, warm white, no shadow of its own
+  panelLights: function (centre) {
+    const v = TWIN.viewer, x = TWIN.extras || {};
+    if (!TWIN.model) return;
+    TWIN.model.updateMatrixWorld(true);
+    const aim = new THREE.Vector3().fromArray(x.target || x.board_centre || centre.toArray());
+    const p = new THREE.Vector3();
+    TWIN.model.traverse(function (m) {
+      if (!m.isMesh || !m.material || m.material.name !== 'bp66_diffuser' || !m.userData.objects) return;
+      const g = m.geometry, pos = g.attributes.position, idx = g.index;
+      m.userData.objects.forEach(function (o) {
+        const box = new THREE.Box3();
+        for (let k = o[1] * 3; k < (o[1] + o[2]) * 3; k += 7) box.expandByPoint(p.fromBufferAttribute(pos, idx.getX(k)));
+        if (box.isEmpty()) return;
+        const at = box.getCenter(new THREE.Vector3()).applyMatrix4(m.matrixWorld);
+        const s = new THREE.SpotLight(new THREE.Color(1, 0.97, 0.92), TWIN.PANEL_LIGHT, TWIN.PANEL_REACH_MM, 0.95, 1, 2);
+        s.position.copy(at);
+        s.target.position.copy(aim);
+        s.castShadow = false;
+        v.scene.add(s, s.target);
+        TWIN.lights.push(s);
+      });
+    });
+  },
+
+  // the sky behind the bench: a gradient from SKY[0] at the top of the view to SKY[1] at its bottom, made once
+  skyTexture: null,
+  sky: function () {
+    if (TWIN.skyTexture) return TWIN.skyTexture;
+    const cv = document.createElement('canvas');
+    cv.width = 2; cv.height = 256;
+    const g = cv.getContext('2d'), grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, TWIN.SKY[0]); grad.addColorStop(1, TWIN.SKY[1]);
+    g.fillStyle = grad; g.fillRect(0, 0, 2, 256);
+    TWIN.skyTexture = new THREE.CanvasTexture(cv);
+    TWIN.skyTexture.encoding = THREE.sRGBEncoding;
+    return TWIN.skyTexture;
   },
 
   // what the camera sees behind the bench in Blender (the world for camera rays)
@@ -1101,14 +1163,18 @@ const TWIN = {
     $('gTwin').onclick = function () { TWIN.open('trials'); };
     $('twPrev').onclick = function () { TWIN.goEntry(TWIN.entry - 1); };
     $('twNext').onclick = function () { TWIN.goEntry(TWIN.entry + 1); };
-    // the arrows go through the steps, as Blender's go through the frames
-    window.addEventListener('keydown', function (e) {
-      if (!TWIN.showing() || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
-      const a = document.activeElement;
-      if (a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
-      e.preventDefault();
-      TWIN.goEntry(TWIN.entry + (e.key === 'ArrowRight' ? 1 : -1));
-    });
+    // the arrows go through the steps, as Blender's go through the frames (listened to once: wire() runs again at
+    // every change of language)
+    if (!TWIN.arrowsOn) {
+      TWIN.arrowsOn = true;
+      window.addEventListener('keydown', function (e) {
+        if (!TWIN.showing() || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+        const a = document.activeElement;
+        if (a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
+        e.preventDefault();
+        TWIN.goEntry(TWIN.entry + (e.key === 'ArrowRight' ? 1 : -1));
+      });
+    }
     if (TWIN.state) {
       TWIN.views(); TWIN.scanPanel(TWIN.state.scan); TWIN.modelRows(TWIN.state.model || {}); TWIN.stepMarks();
     }

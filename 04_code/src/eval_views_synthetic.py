@@ -148,6 +148,11 @@ def init(source="face", kind="cpu"):
     cv2.setNumThreads(1)
     s = load_face() if source == "face" else load_mandible()
     ren = renderer(s["v"], s["f"], kind)
+    if s["source"] == "face":           # the cut of the silicone shell, when the meshes carry it
+        import synth_data as sd
+        cut = sd.cut_triangles(s["v"], s["f"], SYNTH)
+        if cut is not None:
+            ren._cut_triangles = cut
     cands = s["arc"].candidates(AZIMUTHS, s["K"], s["size"], s["T"])
     occ_ren = renderer(*s["occluders"][:2], kind) if s["occluders"] else None
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * DILATE_PX + 1, 2 * DILATE_PX + 1))

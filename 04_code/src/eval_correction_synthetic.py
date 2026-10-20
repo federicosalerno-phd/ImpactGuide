@@ -24,8 +24,10 @@ others run in parallel worker processes. Samples already in samples.csv are not 
 Writes
 - WORK/samples.csv (WORK: t14 in the work folder, environment variable IMPACTGUIDE_WORK): one row per sample and
   view set;
-- 05_results/detection_synthetic.csv: samples without defects; tau from the validation half so that a lost
-  registration (TRE before above 2 mm) is flagged in at least SENSITIVITY of the cases; AUC, sensitivity and
+- 05_results/detection_synthetic.csv: samples without defects; scores as score.py defines the alarm (trimmed mean,
+  score.TRIM); tau the alarm's one threshold (score.THRESHOLD_FILE), and beside it (tau_val_mm) the same rule on the
+  validation half: a lost registration (TRE before above 2 mm) flagged in at least SENSITIVITY of the cases; AUC,
+  sensitivity and
   specificity on the test half, false alarms on its pre-impact images; the same for the threshold of a simple change
   (95th percentile of the pre-impact scores of the validation half) and for the Youden threshold (comparison); the
   drape samples apart (false alarms, sensitivity and specificity at tau);
@@ -69,8 +71,8 @@ DEFECT = 0.3
 DRAPE_FRAC = (0.2, 0.5)
 MAX_DEG, MAX_MM = 5.0, 5.0
 TARGETS = 64
-LIMIT_MM = 2.0                  # registration lost above this mean TRE
-SENSITIVITY = 0.95              # tau: a lost registration is detected in at least this share of the validation half
+LIMIT_MM = sc.LOST_MM           # registration lost above this mean TRE (score.py: the one definition of the alarm)
+SENSITIVITY = sc.SENSITIVITY    # tau: a lost registration is detected in at least this share of the validation half
 DRAPE_KNOWN = True              # the drape is segmented by its colour and passed as a known occluder (ignore mask)
 DILATE = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))    # the occluders dilated by 3 px, as refiner.DILATE_PX
 STRESS_MM = 0.2                 # lower limit for the conformal test, where synthetic corrections do fail
@@ -203,10 +205,10 @@ def run_sample(job):
         obs = [observed(v["mask"], v["scale"], rng, defect if k == bad_view else None) for k, v in enumerate(views)]
     pre, stale = [], []
     for v, ob, ig in zip(views, obs, ignore):
-        pre.append(sc.view_score(ob, v["mask"], v["scale"], ig)["score_mm"])
+        pre.append(sc.view_score(ob, v["mask"], v["scale"], ig, trim=sc.TRIM)["score_mm"])
         T = v["T"] @ P
         stale.append(sc.view_score(ob, ren.render(v["K"], None, T, _ctx["size"]).mask, sc.mm_per_px(v["K"], T, ren.v),
-                                   ig)["score_mm"])
+                                   ig, trim=sc.TRIM)["score_mm"])
     one, pair = int(rng.integers(4)), [(0, 2), (1, 3)][int(rng.integers(2))]
     rows = []
     pbar = X.mean(0)
@@ -253,14 +255,7 @@ def holm(p):
     return out
 
 
-def tau_lost(scores, lost, sensitivity=SENSITIVITY):
-    """Largest threshold at which at least `sensitivity` of the lost registrations score above it (a score above tau
-    flags the registration): midway between the lost scores just below and just above it. NaN without lost ones."""
-    s = np.sort(np.asarray(scores, float)[np.asarray(lost, bool)])
-    if not len(s):
-        return float("nan")
-    allowed = len(s) - int(np.ceil(sensitivity * len(s) - 1e-9))      # lost scores that may stay at or below tau
-    return float(s[0] - 1e-6) if allowed == 0 else float((s[allowed - 1] + s[allowed]) / 2) if allowed < len(s)         else float(s[-1])
+tau_lost = sc.tau_lost     # score.py holds the rule
 
 
 def summarize(rows):
@@ -283,9 +278,10 @@ def summarize(rows):
         dra = [r for r in rows if r["set"] == name and r["defect"] == "drape"]
         s_val, y_val = np.array([r["score_before_mm"] for r in val]), np.array([r["tre_before_mm"] > LIMIT_MM for r in val])
         tau_change = sc.threshold([r["score_pre_mm"] for r in val])
-        tau = tau_lost(s_val, y_val)
-        if not np.isfinite(tau):        # no lost registration in the validation half: the change threshold
-            tau = tau_change
+        # the alarm's one tau (score.THRESHOLD_FILE, chosen by its analysis); the same rule on this validation half
+        # beside it, for comparison
+        tau_val = sc.tau_lost(s_val, y_val)
+        tau = sc.load_threshold()[0]
         s_test, y_test = [r["score_before_mm"] for r in test], [r["tre_before_mm"] > LIMIT_MM for r in test]
         d, dc = sc.detection(s_test, y_test, tau), sc.detection(s_test, y_test, tau_change)
         if y_val.any() and (~y_val).any():
@@ -295,7 +291,11 @@ def summarize(rows):
             youden, dy = float("nan"), {"sensitivity": float("nan"), "specificity": float("nan")}
         dd = sc.detection([r["score_before_mm"] for r in dra], [r["tre_before_mm"] > LIMIT_MM for r in dra], tau)
         f3 = lambda x: f"{x:.3f}"
+        dv = sc.detection(s_test, y_test, tau_val) if np.isfinite(tau_val) else {"sensitivity": float("nan"),
+                                                                                    "specificity": float("nan")}
         det.append({"key": name, "tau_mm": f3(tau), "auc": f3(d["auc"]), "sensitivity": f3(d["sensitivity"]),
+                    "tau_val_mm": f3(tau_val), "sensitivity_val_tau": f3(dv["sensitivity"]),
+                    "specificity_val_tau": f3(dv["specificity"]),
                     "specificity": f3(d["specificity"]), "n_lost": d["n_lost"], "n_valid": d["n_valid"],
                     "false_alarm_pre": f3(np.mean([r["score_pre_mm"] > tau for r in test])),
                     "n_validation": len(val), "tau_change_mm": f3(tau_change),

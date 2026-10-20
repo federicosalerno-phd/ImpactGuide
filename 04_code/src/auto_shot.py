@@ -51,7 +51,8 @@ ROLL_DEG = 15.0         # its turn on the screen within this of the guide's
 STILL = 0.012           # the corners moved less than this between two looks (fractions of the photo's sides): still
 HOLD_S = 0.6            # still this long before the photo
 GAP_S = 5.0             # at least this long between two photos
-RETRY_S = 1.0           # a photo that could not be taken is asked for again this much later at the soonest
+NEW_STOP = 0.006        # with new_stop (the bench), the board this far from where it was at the last photo (fractions)
+RETRY_S = 1.0         # a photo that could not be taken is asked for again this much later at the soonest
 LOOK_HZ = 6.0           # looks at the preview per second
 LOOK_PX = 1280          # the preview is looked at with its long side at most this
 MIN_SEEN = 6            # corners to place the board's plane
@@ -163,8 +164,10 @@ class Watch:
         self._still_since = None
         self.state, self.error, self.corners = "none", None, 0
         self._rect, self._rect_t = None, -math.inf
+        self.new_stop = False       # a photo only once the board moved since the last one (the bench: a new stop)
+        self._shot_at = None        # the corners at the last photo
 
-    def target(self, want, board_spec: dict | None, key=None, mode: str = "photo") -> None:
+    def target(self, want, board_spec: dict | None, key=None, mode: str = "photo", new_stop: bool = False) -> None:
         """The guide's outline of the next photo and the board it is of ({squares, square_mm, marker_mm}), for the
         camera of the mode; None when no photo is wanted (the plan full, the board not on show)."""
         bk = None if not board_spec else (tuple(board_spec["squares"]), float(board_spec["square_mm"]),
@@ -179,11 +182,14 @@ class Watch:
         self.mode = mode
         self.want = None if want is None or bk is None else outline_pose(want, self.board_wh, mode)
         self.key = key
+        self.new_stop = bool(new_stop)
 
     def shot(self) -> None:
-        """A photo was taken (by itself or by hand): the next one no sooner than gap_s, after a new stillness."""
+        """A photo was taken (by itself or by hand): the next one no sooner than gap_s, after a new stillness (and,
+        with new_stop, once the board moved NEW_STOP from where it was)."""
         self.last_shot = self.clock()
         self._still_since = None
+        self._shot_at = self._prev
 
     def _none(self) -> str:
         self.state, self.error, self._prev, self._still_since = "none", None, None, None
@@ -228,7 +234,8 @@ class Watch:
             self._still_since = now
         if now - self._still_since < self.hold_s:
             self.state = "hold"
-        elif now - self.last_shot < self.gap_s:
+        elif now - self.last_shot < self.gap_s or (self.new_stop and self._shot_at is not None
+                                                   and distance(seen, self._shot_at) < NEW_STOP):
             self.state = "wait"
         else:
             self.state = "ready"
@@ -268,9 +275,9 @@ class Watcher:
         if wait and self.thread.is_alive() and self.thread is not threading.current_thread():
             self.thread.join(2.0)
 
-    def target(self, want, board_spec, key=None, mode: str = "photo") -> None:
+    def target(self, want, board_spec, key=None, mode: str = "photo", new_stop: bool = False) -> None:
         with self._lock:
-            self.watch.target(want, board_spec, key, mode)
+            self.watch.target(want, board_spec, key, mode, new_stop)
             self._last = None           # the newest frame looked at again against the new guide
 
     def shot(self) -> None:
@@ -431,6 +438,34 @@ def run_test() -> int:
         clock.t += 0.17
     expect(far_state == "far" and none_state == "none" and "ready" not in shaky,
            f"another pose's guide: far; no board: none; the phone moving between looks: never ready ({set(shaky)})")
+    # the bench: a photo at a stop, then none while the arm stays there for the next step, one once it gets there;
+    # the board of another seat is far
+    _, pk, pspec, _ = calib_guide.boards()[1]
+    bench = calib_guide.PLANS["bench"]
+    i50 = next(i for i, s in enumerate(bench) if s["seat"] == 1 and s["arm"] == 40.0)
+    at50, at51 = (calib_guide.photo("bench", i, pspec, pk, "photo", None, rng=np.random.default_rng(7), size=size)
+                  for i in (i50, i50 + 1))
+    wb = Watch(clock)
+    wb.target(calib_guide.guide(bench[i50], pspec)["outline"], pspec, ("b", i50), new_stop=True)
+    first = []
+    for _ in range(8):
+        first.append(wb.feed(at50))
+        clock.t += 0.17
+    wb.shot()
+    wb.target(calib_guide.guide(bench[i50 + 1], pspec)["outline"], pspec, ("b", i50 + 1), new_stop=True)
+    stay = []
+    for _ in range(int(GAP_S / 0.17) + 6):
+        stay.append(wb.feed(at50))
+        clock.t += 0.17
+    moved_on = []
+    for _ in range(8):
+        moved_on.append(wb.feed(at51))
+        clock.t += 0.17
+    other = next(i for i, s in enumerate(bench) if s["seat"] == 2 and s["arm"] == 40.0)
+    wb.target(calib_guide.guide(bench[other], pspec)["outline"], pspec, ("b", other), new_stop=True)
+    expect("ready" in first and "ready" not in stay and moved_on[-1] == "ready" and wb.feed(at50) == "far",
+           f"the bench: a photo at the stop, none while the arm stays ({set(stay)}), one at the next stop; the board "
+           f"in another seat is far")
     # the mirrored screen: the preview found between the app's bands, either turn of the phone held across
     for turn in (1, -1):
         disp = as_display(img, turn)

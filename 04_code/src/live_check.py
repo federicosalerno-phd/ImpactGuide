@@ -115,9 +115,8 @@ SETTINGS = {
     "device": None,        # torch device of SAM and the network (None: cuda when there is one)
     "boards": ("patient",),  # the face is watched over on these boards (the calibration board has no face)
 }
-TAU_MM = 0.67          # misalignment score above which the registration is lost: chosen on the twin's validation
-                       # sweeps (python live_check.py tau) to find 95 % of the lost ones (at trim 0.2: AUC 0.94,
-                       # 73 % of the others left alone, 8 % false alarms before an impact without a drape)
+TAU_MM = sc.load_threshold()[0]   # alarm threshold of the score: the one of the analyses (score.THRESHOLD_FILE,
+                                  # written by python live_check.py tau), the default until it is there
 U_MM = 2.0             # a correction is applied only with a predicted 95 % target error under this
 ENOUGH_MM = 1.0        # views are enough once the predicted 95 % target error after them is under this
 DETECT = {
@@ -128,7 +127,7 @@ DETECT = {
     "box_margin": 0.10,    # prompt box of SAM: the visible face grown by this share (half on each side), as the
                            #   network was trained (refiner.BOX_MARGIN); a larger box takes in the background
     "dilate_px": 3,        # the known occluders grown by this before they are left out
-    "trim": 0.2,           # score.view_score's trimmed mean: a drape or a hand moves a stretch of the outline
+    "trim": sc.TRIM,       # the score of the alarm (score.py): its trimmed mean
     "in_flight": 2,        # frames sent and not answered yet (the worker's SAM overlaps the rest of the previous)
     "region_mm": 288.0,    # the square sent around the face centre (the network's region, refiner.REGION_MM)
     "crop_margin": 0.15,   #   or the face with this margin, whichever is larger
@@ -1661,16 +1660,21 @@ TRIMS = (0.0, 0.1, 0.2, 0.3)
 
 
 def cmd_tau(a):
-    """The trim and TAU_MM from the validation sweeps: per trim of the score, the decisions (median of
-    DETECT["median_of"] views) against the label (mean target error above 2 mm); the trim with the largest AUC, and
-    for it the largest threshold that still finds a lost registration in at least 95 % of the decisions, as decided
-    for the detection; the 95th percentile before the impact and the Youden threshold beside it."""
+    """TAU_MM from the validation sweeps of the twin, as score.py defines it: the score with trim score.TRIM, the
+    decision on the median of DETECT["median_of"] consecutive views (the live view's), a registration lost above
+    score.LOST_MM, and the largest threshold that still flags score.SENSITIVITY of the lost ones (score.tau_lost);
+    written to score.THRESHOLD_FILE with --write. The other trims, the 95th percentile before the impact and the
+    Youden threshold are printed beside it. --summary: from the rows of the last run."""
+    out = WORK / "live_check"
+    path = out / f"tau_{a.split}.csv"
+    if a.summary:
+        return tau_summary(_read_rows(path), a)
     w = Worker({"method": "opt", "segmenter": a.segmenter})
     rows = []
     t0 = time.perf_counter()
     for key, frs in twin_states(a.split).items():
         res = [r for r in run_sweep(w, frs, guide=False, trims=TRIMS) if r.get("trim_scores")]
-        lost = frs[0]["target_shift_mm"]["mean"] > 2.0
+        lost = frs[0]["target_shift_mm"]["mean"] > sc.LOST_MM
         for i, r in enumerate(res):
             row = {"state": "/".join(map(str, key)), "lost": lost, "tre_mm": frs[0]["target_shift_mm"]["mean"],
                    "drape": bool(frs[0].get("drape")), "i": i, "pre": frs[0]["state"] == 0,
@@ -1681,30 +1685,37 @@ def cmd_tau(a):
                 row[f"median_{q}"] = float(np.median(vals))
             rows.append(row)
         print(f"{key}: {len(res)} views, lost {lost}, {time.perf_counter() - t0:.0f} s", flush=True)
-    out = WORK / "live_check"
     out.mkdir(parents=True, exist_ok=True)
-    _write_rows(out / f"tau_{a.split}.csv", rows)
-    return tau_summary(rows)
+    _write_rows(path, rows)
+    return tau_summary(rows, a)
 
 
-def tau_summary(rows):
+def tau_summary(rows, a):
     full = [r for r in rows if r["i"] >= DETECT["median_of"] - 1]
     y = np.array([bool(r["lost"]) for r in full])
-    best = None
+    chosen = None
     for q in TRIMS:
-        s = np.array([r[f"median_{q}"] for r in full])
-        tau = float(np.percentile(s[y], 5)) if y.any() else float("nan")
-        pre = np.array([r[f"view_{q}"] for r in rows if r["pre"]])
+        s = np.array([r[f"median_{q}"] for r in full], float)
+        tau = sc.tau_lost(s, y)
+        pre = np.array([r[f"view_{q}"] for r in rows if r["pre"]], float)
         grid = np.unique(s)
         youden = max(grid, key=lambda t: (s[y] > t).mean() + (s[~y] <= t).mean())
         d = sc.detection(s, y, tau)
-        line = {"trim": q, "tau_sens95_mm": round(tau, 3), "pre_p95_mm": round(float(np.percentile(pre, 95)), 3),
+        line = {"trim": q, "tau_mm": round(tau, 3), "pre_p95_mm": round(float(np.percentile(pre, 95)), 3),
                 "youden_mm": round(float(youden), 3), **{k: round(v, 3) if isinstance(v, float) else v
                                                          for k, v in d.items()}}
         print(json.dumps(line))
-        if best is None or d["auc"] > best["auc"]:
-            best = line
-    print("chosen:", json.dumps(best))
+        if abs(q - sc.TRIM) < 1e-9:
+            chosen = line
+    print("tau:", json.dumps(chosen))
+    if a.write and chosen is not None:
+        import datetime
+        saved = sc.save_threshold(chosen["tau_mm"], data=f"digital twin, {a.split} sessions, video sweeps",
+                                  statistic=f"median of {DETECT['median_of']} consecutive views",
+                                  n_lost=chosen["n_lost"], n_valid=chosen["n_valid"], auc=chosen["auc"],
+                                  sensitivity_val=chosen["sensitivity"], specificity_val=chosen["specificity"],
+                                  written_by="live_check.py tau", date=datetime.date.today().isoformat())
+        print(f"written {sc.THRESHOLD_FILE}: {json.dumps(saved)}")
     return 0
 
 
@@ -2157,6 +2168,8 @@ def main(argv=None):
     t = sub.add_parser("tau")
     t.add_argument("--split", default="val")
     t.add_argument("--segmenter", default="sam", choices=SEGMENTERS)
+    t.add_argument("--summary", action="store_true", help="from the rows of the last run")
+    t.add_argument("--write", action="store_true", help="tau into score.THRESHOLD_FILE")
     tw = sub.add_parser("twin")
     tw.add_argument("--split", default="test")
     tw.add_argument("--segmenter", default="sam", choices=SEGMENTERS)

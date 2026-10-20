@@ -455,7 +455,7 @@ def _r(v, n=3):
 
 
 def run_choose(video, out_dir, board, target, mode="video", film_dir=None, log: Log | None = None,
-               progress: Progress | None = None, need=None):
+               progress: Progress | None = None, need=None, stops=False):
     """The frames of a film worth calibrating on, written into out_dir (PNG), with frames.json and chosen.jpg in
     film_dir (out_dir/film by default). Returns the summary written to frames.json, with "checks": what
     calibrate_charuco.check_photo would say of each frame written ({name: check}), for the app. Raises
@@ -467,7 +467,15 @@ def run_choose(video, out_dir, board, target, mode="video", film_dir=None, log: 
     recs, info = scan(video, board, log, progress)
     size = tuple(info["size"])
     min_corners = judge(recs, board, size)
-    picked, closest = choose(recs, board, size, target)
+    slower = []
+    if stops:       # the bench: one still frame per stop of the arm (calib_bench), the stops on the move said
+        import calib_bench
+        K = nominal_K(size)
+        picked, slower = calib_bench.choose_stops(recs, limits(size)["motion_px_s"],
+                                                  lambda r: describe(r, board, K, size))
+        closest = math.inf
+    else:
+        picked, closest = choose(recs, board, size, target)
     counts = {"looked": len(recs), "board": sum(1 for r in recs if r["n"]),
               **{w: sum(1 for r in recs if r.get("why") == w) for w in ("few", "moving", "blur")},
               "usable": sum(1 for r in recs if r.get("why") == ""), "chosen": len(picked)}
@@ -506,6 +514,7 @@ def run_choose(video, out_dir, board, target, mode="video", film_dir=None, log: 
                "limits": {"min_corners": min_corners, "motion_px_s": round(lim["motion_px_s"], 2),
                           "blur_px": round(lim["blur_px"], 2), "duplicate_steps": DUPLICATE},
                "counts": counts, "closest_steps": _r(closest, 2), "refused": refused.code if refused else "",
+               "slower": slower,
                "chosen": chosen,
                "looked": [[r["i"], _r(r["t"]), r["n"], _r(r.get("motion", math.nan), 1), _r(r.get("blur", math.nan), 2),
                            r.get("why", "")] for r in recs]}

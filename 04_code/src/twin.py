@@ -53,6 +53,7 @@ NETWORK_LOG = WORK / "models" / "refiner" / "refiner.json"    # refiner.py train
 # the scanner at each arm position as the scene has it, written at each export (read by ground_truth.py's simulated
 # scans)
 SCANNER_POSES = ROOT / "03_data" / "processed" / "protocol" / "scanner_poses.json"
+RIG_DESIGN_NAME = "rig_design.json"     # beside it: the reference spheres and the board's frame (ground_truth.py)
 QUIET_S = 120           # the scene is exported once it has not been saved for this long
 RETRY_S = 600           # an export that failed is tried again on the same scene after this long
 EXPORT_TIMEOUT_S = 900
@@ -280,6 +281,13 @@ class Watcher:
                 "written": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "frame": "the bench's world, mm: x towards the patient's left, -y anterior, z up",
                 "centroid": info.get("spheres_centroid"), "positions": info["scanner_poses"]})
+        if self.poses is not None and info.get("rig_design"):
+            # the six spheres and the board's frame as the scene has them: ground_truth.py's rig templates
+            write_json(self.poses.with_name(RIG_DESIGN_NAME), {
+                "scene": self.scene.name, "scene_path": str(self.scene), "scene_saved": new["scene_saved"],
+                "scene_mtime": st[0],
+                "version": new["version"], "hash": h, "written": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "frame": "the bench's world, mm", "T_W_mandible": info.get("T_W_mandible"), **info["rig_design"]})
         self._prune(new)
         return new
 
@@ -403,7 +411,11 @@ def inverse(T):
 def scans_of(run, trial: str, ref: bool = False) -> list[Path]:
     import trials
     out = []
-    for az in run.config.scan_az:
+    try:        # the arm positions of the trial's own settings (config_version), not today's
+        cfg = run.config_for(run.log.row(trial))
+    except (trials.NotFound, AttributeError):       # a trial not logged, or a stand-in run without a log
+        cfg = run.config
+    for az in cfg.scan_az:
         found = run.find(trial, trials.file_name(trial, "scan", az, ref=ref))
         if not found:
             return []

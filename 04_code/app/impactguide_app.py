@@ -89,6 +89,7 @@ from slantui.tokens import PALETTES  # noqa: E402
 
 import acquisition  # noqa: E402
 import auto_shot  # noqa: E402
+import calib_bench  # noqa: E402
 import calib_guide  # noqa: E402
 import calib_video  # noqa: E402
 import calibrate_charuco  # noqa: E402
@@ -151,8 +152,16 @@ SERIES_KEEP_S = 6 * 3600    # a series goes on past midnight while its last phot
 F_STD_REL_MAX = 0.005       # a focal length less certain than this (std over value) is not a good calibration
 # what spoils a calibration (calibrate_charuco.ISSUES), the most serious first: the first one is said in full
 ISSUE_ORDER = ("board_not_flat", "phone_not_still", "camera_settings", "corners_missing")
+
+
+def _not_good(cal: dict) -> tuple[str, ...]:
+    """The issues that keep a calibration from being good (calibrate_charuco.ISSUES_NOT_GOOD): on the bench the phone
+    sits on the arm, and a centre the poses pin less well is only advice."""
+    bench = cal.get("plan") == "bench"
+    return tuple(i for i in calibrate_charuco.ISSUES_NOT_GOOD if not (bench and i == "phone_not_still"))
 EXTRA_MAX = 4               # photos past the plan for the corners of the photo the board has not reached yet
 LOG_MAX_BYTES = 2_000_000   # errors.log is turned over at this size (one older file kept)
+PREPARE_WAIT_S = 120.0      # a Keep waits this long at most for the copy ahead of its file (_prepare_staged)
 PAGE_ERRORS_MAX = 200       # errors of the page's scripts written to the log in a run, at most...
 PAGE_ERROR_CHARS = 500      # ... each cut to this length
 WRITE_RETRIES = 20          # a file held for a moment (Drive, an antivirus) is replaced again this many times
@@ -1279,6 +1288,7 @@ class Backend(Bridge):
     def _drop_staged(self) -> None:
         """The files staged for the open trial deleted (the copies in staging, never a file of the scanner)."""
         for item in (self.cur.get("staged") or {}).values():
+            trials.Run.discard(item.get("prepared"))       # its copy made ahead in the trial's folder
             if item.get("temp"):
                 self._unlink(Path(item["path"]))
         self._watch = None
@@ -1330,7 +1340,7 @@ class Backend(Bridge):
                               "prev": self._prev_json(prev)}
             state["steps"] = self._steps_json(run, row, steps, cur)
             state["step"] = cur
-            state["staged"] = {k: {kk: vv for kk, vv in v.items() if kk != "temp"}
+            state["staged"] = {k: {kk: vv for kk, vv in v.items() if kk not in ("temp", "preparing", "prepared")}
                                for k, v in self.cur["staged"].items()}
             state["recording"] = self.cur.get("recording", "")
             state["watching"] = self._watch.key if self._watch else ""
@@ -1455,7 +1465,13 @@ class Backend(Bridge):
                 elif not staged:
                     return {"error": "missing_file", "message": name}
                 else:
-                    run.store(trial, name, staged["path"], move=staged["temp"])
+                    # its copy into the trial's folder was made ahead in a worker (_prepare_staged): only named here;
+                    # one still on its way is waited for (the rest of its copy); stale or failed, it is made now
+                    hold = staged.get("preparing")
+                    if hold is not None and not hold["event"].is_set():
+                        hold["event"].wait(PREPARE_WAIT_S)
+                    prepared = staged.get("prepared") or (hold["prep"] if hold is not None else None)
+                    run.store(trial, name, staged["path"], move=staged["temp"], prepared=prepared)
                     del self.cur["staged"][key]
                     self.scans.arrived(trial, key)      # a scan filed: its trial's results kept for the twin
             if key == "spheres":
@@ -1505,6 +1521,8 @@ class Backend(Bridge):
             codes = run.file_problems(row["trial"], path)
             problems = [v for _, v in trials.deep_check(run.config_for(row), path, run.camera_sizes())]
         old = self.cur["staged"].get(key)
+        if old:
+            trials.Run.discard(old.get("prepared"))
         if old and old.get("temp") and Path(old["path"]) != path:
             self._unlink(Path(old["path"]))
         self.cur["staged"][key] = {"path": str(path), "url": file_url(path), "name": path.name,
@@ -1529,7 +1547,41 @@ class Backend(Bridge):
                 self._unlink(Path(path))      # its trial is no longer open: never staged (nor kept) for another
             self._emit({"type": "acquire_failed", "key": key, "trial": trial, **self._err(e, "copy_failed")})
             return
+        self._prepare_staged(trial, key)
         self._emit({"type": "staged", "key": key, "trial": trial})
+
+    def _prepare_staged(self, trial: str, key: str) -> None:
+        """The file staged for the step `key` copied ahead into its trial's folder by a worker (trials.Run.prepare: the
+        copy to the data drive, flushed and read back), while the operator looks at it: Keep then only names it,
+        and the window never waits for a copy to a synced drive. Kept with the staged file as "prepared"; a copy
+        that comes when that file is no longer the staged one is deleted."""
+        item = (self.cur.get("staged") or {}).get(key)
+        if not item or self.cur.get("trial") != trial:
+            return
+        run = self.run()
+        name = next((st.files[0] for st in run.steps(trial) if st.key == key and st.files), None)
+        if name is None or run.find(trial, name):
+            return
+        src = item["path"]
+        hold = item["preparing"] = {"event": threading.Event(), "prep": None}
+
+        def work() -> dict:
+            try:
+                hold["prep"] = run.prepare(trial, name, src)
+                return hold["prep"]
+            finally:
+                hold["event"].set()     # a Keep that came meanwhile waits for this, never copies a second time
+
+        def done(prep: dict | None, error: BaseException | None) -> None:
+            if error is not None:
+                log.warning("%s not copied ahead: copied when it is kept", name, exc_info=error)
+                return
+            if self.cur.get("trial") != trial or (self.cur.get("staged") or {}).get(key) is not item:
+                trials.Run.discard(prep)        # discarded, taken again or its trial closed meanwhile
+                return
+            item["prepared"] = prep
+        if not self._spawn(f"prepare_{key}", work, done):
+            item.pop("preparing", None)     # one still running for an older file of the step: copied at Keep
         self.scans.arrived(trial, key)          # a scan: measured at once (scans_page.py)
 
     def _acquired(self, trial: str, key: str, video: bool = False) -> Callable[[Any, BaseException | None], None]:
@@ -1625,6 +1677,8 @@ class Backend(Bridge):
     def step_discard(self, key: str) -> str:
         def go() -> dict[str, Any]:
             item = (self.cur.get("staged") or {}).pop(key, None)
+            if item:
+                trials.Run.discard(item.get("prepared"))
             if item and item.get("temp"):
                 self._unlink(Path(item["path"]))
             return self._trial_state()
@@ -1722,6 +1776,16 @@ class Backend(Bridge):
     def config_apply(self, payload):
         def go():
             run = self.run()
+            if run.phase == trials.PRE_IMPACT:          # the sets of positions: only how many
+                try:
+                    n = int(json.loads(payload).get("repetitions"))
+                except (TypeError, ValueError):
+                    return {"error": "bad_value"}
+                if not 1 <= n <= 20:
+                    return {"error": "bad_value"}
+                before = len(run.sequence)
+                run.configure(trials.replace(run.config, repetitions=n))
+                return {**json.loads(self.config_get()), "before": before}
             d = {**asdict(run.config), **json.loads(payload)}
             d["phase"] = run.phase
             d["holders"] = [str(h).strip() for h in d["holders"] if str(h).strip()]
@@ -1782,7 +1846,7 @@ class Backend(Bridge):
         if self._series_kind() == "check":
             return "check"
         p = self.prefs["calib_plan"]
-        return p if p in ("quick", "accurate") else "quick"
+        return p if p in ("quick", "accurate", "bench") else "quick"
 
     def _folders(self):
         """The folders of calibration photos, newest first: name, path, kind, board.json, "files" (the photos in it)
@@ -1805,7 +1869,8 @@ class Backend(Bridge):
         counts, the calibration's own detection judging them."""
         raw = read_json(Path(d) / PHOTO_CHECKS, "photo checks")
         if not isinstance(raw, dict):
-            return list(photos)
+            # the frames of a film count once chosen (their checks written with them), never while they are written
+            return [] if (Path(d) / calib_video.FILM_DIR).is_dir() else list(photos)
         return [p for p in photos if (raw.get(p.name) or {}).get("ok")]
 
     def _unchecked(self, d: Path, checks: dict[str, dict[str, Any]]) -> list[Path]:
@@ -2018,7 +2083,7 @@ class Backend(Bridge):
         result = self._result(mode)
         # the last calibration of this mode found that the phone moved between its photos: the Photos step says to
         # keep it still on a stand where it checks for a phone held still
-        moved = bool(result and "phone_not_still" in result["issues"])
+        moved = bool(result and "phone_not_still" in result["not_good"])
         live = None
         if self._live is not None:
             st = self._live.status()
@@ -2027,7 +2092,7 @@ class Backend(Bridge):
                     "display": st.get("display") or st.get("image"), "error": bool(st.get("error")),
                     "fps_ar": st.get("fps_ar", 0.0), "stream_state": st.get("stream_state", "")}
         return {"mode": mode, "plan": plan, "kind": kind, "limits": lim, "count": n, "series": series, "next": nxt,
-                "plans": {k: calib_guide.limits(k) for k in ("quick", "accurate")},
+                "plans": {k: calib_guide.limits(k) for k in ("quick", "accurate", "bench")},
                 "modes": modes, "last_check": last, "result": result, "board_ui": bs, "phone": self.phone_status,
                 "busy": sorted(self._busy), "min_views": calibrate_charuco.MIN_VIEWS,
                 "max_rms": calibrate_charuco.MAX_RMS, "live": live, "simulate": bool(r.simulate),
@@ -2061,7 +2126,7 @@ class Backend(Bridge):
         photos = [{"name": k, "err": v, "state": "used" if k in used else "excluded" if k in excluded
                    else "dropped" if k in dropped else "used"} for k, v in sorted(every.items())]
         rms = cal["rms_px"]
-        plan = cal.get("plan") if cal.get("plan") in ("quick", "accurate") else self._calib_plan()
+        plan = cal.get("plan") if cal.get("plan") in ("quick", "accurate", "bench") else self._calib_plan()
         few = cal["n_views"] < calib_guide.limits(plan if plan != "check" else "quick")["min"]
         plain = calibrate_charuco.plain(cal)
         f_std = plain.get("f_std")                # None when the calibration does not know it (std NaN or missing)
@@ -2102,7 +2167,7 @@ class Backend(Bridge):
         settings = cal.get("settings") or {}
         codes = sorted({c for v in settings.values() for c in v if c in calibrate_charuco.SETTINGS},
                        key=calibrate_charuco.SETTINGS.index)
-        return {"issues": issues, "not_good": [i for i in issues if i in calibrate_charuco.ISSUES_NOT_GOOD],
+        return {"issues": issues, "not_good": [i for i in issues if i in _not_good(cal)],
                 "flat": sh.get("flat", True), "sag_mm": sh.get("sag_mm"), "focal_shift": sh.get("focal_shift"),
                 "rms_flat_px": cal.get("rms_flat_px", sh.get("rms_flat_px")),
                 "still": ce.get("still", True), "centre_px": ce.get("spread_px"), "centre_max_px": ce.get("max_px"),
@@ -2113,8 +2178,7 @@ class Backend(Bridge):
     def _good(cal: dict[str, Any]) -> bool:
         """A calibration worked out well enough to say so: its error under the limit and none of the issues that
         keep it from being good."""
-        return cal["rms_px"] < calibrate_charuco.MAX_RMS and not set(cal.get("issues") or []) & set(
-            calibrate_charuco.ISSUES_NOT_GOOD)
+        return cal["rms_px"] < calibrate_charuco.MAX_RMS and not set(cal.get("issues") or []) & set(_not_good(cal))
 
     # ── calibration: the series of photos ───────────────────────────────
     def _series_kind(self):
@@ -2183,7 +2247,7 @@ class Backend(Bridge):
             c = json.loads(payload)
             if c.get("mode") in CALIB_MODES:
                 self.prefs.set("calib_mode", c["mode"])
-            if c.get("plan") in ("quick", "accurate"):
+            if c.get("plan") in ("quick", "accurate", "bench"):
                 self.prefs.set("calib_plan", c["plan"])
             if c.get("kind") in ("calibration", "check"):
                 self.prefs.set("calib_kind", c["kind"])
@@ -2333,7 +2397,8 @@ class Backend(Bridge):
         self._auto_mode = mode
         spec = self._guide_board(series if series and series["same"] else None, active) if active and nxt else None
         key = ((series or {}).get("name", ""), nxt["n"]) if nxt else None
-        w.target(nxt["outline"] if spec else None, spec, key, "stream" if mode == "stream" else "photo")
+        w.target(nxt["outline"] if spec else None, spec, key, "stream" if mode == "stream" else "photo",
+                 new_stop=bool(nxt and nxt.get("view") == "bench"))
         self._auto_snapshot = {"pose": nxt["n"], "plan": nxt["plan"], "spec": spec, "kind": spec.get("kind") or "screen",
                                "lay": self._lay} if spec else None
 
@@ -2410,9 +2475,24 @@ class Backend(Bridge):
         def say(_r: Any, _e: Any) -> None:
             if self._auto is None:
                 return
-            self._auto_view = {"state": state, "score": score}
-            self._emit({"type": "calib_auto", "state": state, "score": score})
+            seat = None
+            if state == "far":
+                try:
+                    seat = self._wrong_seat()
+                except Exception:
+                    log.warning("the seat of the board not told", exc_info=True)
+            self._auto_view = {"state": state, "score": score, "seat": seat}
+            self._emit({"type": "calib_auto", "state": state, "score": score, "seat": seat})
         self._jobs.put(("", say, None, None))
+
+    def _wrong_seat(self) -> int | None:
+        """On the bench, the seat the board stands in when it is not the one of the next step (calib_bench.identify),
+        else None."""
+        snap, w = self._auto_snapshot, self._auto
+        if not snap or snap["plan"] != "bench" or w is None or w.watch._prev is None:
+            return None
+        K, size = calib_guide.camera("stream" if self._auto_mode == "stream" else "photo")
+        return calib_bench.identify(w.watch._prev, snap["pose"], snap["spec"], K, size)[2]
 
     # ── calibration: a film of the board (the camera app's video mode) ───
     # The camera app films the board while the operator moves the phone through the poses, holding still a moment at
@@ -2428,7 +2508,7 @@ class Backend(Bridge):
         return {"recording": bool(f and f["recording"]), "starting": bool(f and not f["recording"] and not f["stopping"]),
                 "stopping": bool(f and f["stopping"]), "since": f["since"] if f else None, "max_s": FILM_MAX_S,
                 "choosing": "film" in self._busy,
-                "last": {k: got.get(k) for k in ("video", "duration_s", "counts", "refused")} if got else None}
+                "last": {k: got.get(k) for k in ("video", "duration_s", "counts", "refused", "slower")} if got else None}
 
     def _film_start(self) -> dict[str, Any]:
         """The camera app starts filming (its video mode): calib_film events say when it records."""
@@ -2517,13 +2597,14 @@ class Backend(Bridge):
         """The frames of the film worth calibrating on, chosen in a worker and written into d as its photos (each with
         its check); then, for a calibration, the calibration on them."""
         mode = self._mode()
+        bench = self._calib_plan() == "bench"       # the arm stops at each notch: one still frame a stop
         square, squares, marker = board
         said: list[str] = []
 
         def work() -> dict[str, Any]:
             b = calibrate_charuco.make_board(square, squares, marker)
             return calib_video.run_choose(video, d, b, target, mode=mode, log=said.append,
-                                          need=calibrate_charuco.MIN_VIEWS)
+                                          need=calibrate_charuco.MIN_VIEWS, stops=bench)
 
         def done(summary: dict[str, Any] | None, error: BaseException | None) -> None:
             for line in said:
@@ -2540,7 +2621,8 @@ class Backend(Bridge):
                 checks[name] = {**c, "time": now, "mode": mode, "seq": seq}
             self._write_checks(d, checks)
             self._emit({"type": "calib_film", "action": "chosen", "folder": d.name, "n": len(summary["checks"]),
-                        "seconds": summary["duration_s"], "counts": summary["counts"]})
+                        "seconds": summary["duration_s"], "counts": summary["counts"],
+                        "slower": len(summary.get("slower") or [])})
             if self._series_kind() == "calibration":
                 self.calib_run("[]")
         if not self._spawn("film", work, done):
@@ -3890,7 +3972,7 @@ class Backend(Bridge):
             row, steps, at = self._twin_trial(run, mode, str(ask_.get("trial") or ""))
             if row is None:
                 return out
-            cfg = run.config
+            cfg = run.config_for(row)       # a logged trial's own settings; the plan's (no version yet) today's
             out["trial"] = twin.setting(row, steps[at].key if steps else None, cfg.photo_az)
             # its steps, for the twin to put the bench as each has it; the arm's positions and its sweep
             out["steps"], out["step"] = [st.key for st in steps], at

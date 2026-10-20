@@ -14,7 +14,8 @@
 
 Library: sessions(root), frames(session_dir), load(session_dir, frame) -> dict with rgb (BGR uint8), labels (uint8),
 masks (face, marker, drape: bool), depth (mm, NaN where nothing is hit) and the poses as arrays (head frame B:
-coordinates of the bench scene); augment(img, rng) for the photometric augmentations of the dataset (exposure and
+coordinates of the bench scene); cut_triangles(v, f) for the cut of the face shell; augment(img, rng) for the photometric
+augmentations of the dataset (exposure and
 white balance, defocus and motion blur up to 3 px, noise, JPEG); crop_K(K, centre, side_px, out_px) for the ~200 mm
 crops.
 """
@@ -179,6 +180,21 @@ def cmd_index(args):
     (root / "index.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print(json.dumps({k: summary[k] for k in ("sessions", "samples", "images", "registrations", "splits", "faces",
                                               "head_spheres", "distinct_marker_poses")}))
+
+
+def cut_triangles(vertices, faces, root=OUT):
+    """Triangles of the decimated face on the cut of the silicone shell (rim, back and inner skin: not the outer skin
+    of synth_twin.py meshes, face_weights.npz "outer"), as a bool array; None when the weights carry no "outer" (meshes
+    written before it). correct.py leaves the outline points on them out (only the silhouette counts)."""
+    wp, fp = Path(root) / "meshes" / "face_weights.npz", Path(root) / "meshes" / "face_phantom_full.npz"
+    if not wp.exists() or not fp.exists():
+        return None
+    z = np.load(wp)
+    if "outer" not in z.files:
+        return None
+    from scipy.spatial import cKDTree
+    outer = z["outer"][cKDTree(np.load(fp)["vertices"]).query(np.asarray(vertices))[1]]
+    return ~outer[np.asarray(faces)].all(1)
 
 
 def outline_distance(a, b):

@@ -94,7 +94,8 @@ const SCANS = {
     if (x.state === 'measuring') sign.append(E('span', 'spinner spinner-sm'));
     const words = E('div', 'sc-slot-t');
     words.append(E('div', 'sc-slot-n', T('scans.arm', x.arm || '-', fmtNum(x.az, 0))),
-                 E('div', 'sc-slot-s', T('scans.state.' + x.state)));
+                 E('div', 'sc-slot-s', T(x.state === 'bad' && x.why === 'rigs_differ'
+                   ? 'scans.state.bad.rigs' : 'scans.state.' + x.state)));
     r.append(sign, words);
     if (x.n_spheres !== null && x.n_spheres !== undefined) {
       const v = E('span', 'sc-slot-v', T('scans.spheres', fmtNum(x.n_spheres, 0)));
@@ -253,6 +254,12 @@ const SCANS = {
     $('scWatchDot').className = 'live-dot ' + ({ on: 'busy', idle: 'ok', none: 'warn', missing: 'warn' }[say]);
     $('scWatchW').textContent = T('scans.watch.' + say);
     $('scWatch').title = s.folder || '';
+    // the spheres: read from the scene before it changed, of a calibration of the spheres of before, or built in
+    const rg = s.rigs || {};
+    const rk = rg.scene_changed ? 'scans.rig.scene_changed' : rg.calibration_other ? 'scans.rig.calibration_other'
+      : rg.source === 'built_in' ? 'scans.rig.built_in' : '';
+    $('scRigWarn').textContent = rk ? T(rk) : '';
+    $('scRigWarn').classList.toggle('hidden', !rk);
     $('scFolderBtn').classList.toggle('hidden', !!s.simulate || say !== 'none' && say !== 'missing');
     $('scFolderBtn2').classList.toggle('hidden', !!s.simulate);
     $('scSim').classList.toggle('hidden', !(s.simulate && s.open && !run && s.slots.some(function (x) { return x.state === 'waiting'; })));

@@ -139,7 +139,9 @@ const FIG = {
   // the pose in words, two short lines: where from and how far round (or, the board moved, which of its edges comes
   // nearer the phone and by how much), then the distance and the turn
   caption: function (g) {
-    const v = g.move === 'board' ? (g.view === 'front' ? T('guide.move.front') : T('guide.move.' + g.view, g.tilt))
+    // the bench: the seat and the arm angle, nothing moved by hand
+    const v = g.view === 'bench' ? T('cal.ph.bench.step', g.seat, fmtNum(g.arm, 0))
+      : g.move === 'board' ? (g.view === 'front' ? T('guide.move.front') : T('guide.move.' + g.view, g.tilt))
       : g.view === 'front' ? T('guide.view.front') : T('guide.view.' + g.view) + ' ' + g.tilt + '°';
     const parts = [fmtNum(g.dist_cm, 0) + ' cm'];
     if (Math.abs(g.roll) >= 5) parts.push(T('guide.turned', Math.abs(g.roll)));

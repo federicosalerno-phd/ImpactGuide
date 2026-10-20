@@ -192,6 +192,7 @@ MANIFEST_FIELDS = ("time", "trial", "file", "bytes", "sha256")
 LOG_NAME, EDITS_NAME, MANIFEST_NAME, LOCK_NAME = ("trial_log.csv", "trial_log_edits.csv", "file_manifest.csv",
                                                   "trial_log.lock")
 PART_SUFFIX = ".part"           # a raw file being copied, beside its final name
+READY_SUFFIX = ".ready" + PART_SUFFIX   # a copy made ahead (Run.prepare), waiting for the file to be kept
 TEST_MARKER = ".impactguide-test"   # a folder made by a test, which a later test may empty
 NUMERIC_FIELDS = ("angle_deg", "direction_deg", "washers_per_side", "swing_mass_g", "cap_shift_mm", "set", "position")
 SEQUENCE_NUMERIC = ("slot", "replicate", "angle_deg", "direction_deg", "drape")
@@ -1529,20 +1530,61 @@ class Run:
             raise ValueError(f"{name} with suffix {suffix}: not a {kind} file")
         return self.folder / trial / (Path(name).stem + suffix)
 
-    def store(self, trial: str, name: str, source: Path | str, move: bool = False) -> Path:
+    def prepare(self, trial: str, name: str, source: Path | str) -> dict:
+        """The slow half of store(), for a worker while the file waits to be kept: the source copied beside its final
+        name as <name>.ready.part, flushed and read back (copy_verified). store(..., prepared=) then only names it,
+        so the operator's Keep never waits for a copy to a synced drive. Nothing is filed: discard() takes the part
+        away. Returns {"part", "bytes", "sha256", "source", "mtime_ns"}."""
+        source = Path(source)
+        dest = self.target(trial, name, source.suffix)
+        part = dest.with_name(dest.name + READY_SUFFIX)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            part.unlink()                       # one made for an earlier file of the same step
+        size, digest = copy_verified(source, part)
+        return {"part": str(part), "bytes": size, "sha256": digest, "source": str(source),
+                "mtime_ns": source.stat().st_mtime_ns}
+
+    @staticmethod
+    def discard(prepared: dict | None) -> None:
+        """A part of prepare() no longer wanted (the file discarded, the trial closed or voided) deleted."""
+        if prepared:
+            with contextlib.suppress(OSError):
+                Path(prepared["part"]).unlink()
+
+    def store(self, trial: str, name: str, source: Path | str, move: bool = False,
+              prepared: dict | None = None) -> Path:
         """Files a photo, video or scan under its name; never overwrites a raw file (FileClash exists). The copy is
         made beside its final name, checked against the source (size and SHA-256) and only then named; its size
-        and hash go to the manifest; with move the source is deleted last. CopyFailed when the copy differs."""
+        and hash go to the manifest; with move the source is deleted last. CopyFailed when the copy differs.
+        prepared: the copy made already by prepare() for this source, used when it is still that source's (same
+        file, size and time) and whole; else the copy is made here."""
         source = Path(source)
         dest = self.target(trial, name, source.suffix)
         if self.find(trial, name):
             raise FileClash("exists", f"{self.find(trial, name)[0].name} is already there",
                             file=self.find(trial, name)[0].name)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        part = dest.with_name(dest.name + PART_SUFFIX)
-        with contextlib.suppress(FileNotFoundError):
-            part.unlink()                       # a copy cut short earlier
-        size, digest = copy_verified(source, part)
+        ready = None
+        if prepared:
+            p = Path(prepared["part"])
+            try:
+                if (p.parent == dest.parent and p.name == dest.name + READY_SUFFIX
+                        and Path(prepared["source"]) == source and p.stat().st_size == prepared["bytes"]
+                        and source.stat().st_size == prepared["bytes"]
+                        and source.stat().st_mtime_ns == prepared["mtime_ns"]):
+                    ready = p
+            except (OSError, KeyError, TypeError):
+                ready = None
+            if ready is None:
+                self.discard(prepared)
+        if ready is not None:
+            part, size, digest = ready, int(prepared["bytes"]), str(prepared["sha256"])
+        else:
+            part = dest.with_name(dest.name + PART_SUFFIX)
+            with contextlib.suppress(FileNotFoundError):
+                part.unlink()                       # a copy cut short earlier
+            size, digest = copy_verified(source, part)
         try:
             with self.log.lock:
                 if self.find(trial, name):
@@ -1603,7 +1645,7 @@ class Run:
         expected = {Path(n).stem.lower(): n for n in names}
         folder = self.folder / trial
         for p in sorted(folder.iterdir()) if folder.exists() else ():
-            if p.name in IGNORED:
+            if p.name in IGNORED or p.name.lower().endswith(READY_SUFFIX):    # a copy made ahead, not filed yet
                 continue
             n = expected.get(p.stem.lower())
             if not p.is_file() or n is None or p.suffix.lower() not in SUFFIXES[file_kind(n)]:
@@ -1961,6 +2003,36 @@ def run_test(work: Path | str = WORK) -> int:
     (t3 / file_name("t003", "scan", cfg.scan_az[0])).write_bytes(b"fake but longer")
     expect(("changed", file_name("t003", "scan", cfg.scan_az[0])) in run.missing("t003", deep=True),
            "deep completeness: a raw file whose size is not the one filed is said")
+
+    # the copy made ahead (prepare, in the app's worker): keeping the file then only names it; a source changed since
+    # is copied again; the part waiting is no unexpected file
+    photo3 = file_name("t003", "photo", 40)
+    again = src / "t003_photo_again.jpg"
+    again.write_bytes(b"prepared photo")
+    prep = run.prepare("t003", photo3, again)
+    waiting = not any(v.endswith(READY_SUFFIX) for _, v in run.missing("t003"))
+    real_copy = globals()["copy_verified"]
+
+    def no_copy(*_a, **_k):
+        raise AssertionError("copied again")
+    globals()["copy_verified"] = no_copy
+    try:
+        kept = run.store("t003", photo3, again, prepared=prep)
+    finally:
+        globals()["copy_verified"] = real_copy
+    m3 = [m for m in run.log.manifest() if m["file"] == photo3]
+    expect(waiting and kept.read_bytes() == b"prepared photo" and not Path(prep["part"]).exists()
+           and m3 and m3[-1]["sha256"] == hashlib.sha256(b"prepared photo").hexdigest(),
+           "a file copied ahead: kept by naming the copy (no second copy), in the manifest; the copy waiting is no "
+           "unexpected file")
+    kept.unlink()
+    prep = run.prepare("t003", photo3, again)
+    time.sleep(0.02)
+    again.write_bytes(b"prepared photo, changed")
+    kept = run.store("t003", photo3, again, prepared=prep)
+    expect(kept.read_bytes() == b"prepared photo, changed" and not Path(prep["part"]).exists(),
+           "a source changed after its copy ahead: copied again at the keep, the old copy gone")
+    kept.unlink()
 
     # each trial follows the configuration it started under (config_version), whatever today's says
     rows = run.log.rows()
