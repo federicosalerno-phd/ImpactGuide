@@ -1,4 +1,4 @@
-"""The 3D-printed ChArUco calibration plate of the phone camera (T5.1): the physical board of ImpactGuide's calibration.
+"""The 3D-printed ChArUco calibration plate of the phone camera: the physical board of ImpactGuide's calibration.
 
 The board is the A4 one of calibrate_charuco.py scaled to the printer's bed: 11 x 8 squares of 20 mm, markers of
 15 mm (3/4 of the square), DICT_5X5_100, the same marker ids in the same squares. Square = (length read between the

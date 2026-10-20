@@ -42,11 +42,13 @@ def kept(shape, border_px=BORDER_PX, ignore=None):
     return keep
 
 
-def view_score(observed, rendered, scale, ignore=None, border_px=BORDER_PX, trunc_mm=TRUNC_MM):
+def view_score(observed, rendered, scale, ignore=None, border_px=BORDER_PX, trunc_mm=TRUNC_MM, trim=0.0):
     """Score of one view (mm): observed and rendered binary masks of the same size, scale in mm per px.
 
     Returns score_mm, the two directed means (obs_to_ren_mm: observed outline to rendered outline, ren_to_obs_mm) and
-    the number of outline pixels used. An empty outline gives trunc_mm.
+    the number of outline pixels used. An empty outline gives trunc_mm. trim: share of the largest distances of each
+    direction left out of its mean (a trimmed mean, for occluders that are not modelled: a drape or a hand moves one
+    stretch of the outline, a misalignment all of it); 0 keeps them all.
     """
     masks = [m if m.dtype == np.uint8 else (m > 0).astype(np.uint8) for m in (np.asarray(observed), np.asarray(rendered))]
     boxes = [b for b in map(cv2.boundingRect, masks) if b[2] > 0]
@@ -69,7 +71,10 @@ def view_score(observed, rendered, scale, ignore=None, border_px=BORDER_PX, trun
             out[name + "_mm"], out["n_" + name[:3]] = trunc_mm, n
             continue
         d = cv2.distanceTransform(np.where(dst, 0, 255).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        out[name + "_mm"] = float(np.minimum(d[pts] * scale, trunc_mm).mean())
+        dd = np.minimum(d[pts] * scale, trunc_mm)
+        if trim > 0 and len(dd) > 1:
+            dd = np.sort(dd)[:max(1, int(round(len(dd) * (1.0 - trim))))]
+        out[name + "_mm"] = float(dd.mean())
         out["n_" + name[:3]] = n
     out["score_mm"] = (out["obs_to_ren_mm"] + out["ren_to_obs_mm"]) / 2
     return out

@@ -1,7 +1,7 @@
 """Ground truth from the scanner: sphere centres, rig poses, true registration and impact displacement.
 
 Six white matte spheres D 15 (gt_sphere.SLDPRT) on two scalene rigs, so that the distances inside a rig label its
-spheres: three on the marker holder (S_M, 62 / 82 / 114 mm) and three on the mandible frame (S_B, 78.4 / 67.2 / 68.2 mm).
+spheres: three on the marker holder (S_M, 79.3 / 47.1 / 61.6 mm) and three on the mandible frame (S_B, 52.0 / 44.2 / 57.3 mm).
 The rig templates RIGS are the design centres of the sphere seats; calibrate_rigs() gives measured ones.
 
 Frames. Poses are 4 x 4 matrices T_a_b (frame a from frame b) in mm. M is the ChArUco board as in marker_pose.py
@@ -54,10 +54,12 @@ from scipy.spatial.transform import Rotation
 
 SPHERE_D = 15.0
 RIGS = {
-    # marker holder, spheres 1-3 beyond the corners (-h, -h), (h, -h), (h, h) of the bench marker frame, here in M
-    "marker": np.array([[-22.409903, 67.409903, 2.15], [58.924621, 58.924621, 2.15], [68.0, -2.5, 2.15]]),
-    # head rig on the mandible frame, spheres 1-3, in the mandible frame (not B)
-    "mandible": np.array([[20.1133, 109.7106, -89.4445], [59.6831, 131.6459, -25.4048], [78.5302, 82.5621, -67.2088]]),
+    # the final spheres of the bench scene (gt_sphere_marker_k of the square P1 holder, gt_sphere_mandible_k): the
+    # marker's, 79.3 / 47.1 / 61.6 mm apart, in the board frame of the nominal scene (SCENE) placed where the bench
+    # has them relative to the head; the board's own frame (X = T_M_SM) comes with the rig calibration
+    "marker": np.array([[-0.5327, -46.9175, 6.9247], [36.1247, 22.6595, -3.0482], [40.9305, -17.219, -27.5801]]),
+    # head rig, 52.0 / 44.2 / 57.3 mm apart, in the mandible frame (not B)
+    "mandible": np.array([[-72.0, 101.666, -22.1712], [-24.0, 104.4929, -42.0711], [-20.0, 102.67, 1.8911]]),
 }
 # Clinical targets in the mandible frame (tools/build_targets.py: columns id, role, x, y, z); until that table exists,
 # placeholders: extreme points of the bench mandible model
@@ -248,13 +250,37 @@ def read_text(path):
     return np.array([r for r in rows if len(r) == 3], np.float64)
 
 
+THREEMF_UNITS = {"micron": 0.001, "millimeter": 1.0, "centimeter": 10.0, "inch": 25.4, "foot": 304.8, "meter": 1000.0}
+
+
+def read_3mf(path):
+    """Vertices of a 3MF mesh (a zip of XML models), in mm from the model's unit."""
+    import re
+    import zipfile
+    out = []
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            if not name.lower().endswith(".model"):
+                continue
+            text = z.read(name).decode("utf-8", "replace")
+            unit = re.search(r"<(?:\w+:)?model\b[^>]*\bunit=\"(\w+)\"", text)
+            scale = THREEMF_UNITS.get(unit.group(1), 1.0) if unit else 1.0
+            for tag in re.findall(r"<(?:\w+:)?vertex\b([^>]*)>", text):
+                a = dict(re.findall(r"\b([xyz])=\"([^\"]+)\"", tag))
+                if len(a) == 3:
+                    out.append((float(a["x"]) * scale, float(a["y"]) * scale, float(a["z"]) * scale))
+    return np.array(out, np.float64).reshape(-1, 3)
+
+
 def load_cloud(path):
-    """Points (N x 3, mm) of a scan export: PLY, STL, OBJ, ASC/XYZ/TXT/CSV/PTS or NPY."""
+    """Points (N x 3, mm) of a scan export: PLY, STL, OBJ, 3MF, ASC/XYZ/TXT/CSV/PTS or NPY."""
     ext = Path(path).suffix.lower()
     if ext == ".ply":
         return read_ply(path)
     if ext == ".stl":
         return read_stl(path)
+    if ext == ".3mf":
+        return read_3mf(path)
     if ext == ".npy":
         return np.load(path).astype(np.float64)[:, :3]
     if ext == ".obj":

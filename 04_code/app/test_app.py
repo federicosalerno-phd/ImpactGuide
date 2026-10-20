@@ -90,6 +90,7 @@ sys.path.insert(0, str(HERE))
 import impactguide_app as ig  # noqa: E402  (sets the bytecode cache and the path to 04_code/src)
 
 import calibrate_charuco  # noqa: E402
+import scans_page  # noqa: E402
 import screen_board  # noqa: E402
 import trials  # noqa: E402
 
@@ -281,6 +282,16 @@ def test_robust(d, work):
            f"the page told in a code, the app still running")
     expect(ig.Roots().board == ig.LOCAL / "boards" and ig.Roots().log == ig.LOCAL / "errors.log",
            "the printable sheet and the log in the app's own folder, not in a developer's path")
+    # an error of the page's scripts (ui/00-errors.js): in the log only, cut short, at most PAGE_ERRORS_MAX a run
+    was = b._page_errors
+    b.page_error("TypeError: probe of the page line 12 15-board.js" + "x" * 2000)
+    b._page_errors = ig.PAGE_ERRORS_MAX
+    b.page_error("one too many of the page")
+    b._page_errors = was + 1
+    logged = b.roots.log.read_text(encoding="utf-8") if b.roots.log.exists() else ""
+    expect("page: TypeError: probe of the page line 12" in logged and "x" * (ig.PAGE_ERROR_CHARS + 1) not in logged
+           and "one too many of the page" not in logged,
+           "an error of the page's scripts: written to the log, cut short, never past the most a run")
     # preferences: a broken file kept aside, the defaults used; saving atomic; a camera folder that is no path refused
     prefs_dir = work / "prefs_check"
     fresh(prefs_dir)
@@ -1014,6 +1025,22 @@ def png_image(data_url):
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
 
 
+def board_png(d, answer, timeout=20):
+    """The image of the board a board_area answer said would follow (a board event with its key, made in a worker),
+    as the page draws it; None when none came."""
+    if answer.get("png"):
+        return png_image(answer["png"])
+    if not answer.get("pending"):
+        return None
+
+    def hit():
+        return next((e for e in reversed(d.events) if e.get("type") == "board" and e.get("action") == "image"
+                     and e.get("key") == answer["key"]), None)
+    d.wait(lambda: hit() is not None, timeout)
+    e = hit()
+    return png_image(e["png"]) if e else None
+
+
 def area(w, h, have=""):
     """An area of the page for the board, as ui/15-board.js measures it (offscreen: one device pixel per pixel)."""
     return json.dumps({"w": w, "h": h, "dpr": 1, "x": 0, "y": 0, "iw": w, "have": have})
@@ -1033,7 +1060,9 @@ def test_board(d):
     a = d.call("board_area", area(1500, 820))
     st, lay = a["state"], a["state"]["layout"]
     mon = st["mon"]
-    img = png_image(a["png"]) if a.get("png") else None
+    expect(a.get("pending") and "png" not in a,
+           "the board's image is made in a worker: the answer has the layout, the image follows as an event")
+    img = board_png(d, a)
     ref = screen_board.render(d.backend._lay)
     expect(a["shown"] and lay is not None and img is not None and img.shape == (820, 1500)
            and np.array_equal(img, ref) and abs(lay["square_mm"] - lay["square_px"] * lay["pitch_mm"]) < 1e-9
@@ -1042,12 +1071,14 @@ def test_board(d):
            f"{lay and round(lay['square_mm'], 3)} mm at {mon and mon['pitch_mm']:.5f} mm ({mon and mon['source']}), "
            f"the image as large as the area and the same pixel for pixel")
     again = d.call("board_area", area(1500, 820, a["key"]))
-    expect(again["key"] == a["key"] and "png" not in again, "the same area again: the same board, no image sent")
+    expect(again["key"] == a["key"] and "png" not in again and not again.get("pending"),
+           "the same area again: the same board, no image sent")
     # the area changes: laid out again, and the live view and the calibration take it at once
     b = d.call("board_area", area(1100, 820, a["key"]))
     live, cal = d.call("live_state"), d.call("calib_state")
     lay2 = b["state"]["layout"]
-    expect(b.get("png") and lay2["squares"] != lay["squares"] and live["board"]["squares"] == lay2["squares"]
+    img2 = board_png(d, b)
+    expect(img2 is not None and img2.shape == (820, 1100) and lay2["squares"] != lay["squares"] and live["board"]["squares"] == lay2["squares"]
            and abs(live["board"]["square_mm"] - lay2["square_mm"]) < 1e-9 and cal["board_ui"]["active"]["squares"]
            == lay2["squares"] and live["hide_board"],
            f"a narrower area: laid out again {lay['squares']} -> {lay2['squares']}, taken at once by the live view "
@@ -1229,11 +1260,33 @@ def test_series(d):
     s = d.call("calib_state")
     expect(s["series"]["same"] and s["count"] == n_full,
            "the board of the photos back (held while it fits): the series again")
+    # the photos counted by their checks, not by the files of the folder: one put there by hand is checked before it
+    # counts (no board in it: put aside), one whose check failed but that stayed (its move failed) neither counts
+    # nor goes into the calibration
+    sd = raw / s["series"]["name"]
+    kept_one = next(k for k, c in b._photo_checks(sd).items() if c.get("ok") and (sd / k).is_file())
+    cv2.imwrite(str(sd / "by_hand.jpg"), np.full((1536, 2040), 90, np.uint8))
+    shutil.copy2(sd / kept_one, sd / "stuck.jpg")
+    ch = b._photo_checks(sd)
+    ch["stuck.jpg"] = {**ch[kept_one], "ok": False, "why": "blur", "seq": 0}
+    b._write_checks(sd, ch)
+    s1 = d.call("calib_state")
+    checked = d.wait(lambda: "by_hand.jpg" in b._photo_checks(sd) and not b._checking(), 60)
+    s2 = d.call("calib_state")
+    expect(checked and s1["count"] == n_full and s2["count"] == n_full and s2["series"]["n"] == n_full
+           and not b._photo_checks(sd)["by_hand.jpg"]["ok"] and (sd / ig.REJECTED / "by_hand.jpg").is_file()
+           and (sd / "stuck.jpg").is_file(),
+           f"photos counted by their checks: one put there by hand checked before it counts (put aside: "
+           f"{b._photo_checks(sd).get('by_hand.jpg', {}).get('why')}), one failed but left there not counted "
+           f"({s1['count']}, {s2['count']} of {n_full})")
     # the calibration: errors per photo and over the board, the intrinsics in plain units
     d.call("calib_run", "[]")
     e = d.wait_event("calib", timeout=600)
     s = d.call("calib_state")
     r = s["result"]
+    expect(r and "stuck.jpg" not in {p["name"] for p in r["photos"]}
+           and (b._pending_cal["photo"].get("skipped") or {}).get("stuck.jpg") == "check",
+           "a photo its check refused is left out of the calibration even when it stayed in the folder")
     expect(e and e["ok"] and r and not r["saved"] and r["verdict"] == "good" and r["n_views"] >= 14
            and len(r["photos"]) == n_full
            and r["residuals"]["corners"] and r["grid"] and abs(r["plain"]["fx"] / (3071.4 * 2040 / 4080) - 1) < 0.003
@@ -1894,7 +1947,8 @@ SWEEP = [
     ("twin_adv", "__adv('twAdv', true)", 900, False),
     ("results", "__closeAdv(); go('results', 'scans')", 900, True),
 ]
-SIZES = (("min",) + ig.MIN_WINDOW, ("large", 1920, 1032))
+# the least window, the window at its first start (ig.WINDOW_SIZE) and a large one
+SIZES = (("min",) + ig.MIN_WINDOW, ("first",) + ig.WINDOW_SIZE, ("large", 1920, 1032))
 SHOTS = {("large", "en"), ("large", "it"), ("min", "en"), ("min", "de")}
 SIM_PHOTO = (2040, 1536)        # the simulated phone's photos in the window test: half the phone's, the same checks
 # the window at each display scaling, in physical pixels (Qt's are these over the scaling): as large as a 1920 x 1080
@@ -2259,7 +2313,8 @@ def test_ui(work, shots):
                                       " (1 - t.y) / 2 * v.h)); })()", 900, None),
             ("ui_08u_twin_top", "TWIN.look('top')", 1200, ("twin_top", "JSON.stringify(TWIN.probe())")),
             ("-twin_phone", "TWIN.look('phone2')", 1000, ("twin_phone", "JSON.stringify(TWIN.probe())")),
-            ("ui_08v_twin_scans", "go('results', 'scans')", 2500, ("twin_scans", "JSON.stringify(TWIN.probe())")),
+            ("ui_08v_twin_scans", "go('results', 'scans'); setTimeout(function () { TWIN.pick = '';"
+                                  " TWIN.open('results'); }, 400)", 2900, ("twin_scans", "JSON.stringify(TWIN.probe())")),
             ("ui_08w_twin_gain", "$('twGain').value = '12'; $('twGain').dispatchEvent(new Event('input'))", 1000,
              ("twin_gain", "JSON.stringify(TWIN.probe())")),
             ("ui_08b_home", "document.querySelector('.tbar-logo-btn').click()", 1200,
@@ -2458,7 +2513,9 @@ def test_ui(work, shots):
         nxt()
 
     def first():
-        js("window.__errs=[];window.addEventListener('error',function(e){window.__errs.push(e.message+' line '+e.lineno)});")
+        # the page's errors are kept from its first script on (ui/00-errors.js); a page without it gets a late keeper
+        js("if(!window.__errs){window.__errs=[];window.addEventListener('error',function(e){"
+           "window.__errs.push(e.message+' line '+e.lineno)});}")
         js(FIT)
         js("JSON.stringify([page, document.querySelector('.app').classList.contains('at-home'),"
            " getComputedStyle(document.querySelector('.topbar')).display])",
@@ -2575,7 +2632,7 @@ def test_ui(work, shots):
     for m in misfits[:80]:
         print("      " + " · ".join(m), flush=True)
     expect(not misfits, f"window: every word fits, nothing over the page, on {len(SWEEP)} views, at "
-                        f"{SIZES[0][1]} x {SIZES[0][2]} and {SIZES[1][1]} x {SIZES[1][2]}, in the six languages "
+                        f"{', '.join(f'{w} x {h}' for _, w, h in SIZES)}, in the six languages "
                         f"({checked} views, {len(misfits)} words that do not fit)")
     t_open, t_top, t_phone, t_scans, t_gain = (read(k) for k in ("twin_open", "twin_top", "twin_phone", "twin_scans",
                                                                   "twin_gain"))
@@ -2712,6 +2769,150 @@ def test_scales(work, shots):
                f"found ({line}{', second run' if runs > 1 else ''})")
 
 
+def test_scans(app, work):
+    """The Scans page's backend on synthetic scans of the bench (scan_desk.SimScanner, IMPACTGUIDE_SIM_SCANS):
+    exports taken by the folder's own watch without the trial's page asking, each bound to its step by the arm
+    position it was taken from (the second position exported first), an export no step waits for said unused, the
+    marker's shift and the error at the targets shown within 30 s of the export, the log's two values written for
+    the trial's spheres step, the twin on the measured motion at once; the spheres' radii calibrated from a run of
+    three scans without an impact and the trial measured again with them; a repeatability run and its spread; the
+    day's processing into gt_poses.csv."""
+    old = os.environ.get(scans_page.SIM_SCANS_ENV)
+    os.environ[scans_page.SIM_SCANS_ENV] = "synthetic"
+    try:
+        _test_scans(app, fresh(work))
+    finally:
+        if old is None:
+            os.environ.pop(scans_page.SIM_SCANS_ENV, None)
+        else:
+            os.environ[scans_page.SIM_SCANS_ENV] = old
+
+
+def _test_scans(app, work):
+    import csv
+    import scan_desk
+    d = Driver(app, work)
+    b = d.backend
+    s = d.call("trial_start", json.dumps({"swing_mass_g": "150"}))
+    trial = s["trial"]["trial"]
+    keys = [x["key"] for x in s["steps"]]
+    refs = [k for k in keys if k.startswith("ref_scan_")]
+    posts = [k for k in keys if k.startswith("scan_")]
+    folder = b.scanner_folder()
+    cfg = b.run().config
+
+    def export(key, name):
+        sl = scan_desk.slot_of(key, cfg)
+        return b.scans.sim().export(folder, name, sl["az"], b.run().log.row(trial), sl["when"])
+
+    def scans_events(n):
+        return [e for e in d.events[n:] if e["type"] == "scans"]
+
+    d.wait(lambda: b.scans.watch is not None, 10)
+    export(refs[1], "export_ref_second.ply")
+    got = d.wait(lambda: d.staged(refs[1]), 40)
+    expect(got and not d.staged(refs[0]) and len(refs) == 2,
+           f"scans: an export taken by the folder's watch without the trial's page asking, bound by the arm position "
+           f"it was taken from to {refs[1]}, not to the first step waiting ({refs[0]})")
+    export(refs[0], "export_ref_first.ply")
+    d.wait(lambda: d.staged(refs[0]), 40)
+    # the steps before the impact as the operator confirms them
+    while True:
+        s = d.call("trials_state")
+        st = s["steps"][s["step"]]
+        if st["key"] == "release":
+            break
+        s = d.call("step_confirm", st["key"], "{}") if st["kind"] == "scan" else d.do_step(st)
+        assert "error" not in s, s
+    n = len(d.events)
+    export(refs[0], "export_stray.ply")         # every reference step has its scan, the impact is still to come
+    stray = d.wait(lambda: any(e.get("action") == "unused" for e in scans_events(n)), 20)
+    expect(stray and not any(e["type"] == "staged" for e in d.events[n:]),
+           "scans: an export no step waits for is said unused and given to no step")
+    d.do_step(d.call("trials_state")["steps"][d.call("trials_state")["step"]])          # the release
+    n = len(d.events)
+    t0 = time.time()
+    # the trial's page waits at the first scan after the impact and its own watch takes an export of the second
+    # position: it goes to the second scan's step
+    sl = scan_desk.slot_of(posts[1], cfg)
+    second = b.scans.sim().export(work / "elsewhere", f"export_{posts[1]}.ply", sl["az"], b.run().log.row(trial),
+                                  sl["when"])
+    b.scans.came(second, prefer=posts[0])
+    got = d.wait(lambda: d.staged(posts[1]), 40)
+    expect(got and not d.staged(posts[0]),
+           f"scans: an export of the second arm position taken while the trial's page waits at the first goes to "
+           f"{posts[1]}")
+    export(posts[0], f"export_{posts[0]}.ply")
+    d.wait(lambda: d.staged(posts[0]), 40)
+    ready = d.wait(lambda: any(e.get("action") == "measured" and e.get("state") == "ready" for e in scans_events(n)), 60)
+    ev = next((e for e in scans_events(n) if e.get("action") == "measured" and e.get("state") == "ready"), {})
+    st = d.call("scans_state", "{}")
+    res = st["result"]
+    row = b.run().log.row(trial)
+    expect(ready and ev.get("seconds") is not None and ev["seconds"] < 30 and res["state"] == "ready"
+           and len(res["tre"]) == 7 and res["tre_max_mm"] > 0 and res["views"] == len(posts)
+           and all(x["state"] == "ok" and x["n_spheres"] == 6 for x in st["slots"]),
+           f"scans: the marker's shift {res.get('shift_mm')} mm, {res.get('rot_deg')}°, the worst of 7 targets "
+           f"{res.get('tre_max_mm')} mm, {ev.get('seconds')} s after the export ({time.time() - t0:.0f} s for both)")
+    expect(row["spheres_ok"] == "1" and row["cap_shift_mm"] == res["log"]["cap_shift_mm"]
+           and set(ev.get("logged", [])) == {"spheres_ok", "cap_shift_mm"} and st["calibration"]["done"] is False,
+           f"scans: spheres_ok and cap_shift_mm ({row['cap_shift_mm']} mm) written in the log for the spheres step; "
+           f"not calibrated said")
+    seen = [x["arm_seen"] for x in st["slots"]]
+    expect(seen == [x["arm"] for x in st["slots"]] and all(seen),
+           f"scans: each scan taken from the arm position of its step ({seen})")
+    # the trial to its end, its scans kept as staged: the twin shows the measured motion at once
+    for _ in range(40):
+        s = d.call("trials_state")
+        st = s["steps"][s["step"]]
+        if st["kind"] == "scan":
+            s = d.call("step_confirm", st["key"], "{}")
+        else:
+            s = d.do_step(st, spheres={"spheres_ok": row["spheres_ok"], "cap_shift_mm": row["cap_shift_mm"]})
+        assert "error" not in s, s
+        if s.get("closed"):
+            break
+    d.wait(lambda: not b.scans.busy(), 60)
+    tw = d.call("twin_state", json.dumps({"mode": "results", "trial": trial}))["scan"] or {}
+    expect(b.twin.current() is None or (tw.get("state") == "ready" and not tw.get("simulated")
+                                         and abs(tw.get("tre_max_mm", 0) - res["tre_max_mm"]) < 1e-3),
+           f"scans: the twin on the measured motion of {trial} at once, not a simulated one")
+    # the spheres' radii, once: three scans of the bench turned between them
+    n = len(d.events)
+    d.call("scans_capture", "calibration", "start", 0)
+    got = d.wait(lambda: d.call("scans_state", "{}")["capture"]["calibration"]["good"] >= 3, 60)
+    expect(got and d.call("scans_state", "{}")["capture"]["on"] == "calibration",
+           "scans: a calibration run, three scans taken while it is on")
+    a = d.call("scans_calibrate")
+    done = d.wait(lambda: any(e.get("action") == "calibrated" for e in scans_events(n)), 60)
+    d.wait(lambda: not b.scans.busy(), 5)
+    st = d.call("scans_state", json.dumps({"trial": trial}))
+    d.wait(lambda: not b.scans.busy(), 60)
+    st = d.call("scans_state", json.dumps({"trial": trial}))
+    cal = b.scans.calibration()
+    expect(a.get("ok") and done and st["calibration"]["done"] and cal.is_file() and cal.parent.parent == b.roots.processed
+           and st["result"].get("calibrated") and st["capture"]["on"] == "",
+           f"scans: the radii calibrated (into the simulation's own file), the trial measured again with them")
+    # repeatability: four scans of the bench left alone
+    n = len(d.events)
+    d.call("scans_capture", "repeat", "start", 4)
+    got = d.wait(lambda: any(e.get("action") == "captured" and e.get("done") for e in scans_events(n)), 90)
+    r = d.call("scans_state", "{}")["capture"]["repeat"]["result"]
+    expect(got and r.get("n") == 4 and 0 < r.get("spread_mm", 1) < 0.05 and r.get("ok"),
+           f"scans: repeatability over {r.get('n')} scans, spread {r.get('spread_mm')} mm at the worst target")
+    # the day's processing
+    n = len(d.events)
+    d.call("scans_process", json.dumps({"day": "", "all": False}))
+    done = d.wait(lambda: any(e.get("action") == "processed" for e in scans_events(n)), 90)
+    poses = b.scans.store() / b.run().phase / scan_desk.POSES_NAME
+    with open(poses, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f)) if poses.is_file() else []
+    expect(done and len(rows) == 1 and rows[0]["trial"] == trial and rows[0]["calibrated"] == "1"
+           and rows[0]["T_M_B_post"].count(" ") == 15,
+           f"scans: today's trials processed into {poses.name} ({len(rows)} trial, calibrated, registrations)")
+    b.shutdown()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--work", type=Path, default=Path(tempfile.gettempdir()) / "impactguide_test")
@@ -2721,6 +2922,8 @@ def main():
     args = p.parse_args()
     safe_output()
     os.environ.setdefault("IMPACTGUIDE_TWIN_AUTO", "0")     # the twin's model is never made by the tests' backends
+    # the stand-in scanner's small files for the trials' tests; test_scans turns on the synthetic scans
+    os.environ.setdefault(scans_page.SIM_SCANS_ENV, "stand_in")
     if not prepare_work(args.work):
         print(f"{args.work} is not empty and is not a work folder of this test: nothing deleted. Choose another "
               f"--work, or empty it by hand.", flush=True)
@@ -2737,6 +2940,7 @@ def main():
         from slantui.shell.qt import QApplication
         app = QApplication(sys.argv[:1])
         test_backend(app, args.work / "backend", calibration=not args.no_calibration)
+        test_scans(app, args.work / "scans")
     print(f"\n{len(FAILS)} failures" if FAILS else "\nall checks passed", flush=True)
     return 1 if FAILS else 0
 

@@ -18,6 +18,14 @@ Writes 05_results/pose_synthetic.csv (rows view_1..view_4 and mean) and the chec
 edges).
 
     python 04_code/src/eval_marker_pose.py [--data DIR] [--live DIR] [--trials N]
+
+Twin (--twin): the photos of the digital twin (synth_twin.py, the bench scene with its ChArUco board of today, ArUco
+6 mm), split --split (default test), every state; per photo ChArUco and PnP against the true T_C_M, the error at the
+7 clinical targets of the mandible (frame B, through the true T_M_B: 3D mm and px) and the detection rate. Writes
+05_results/pose_twin.csv (rows p1..p4 and mean). The renders of render_phone_views.py (old scene, ArUco 7 mm) no
+longer match marker_pose.BOARD.
+
+    python 04_code/src/eval_marker_pose.py --twin [--split test]
 """
 import argparse
 import csv
@@ -39,6 +47,9 @@ WORK_ROOT = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact"))
 DATA = WORK_ROOT / "synthetic_pose"
 LIVE = WORK_ROOT / "synthetic_pose_live"
 CSV = ROOT / "05_results" / "pose_synthetic.csv"
+CSV_TWIN = ROOT / "05_results" / "pose_twin.csv"
+SYNTH = WORK_ROOT / "synth"
+TARGETS_CSV = ROOT / "03_data" / "processed" / "targets" / "mandible_targets.csv"
 SHEET = ROOT / "02_cad" / "renders" / "check_pose_overlay.png"
 TRIALS, NOISE, JPEG_Q, SEED = 30, 3.0, 90, 0
 BLUR = 1.5
@@ -150,12 +161,66 @@ def sheet(panels):
     return np.vstack([np.hstack([pad(p) for p in panels[i:i + 2]]) for i in range(0, len(panels), 2)])
 
 
+def twin(split="test", root=SYNTH):
+    """Marker pose on the photos of the digital twin against the true T_C_M; rows per photo position and the mean."""
+    import synth_data as sd
+    with TARGETS_CSV.open(encoding="utf-8") as fh:
+        X_B = np.array([[float(r[k]) for k in ("x_B", "y_B", "z_B")] for r in csv.DictReader(fh) if r["role"] == "proposed"])
+    board = mp.make_board()
+    per = {}
+    for s in sd.sessions(root):
+        if int(s.name[1:]) >= sd.CHECK_FROM:
+            continue
+        for fr in sd.frames(s):
+            if fr["split"] != split or fr["mode"] != "photo":
+                continue
+            K, T_gt, T_M_B = np.array(fr["K"]), np.array(fr["T_C_M"]), np.array(fr["T_M_B"])
+            image = cv2.imread(str(s / (fr["image"] + ".jpg")))
+            X = X_B @ T_M_B[:3, :3].T + T_M_B[:3, 3]          # the targets in the board frame M
+            t0 = time.perf_counter()
+            det = mp.detect(mp.make_detector(board, K), image)
+            ms = (time.perf_counter() - t0) * 1e3
+            est = mp.estimate_pose(board, det[0], det[1], K)
+            row = {"found": est is not None, "corners": len(det[1]), "ms": ms}
+            if est is not None:
+                row.update(mp.pose_error(est["T"], T_gt), **mp.target_error(est["T"], T_gt, X, K),
+                           reproj_px=est["rms_px"], distance_mm=float(np.linalg.norm(T_gt[:3, 3])))
+            per.setdefault(fr["view"], []).append(row)
+    if not per:
+        raise SystemExit(f"no {split} photos in {root}")
+    rows = []
+    for key in sorted(per) + ["mean"]:
+        g = [r for k in (per if key == "mean" else [key]) for r in per[k]]
+        ok = [r for r in g if r["found"]]
+        m = lambda c, q=None: float(np.percentile([r[c] for r in ok], q) if q else np.mean([r[c] for r in ok]))             if ok else float("nan")
+        rows.append({"key": key, "photos": len(g), "found": f"{len(ok) / len(g):.3f}",
+                     "corners": f"{np.mean([r['corners'] for r in g]):.1f}", "distance_mm": f"{m('distance_mm'):.0f}",
+                     "reproj_px": f"{m('reproj_px'):.3f}", "rot_deg": f"{m('rot_deg'):.3f}",
+                     "rot_p95_deg": f"{m('rot_deg', 95):.3f}", "trans_mm": f"{m('trans_mm'):.3f}",
+                     "depth_mm": f"{m('depth_mm'):.3f}", "tre_rms_mm": f"{m('tre_rms_mm'):.3f}",
+                     "tre_rms_median_mm": f"{m('tre_rms_mm', 50):.3f}", "tre_rms_p95_mm": f"{m('tre_rms_mm', 95):.3f}",
+                     "tre_rms_worst_mm": f"{m('tre_rms_mm', 100):.3f}", "tre_max_mm": f"{m('tre_max_mm'):.3f}",
+                     "overlay_px": f"{m('overlay_rms_px'):.2f}", "detect_ms": f"{np.median([r['ms'] for r in g]):.0f}"})
+        print(rows[-1], flush=True)
+    with CSV_TWIN.open("w", newline="", encoding="utf-8") as fh:
+        wr = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator="\n")
+        wr.writeheader()
+        wr.writerows(rows)
+    print(f"written {CSV_TWIN}")
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, default=DATA)
     ap.add_argument("--live", type=Path, default=LIVE)
     ap.add_argument("--trials", type=int, default=TRIALS)
+    ap.add_argument("--twin", action="store_true", help="the photos of the digital twin (pose_twin.csv)")
+    ap.add_argument("--split", default="test", help="split of the twin photos")
     args = ap.parse_args()
+    if args.twin:
+        twin(args.split)
+        return
     gt, gt_live = load(args.data, mp.BOARD), load(args.live, mp.BOARD)
     mesh = np.load(args.data / "mandible_board.npz")
     X = mesh["vertices"]

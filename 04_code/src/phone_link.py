@@ -91,6 +91,9 @@ WAIT_SLICE_S = 1.0              # wait_ready waits at most this long on another 
 JOIN_S = 2.0                    # the watch and the notifier are waited for this long at close
 NOTIFY_IDLE_S = 5.0             # the notifier thread ends after this long without news (it starts again on the next)
 ADB_PORT = 5037                 # the adb server's port unless ANDROID_ADB_SERVER_PORT says otherwise
+# the ports of this PC that adb forward ties to the phone's streams, one each (forward_port), from the first to before
+# the last; past scrcpy's own (27183-27199), so a scrcpy started by hand never meets them
+FORWARD_PORTS = (27200, 27264)
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0    # CREATE_NO_WINDOW: no console flash under pythonw
 ADDRESS_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:]+\]):(\d{1,5})")
 HOST_PORT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*:\d{1,5}")    # a TCP transport by name: localhost:5555
@@ -189,6 +192,48 @@ def adb_port() -> int:
         return int(os.environ.get("ANDROID_ADB_SERVER_PORT", ADB_PORT))
     except ValueError:
         return ADB_PORT
+
+
+_forward_lock = threading.Lock()
+_forward_held: set[int] = set()
+_forward_next = [FORWARD_PORTS[0]]
+
+
+def _port_free(port: int) -> bool:
+    """Nothing of this PC listens on 127.0.0.1:port (a tunnel of adb forward does, an adb of another run too)."""
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def forward_port() -> int:
+    """A port of this PC for the adb forward tunnel of one stream (live.PhoneStream, the camera or the mirrored
+    screen): never one another stream of this process holds, nor one in use on this PC, taken in turn through
+    FORWARD_PORTS so that a port given back comes again only much later. Each stream then lays and removes only its
+    own tunnel: with one port for every stream, an old stream that ended or started again late took a newer stream's
+    tunnel away. Given back with release_port.
+
+    Raises:
+        LinkError: timeout, when every port of FORWARD_PORTS is taken.
+    """
+    lo, hi = FORWARD_PORTS
+    with _forward_lock:
+        for _ in range(hi - lo):
+            p = _forward_next[0]
+            _forward_next[0] = lo + (p + 1 - lo) % (hi - lo)
+            if p not in _forward_held and _port_free(p):
+                _forward_held.add(p)
+                return p
+    raise LinkError("timeout", f"no free port in {lo}-{hi - 1} for a stream's tunnel")
+
+
+def release_port(port: int | None) -> None:
+    """A port of forward_port given back (once its tunnel is removed); None or a port not held does nothing."""
+    with _forward_lock:
+        _forward_held.discard(port)
 
 
 class AdbRunner:
@@ -1497,6 +1542,22 @@ def test_commands(expect):
            "open_url: the address quoted for the phone's shell, & and ; kept inside it")
     link.close()
     expect(not sim.reversed, "close() removes the tunnels of adb reverse it laid")
+    # the tunnels of adb forward: a port of its own for each stream, a port given back not given again soon, a port
+    # some other program listens on never given
+    a, b = forward_port(), forward_port()
+    release_port(a)
+    c = forward_port()
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", _forward_next[0]))
+        busy.listen(1)
+        held = busy.getsockname()[1]
+        d = forward_port()
+    lo, hi = FORWARD_PORTS
+    expect(len({a, b, c, d}) == 4 and all(lo <= p < hi for p in (a, b, c, d)) and d != held,
+           f"adb forward: each stream its own port ({a}, {b}), one given back not given again at once ({c}), one in "
+           f"use on this PC skipped ({held} -> {d})")
+    for p in (b, c, d):
+        release_port(p)
     expect(all(t is not None and 0 < t <= 60 for t in sim.timeouts), "every adb call has a timeout")
     link.configure(mode=WIFI)
     link.pair_code(f"{sim.ip}:{sim.pair_port}", sim.code)

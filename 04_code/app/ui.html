@@ -8,6 +8,7 @@
      loaded from file:// and can only link what sits beside it. -->
 <link rel="stylesheet" href="ui/slantui.css"/>
 <link rel="stylesheet" href="ui/app.css"/>
+<link rel="stylesheet" href="ui/results.css"/>
 </head>
 <body>
 <div class="app at-home">
@@ -168,6 +169,9 @@
                 <div class="covl live-lights hidden" id="lvLights">
                   <div class="live-light"><span class="live-dot" id="lvDot"></span><span id="lvLight"></span></div>
                   <div class="live-why hidden" id="lvWhy"></div>
+                  <!-- the registration watched over: its state by shape and colour, and what to do -->
+                  <div class="live-light chk-light hidden" id="lvChk"><span class="chk-dot" id="lvChkDot"></span><span id="lvChkWord"></span></div>
+                  <div class="live-why hidden" id="lvChkWhy"></div>
                 </div>
                 <div class="live-idle" id="lvIdle">
                   <div class="say card">
@@ -274,6 +278,58 @@
              the trial's page and as the Scans step (ui/18-twin.js) ───────── -->
         <div class="view tw-view" data-view="twin">
           <div class="tw-3d" id="tw3d"><canvas id="tw3dCanvas"></canvas><div class="covl tw-hint" data-t="board.3d.hint"></div><div class="tw-msg hidden" id="twMsg"></div></div>
+        </div>
+
+        <!-- ── scans and results, its first step: a trial's scans as the scanner exports them, before and
+             after the impact, each at its arm position, and what they measure; or a run of scans without an
+             impact (the spheres' radii, the repeatability) (ui/22-scans.js) ─────────────────────────────── -->
+        <div class="view narrowable" data-view="scans">
+          <div class="sheet-col" id="scTrialCol">
+            <div class="trial-head">
+              <div class="trial-id" id="scId"></div>
+              <div class="col grow">
+                <div class="trial-sub" id="scSub"></div>
+                <div class="row wrap" id="scChips"></div>
+              </div>
+              <button class="btn btn-2" id="scTwin" type="button" data-t-title="scans.twin.hint"><span data-icon="cube"></span><span class="btn-label" data-t="twin.open"></span></button>
+            </div>
+            <div class="cards2" id="scSides">
+              <div class="card col sc-side"><div class="sc-side-hd"><span class="sec-lbl" data-t="scans.before"></span><span class="sc-side-sub" id="scBeforeSub"></span></div><div class="sc-slots" id="scBefore"></div></div>
+              <div class="card col sc-side"><div class="sc-side-hd"><span class="sec-lbl" data-t="scans.after"></span><span class="sc-side-sub" id="scAfterSub"></span></div><div class="sc-slots" id="scAfter"></div></div>
+            </div>
+            <div class="card col sc-result">
+              <div class="row wrap sc-res-hd"><span class="sec-lbl grow" data-t="scans.res.sec"></span><span class="row wrap" id="scResChips"></span></div>
+              <div class="sc-res-say hidden" id="scResSay"><span class="spinner spinner-sm hidden" id="scResSpin"></span><span id="scResText"></span></div>
+              <div class="stack hidden" id="scResBody">
+                <div class="tiles" id="scTiles"></div>
+                <div class="tw-legend"><div class="tw-ramp" id="scRamp"></div><div class="tw-ticks" id="scTicks"></div></div>
+                <div class="tw-targets" id="scTargets"></div>
+              </div>
+            </div>
+          </div>
+          <div class="sheet-col hidden" id="scRun">
+            <div class="say card">
+              <div class="say-top"><span class="say-title" id="scRunTitle"></span></div>
+              <div class="say-line" id="scRunLine"></div>
+            </div>
+            <div class="count card" id="scRunCount">
+              <div class="count-n"><span id="scRunN">0</span><span class="count-of" id="scRunOf"></span></div>
+              <div class="progress-track"><div class="progress-fill" id="scRunBar"></div></div>
+              <div class="count-say" id="scRunSay"></div>
+            </div>
+            <div class="sc-grid" id="scRunFiles"></div>
+            <div class="card col hidden" id="scRunRes">
+              <div class="row wrap"><span class="sec-lbl grow" data-t="scans.run.spread"></span><span id="scRunVerdict"></span></div>
+              <div class="tiles" id="scRunTiles"></div>
+              <div class="tw-targets" id="scRunTargets"></div>
+            </div>
+          </div>
+          <div class="sheet-col hidden" id="scEmpty">
+            <div class="say card">
+              <div class="say-top"><span class="say-title" data-t="scans.empty.title"></span></div>
+              <div class="say-line" data-t="scans.empty.line"></div>
+            </div>
+          </div>
         </div>
 
         <!-- ── scans and results: the steps still to come ──────────────── -->
@@ -533,6 +589,10 @@
             <input type="range" id="lvOpacity" min="0" max="1" step="any" data-fine="0.001" value="0.3"/>
             <span class="sl-v" id="lvOpacityV"></span>
           </div>
+          <!-- the registration from the picture: the command, and the way back after a correction -->
+          <div class="sec-lbl" data-t="live.chk.sec"></div>
+          <button class="btn btn-2 btn-wide" id="lvCorrect" data-t-title="live.correct.hint"><span data-icon="check"></span><span class="btn-label" data-t="live.correct"></span></button>
+          <button class="btn btn-2 btn-wide hidden" id="lvUndo"><span data-icon="undo"></span><span class="btn-label" data-t="live.undo"></span></button>
           <!-- the view on the phone's own screen: how it stands in a few words, and the command -->
           <div class="sec-lbl" data-t="view.sec"></div>
           <div class="live-state slim"><span class="live-dot" id="lvPhDot"></span><span class="lk-word" id="lvPhWord"></span></div>
@@ -540,6 +600,14 @@
           <div class="fold" id="lvAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
             <div class="sec-lbl" id="lvStatusLbl" data-t="live.status.sec"></div>
             <div id="lvStatus"></div>
+            <div class="sec-lbl" data-t="live.chk.sec"></div>
+            <div id="lvChkRows"></div>
+            <div class="mlist" id="lvChkMethods">
+              <div class="mitem" data-method="net" tabindex="0" role="button" data-t-title="live.chk.method.net.hint"><span class="mitem-name" data-t="live.chk.method.net"></span></div>
+              <div class="mitem" data-method="opt" tabindex="0" role="button" data-t-title="live.chk.method.opt.hint"><span class="mitem-name" data-t="live.chk.method.opt"></span></div>
+              <div class="mitem" data-method="net_opt" tabindex="0" role="button" data-t-title="live.chk.method.net_opt.hint"><span class="mitem-name" data-t="live.chk.method.net_opt"></span></div>
+            </div>
+            <label class="toggle" data-t-title="live.chk.auto.hint"><input type="checkbox" id="lvChkAuto"/><span data-t="live.chk.auto"></span></label>
             <div class="sec-lbl" data-t="live.reg.sec"></div>
             <div id="lvReg"></div>
             <button class="btn btn-2 btn-wide" id="lvRegLoad" data-t-title="live.reg.load.hint"><span class="btn-label" data-t="live.reg.load"></span></button>
@@ -760,6 +828,52 @@
         </div>
       </div>
 
+      <!-- scans: the scanner's folder watched, the trial to look at, the spheres' radii, the repeatability, the
+           day's processing; the folder, the formats and the results under Advanced; a run's actions at the foot -->
+      <div class="rp-page" data-panel="scans">
+        <div class="rp-hd">
+          <div class="rp-title" data-t="page.scans.title"></div>
+          <div class="rp-sub" id="scPSub"></div>
+        </div>
+        <div class="rp-scroll stack">
+          <div class="live-state slim" id="scWatch"><span class="live-dot" id="scWatchDot"></span><span class="lk-word" id="scWatchW"></span></div>
+          <button class="btn btn-2 btn-wide hidden" id="scFolderBtn" type="button"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
+          <button class="btn btn-2 btn-wide hidden" id="scSim" type="button" data-t-title="scans.sim.hint"><span class="btn-label" data-t="scans.sim"></span></button>
+          <div class="stack hidden" id="scPick">
+            <div class="sec-lbl" data-t="scans.trial.sec"></div>
+            <div class="combo" id="scTrial" tabindex="0" role="button"><span class="combo-v"></span></div>
+          </div>
+          <div class="sec-lbl" data-t="scans.cal.sec"></div>
+          <div class="row"><span class="chip" id="scCalChip"></span></div>
+          <button class="btn btn-2 btn-wide" id="scCalBtn" type="button" data-t-title="scans.cal.start.hint"><span class="btn-label" data-t="scans.cal.start"></span></button>
+          <div class="sec-lbl" data-t="scans.rep.sec"></div>
+          <div class="note hidden" id="scRepNote"></div>
+          <button class="btn btn-2 btn-wide" id="scRepBtn" type="button"><span class="btn-label" data-t="scans.rep.start"></span></button>
+          <div class="sec-lbl" data-t="scans.day.sec"></div>
+          <div class="note hidden" id="scDayNote"></div>
+          <button class="btn btn-2 btn-wide" id="scDayBtn" type="button" data-t-title="scans.day.hint"><span class="btn-label" data-t="scans.day.start"></span></button>
+          <div class="fold" id="scAdv"><button class="fold-hd" type="button"><span class="fold-name" data-t="word.advanced"></span></button><div class="fold-body"><div class="stack">
+            <div class="sec-lbl" data-t="trials.scanner.sec"></div>
+            <div class="note note-path" id="scFolder"></div>
+            <button class="btn btn-2 btn-wide" id="scFolderBtn2" type="button"><span class="btn-label" data-t="trials.scanner.choose"></span></button>
+            <div class="sec-lbl" data-t="scans.adv.formats"></div>
+            <div class="note" id="scFormats"></div>
+            <div class="field" data-t-title="scans.adv.n.hint">
+              <span class="field-n" data-t="scans.adv.n"></span>
+              <input class="input" type="number" id="scRepN" min="3" max="100" step="1"/>
+            </div>
+            <button class="btn btn-2 btn-wide" id="scDayAll" type="button" data-t-title="scans.day.hint"><span class="btn-label" data-t="scans.day.all"></span></button>
+            <button class="btn btn-2 btn-wide" id="scOpen" type="button"><span class="btn-label" data-t="scans.adv.open"></span></button>
+          </div></div></div>
+        </div>
+        <div class="rp-foot hidden" id="scFoot">
+          <div class="rp-nav">
+            <button class="btn btn-2 btn-grow" id="scRunStop" type="button"><span class="btn-label" id="scRunStopL"></span></button>
+            <button class="btn btn-primary btn-grow" id="scRunGo" type="button"><span class="btn-label" data-t="scans.run.calibrate"></span></button>
+          </div>
+        </div>
+      </div>
+
       <!-- scans and results: still to come -->
       <div class="rp-page" data-panel="soon">
         <div class="rp-hd">
@@ -792,6 +906,7 @@
 <!-- three.js r128 (ui/libs, MIT) for the 3D-printed plate in 3D. Qt serves
      the channel's script from its resources, before SlantUI's. Then the
      page's parts, plain scripts sharing one scope, in this order. -->
+<script src="ui/00-errors.js"></script>
 <script src="ui/libs/three.min.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script src="ui/slantui.js"></script>
@@ -802,10 +917,16 @@
 <script src="ui/10-calibration.js"></script>
 <script src="ui/12-figures.js"></script>
 <script src="ui/15-board.js"></script>
+<script src="ui/16-boardview.js"></script>
 <script src="ui/17-plate3d.js"></script>
 <script src="ui/18-twin.js"></script>
 <script src="ui/19-parts.js"></script>
 <script src="ui/20-trials.js"></script>
+<script src="ui/22-scans.js"></script>
+<script src="ui/24-analysis.js"></script>
+<script src="ui/26-charts.js"></script>
+<script src="ui/28-holders.js"></script>
+<script src="ui/28-dataset.js"></script>
 <script src="ui/30-live.js"></script>
 <script src="ui/40-phone.js"></script>
 <script src="ui/90-boot.js"></script>

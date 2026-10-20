@@ -8,7 +8,8 @@ Perturbations as in eval_correction_synthetic.py (its perturbation()): "a1" rota
 "rigid" rotation about the face centroid up to 5 deg plus translation up to 5 mm; stale registration T_M_B0 = T_M_B . P;
 PERTURBATIONS per sample and kind. View sets as in eval_correction_synthetic.py: 1 view (a random photo), 2 views
 (p1+p3 or p2+p4), 4 views.
-Methods on the same views, masks and perturbations:
+Methods on the same views, masks and perturbations (rigid with one view: the network only, since the optimisation
+never runs 6 degrees of freedom from one view, correct.MIN_VIEWS):
 - opt: correct.correct from T_M_B0, multi-start (zero plus +-2.5 deg about the axes), as eval_correction_synthetic.py;
 - net: refiner.Refiner.refine, ITERS iterations with a new render each;
 - net_opt: the network, then refiner.optimize from its output (one start);
@@ -23,8 +24,10 @@ Writes
 - 05_results/correction_network_synthetic.csv: per kind, view set and method: TRE before and after (median, 95th
   percentile, maximum), share below 1 and 2 mm, time (median, 95th percentile); for net the coverage of its predicted
   variance (share of parameters within 1.96 sigma, raw and scaled); for the others the paired comparison with opt
-  (median difference, share of samples where it is lower, Wilcoxon p, change of the median, change of the share
-  below 2 mm in points); a row on the observed masks of the test photos and one on the training.
+  on the same samples (median difference, share of samples where it is lower, Wilcoxon p over the test samples on
+  the mean difference of their perturbations and its Holm adjustment over the table, change of the median, change of
+  the share below 2 mm in points); a row on the observed masks of the test photos and one on the training.
+Perturbations are seeded from the key of the test sample (state_seed), so adding sessions does not change them.
 
     python 04_code/src/eval_refiner_synthetic.py [--perturbations N] [--states N] [--summary]
 """
@@ -33,6 +36,7 @@ import csv
 import json
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import cv2
@@ -104,6 +108,12 @@ def sigma_scale(net, face):
     return {m: float(np.percentile(v, 95) / 1.96) for m, v in z.items()}
 
 
+def state_seed(key):
+    """Seed of the perturbations of a test sample, from its key (sNNNN/rR_sS): the same whatever other samples are
+    run or added (the position in the list of samples changed when sessions were added)."""
+    return zlib.crc32(key.encode("utf-8"))
+
+
 def run(a):
     face = rf.load_face()
     ren = MaskRenderer(face.v, face.f)
@@ -118,6 +128,9 @@ def run(a):
     if OUT.exists():
         with OUT.open(newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
+    stale = sorted({r["state"] for r in rows if r.get("seed") != str(state_seed(r["state"]))})
+    if stale:
+        raise SystemExit(f"{OUT} has samples drawn with other seeds ({len(stale)} states, e.g. {stale[0]}): delete it")
     done = {(r["state"], r["kind"], int(r["perturbation"])) for r in rows}
     t0 = time.perf_counter()
     for si, key in enumerate(keys):
@@ -127,7 +140,7 @@ def run(a):
         vs = load_views(states[key])
         T_M_B = vs[0]["T_M_B"]
         for kind, j in todo:
-            rng = np.random.default_rng([SEED, si, KINDS.index(kind), j])
+            rng = np.random.default_rng([SEED, state_seed(key), KINDS.index(kind), j])
             P, ang, tr = ecs.perturbation(kind, rng, face.c, face.o)
             T0 = T_M_B @ P
             one, pair = int(rng.integers(4)), [(0, 2), (1, 3)][int(rng.integers(2))]
@@ -135,13 +148,15 @@ def run(a):
             for name, n in SETS.items():
                 idx = [one] if n == 1 else list(pair) if n == 2 else [0, 1, 2, 3]
                 views = [vs[i]["view"] for i in idx]
-                base = {"state": key, "kind": kind, "perturbation": j, "set": name,
+                base = {"state": key, "seed": state_seed(key), "kind": kind, "perturbation": j, "set": name,
                         "views": "+".join(f"p{i + 1}" for i in idx), "angle_deg": ang, "trans_mm": tr,
                         "tre_before_mm": rf.tre(np.linalg.inv(T_M_B) @ T0, X)}
-                res = co.correct(ren, views, T0, X, kind, center=center)
-                rows.append({**base, "method": "opt", "tre_after_mm": rf.tre(np.linalg.inv(T_M_B) @ res.T_M_B, X),
-                             "time_s": res.time_s, "score_after_mm": res.score_mm, "renders": res.renders,
-                             "tre_pred_95_mm": res.tre_pred_95})
+                optimise = co.allowed(kind, len(views))    # never 6 degrees of freedom from one view: the net only
+                if optimise:
+                    res = co.correct(ren, views, T0, X, kind, center=center)
+                    rows.append({**base, "method": "opt", "tre_after_mm": rf.tre(np.linalg.inv(T_M_B) @ res.T_M_B, X),
+                                 "time_s": res.time_s, "score_after_mm": res.score_mm, "renders": res.renders,
+                                 "tre_pred_95_mm": res.tre_pred_95})
                 t = time.perf_counter()
                 srcs = [rf.make_source(vs[i]["rgb"], vs[i]["obs"], vs[i]["K"], vs[i]["dist"], vs[i]["T_C_M"], T0, face.o)
                         for i in idx]
@@ -151,6 +166,8 @@ def run(a):
                              "time_s": t_net, "coverage": coverage(T_M_B, T_net, lv, kind, face),
                              "coverage_scaled": coverage(T_M_B, T_net, lv + 2 * np.log(scale[kind]), kind, face),
                              "sigma_mean": float(np.mean(np.exp(0.5 * lv)))})
+                if not optimise:
+                    continue
                 r2 = rf.optimize(ren, views, T_net, X, kind, center=center)
                 rows.append({**base, "method": "net_opt", "tre_after_mm": rf.tre(np.linalg.inv(T_M_B) @ r2.T_M_B, X),
                              "time_s": t_net + r2.time_s, "score_after_mm": r2.score_mm, "renders": r2.renders,
@@ -164,13 +181,22 @@ def run(a):
     return rows
 
 
-def paired(a, b):
-    d = np.asarray(a) - np.asarray(b)
+def paired(a, b, groups):
+    """a against b on the same samples: median difference (mm) and share where a is lower, over the pairs; Wilcoxon
+    signed-rank p (two-sided) over the groups, on the mean difference of each: the perturbations of one test sample
+    share its views and masks, so they are not independent pairs. NaN when there are fewer than 6 groups."""
+    d = np.asarray(a, float) - np.asarray(b, float)
+    inv = np.unique(np.asarray(groups), return_inverse=True)[1].ravel()
+    dg = np.bincount(inv, weights=d) / np.bincount(inv)
     try:
-        p = f"{wilcoxon(d[d != 0]).pvalue:.3g}" if np.sum(d != 0) >= 6 else ""
+        p = float(wilcoxon(dg[dg != 0]).pvalue) if np.sum(dg != 0) >= 6 else float("nan")
     except ValueError:
-        p = ""
+        p = float("nan")
     return f"{np.median(d):.3f}", f"{np.mean(d < 0):.3f}", p
+
+
+def p_text(p):
+    return "" if not np.isfinite(p) else f"{p:.3g}"
 
 
 def summarize(rows):
@@ -202,15 +228,20 @@ def summarize(rows):
                     row["coverage_1p96_sigma"] = f"{np.mean([r['coverage'] for r in g]):.3f}"
                     row["coverage_1p96_sigma_scaled"] = f"{np.mean([r['coverage_scaled'] for r in g]):.3f}"
                     row["sigma_scale"] = f"{scales.get(kind, float('nan')):.2f}"
-                if method != "opt":
-                    both = [r for r in g if (r["state"], r["perturbation"]) in ref]
+                both = [r for r in g if (r["state"], r["perturbation"]) in ref]
+                if method != "opt" and both:     # on the samples both methods ran, by test sample (state)
+                    tn = np.array([r["tre_after_mm"] for r in both])
+                    to = np.array([ref[r["state"], r["perturbation"]] for r in both])
                     row.update(zip(("vs_opt_diff_median_mm", "vs_opt_lower_share", "vs_opt_p"),
-                                   paired([r["tre_after_mm"] for r in both], [ref[r["state"], r["perturbation"]] for r in both])))
-                    m_o, m_n = np.median([ref[r["state"], r["perturbation"]] for r in both]), np.median(ta)
-                    row["vs_opt_median_change"] = f"{(m_n - m_o) / m_o:.3f}"
-                    row["vs_opt_below_2mm_points"] = \
-                        f"{100 * (np.mean(ta < 2) - np.mean([ref[r['state'], r['perturbation']] < 2 for r in both])):.1f}"
+                                   paired(tn, to, [r["state"] for r in both])))
+                    row["vs_opt_states"] = len({r["state"] for r in both})
+                    row["vs_opt_median_change"] = f"{(np.median(tn) - np.median(to)) / np.median(to):.3f}"
+                    row["vs_opt_below_2mm_points"] = f"{100 * (np.mean(tn < 2) - np.mean(to < 2)):.1f}"
                 out.append(row)
+    # many comparisons: Holm-adjusted p over all of them (the family of this table)
+    tested = [r for r in out if "vs_opt_p" in r]
+    for r, q in zip(tested, ecs.holm([r["vs_opt_p"] for r in tested])):
+        r["vs_opt_p"], r["vs_opt_p_holm"] = p_text(r["vs_opt_p"]), p_text(q)
     mp = rf.SAM_DIR / "masks.csv"
     if mp.exists():
         with mp.open(encoding="utf-8") as fh:

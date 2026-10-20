@@ -9,6 +9,10 @@ control (Angelopoulos, Bates, Fisch, Lei and Schuster, "Conformal risk control",
 
 which bounds the expected silent error rate of a new sample by alpha when calibration and test samples are
 exchangeable (same protocol). With n < 1 / alpha - 1 no u qualifies and nothing is accepted.
+
+Groups: rows that are not exchangeable on their own (e.g. the view sets of one sample, which share its perturbation and
+masks) form one sample whose loss is the mean of its rows' losses; n counts groups, and a split never puts the rows
+of one group on both sides. Without groups every row is a sample.
 """
 import numpy as np
 
@@ -20,32 +24,57 @@ def silent(pred, tre, gate, u, limit=LIMIT_MM):
     return np.asarray(gate, bool) & (np.asarray(pred, float) < u) & (np.asarray(tre, float) > limit)
 
 
-def calibrate(pred, tre, gate, alpha=0.05, limit=LIMIT_MM):
+def _groups(n, groups):
+    """Group index of each row (0..g-1, in order of first appearance) and the number of groups; every row its own
+    group without groups (the same indices as groups of one row each)."""
+    if groups is None:
+        return np.arange(n), n
+    _, first, inv = np.unique(np.asarray(groups), return_index=True, return_inverse=True)
+    rank = np.empty(len(first), int)
+    rank[np.argsort(first)] = np.arange(len(first))
+    return rank[inv.ravel()], len(first)
+
+
+def calibrate(pred, tre, gate, alpha=0.05, limit=LIMIT_MM, groups=None):
     """Largest u whose finite-sample corrected risk is at most alpha: -inf (accept nothing), a value, or +inf."""
     pred, tre, gate = np.asarray(pred, float), np.asarray(tre, float), np.asarray(gate, bool)
-    n = len(pred)
-    m = int(np.floor(alpha * (n + 1) - 1 + 1e-9))     # silent errors allowed in the calibration set
-    if m < 0:
+    g, n = _groups(len(pred), groups)
+    budget = alpha * (n + 1) - 1          # sum of the sample losses allowed in the calibration set
+    if budget < -1e-9:
         return -np.inf
-    bad = np.sort(pred[gate & (tre > limit)])
-    return float(bad[m]) if len(bad) > m else np.inf
+    bad = np.flatnonzero(gate & (tre > limit))
+    if not len(bad):
+        return np.inf
+    bad = bad[np.argsort(pred[bad], kind="stable")]
+    size = np.bincount(g, minlength=n)
+    loss = np.cumsum(1.0 / size[g[bad]])  # risk sum once u passes each bad prediction, in order
+    over = np.flatnonzero(loss > budget + 1e-9)
+    return float(pred[bad[over[0]]]) if len(over) else np.inf
 
 
-def splits(pred, tre, gate, alphas, n_splits=1000, cal_frac=0.5, seed=0, limit=LIMIT_MM):
-    """Repeated random calibration and test splits: for each alpha the observed silent error rate and acceptance rate
-    on the test part, mean and 5th-95th percentiles over the splits, and the median u."""
+def splits(pred, tre, gate, alphas, n_splits=1000, cal_frac=0.5, seed=0, limit=LIMIT_MM, groups=None):
+    """Repeated random calibration and test splits, by group: for each alpha the observed silent error rate and
+    acceptance rate on the test part (means over its samples), mean and 5th-95th percentiles over the splits, and the
+    median u."""
     pred, tre, gate = np.asarray(pred, float), np.asarray(tre, float), np.asarray(gate, bool)
-    n = len(pred)
+    g, n = _groups(len(pred), groups)
     n_cal = int(round(cal_frac * n))
+    size = np.bincount(g, minlength=n)
     rng = np.random.default_rng(seed)
     out = {a: {"silent": [], "accepted": [], "u": []} for a in alphas}
+
+    def mean_of_groups(x, rows):         # mean over the test samples of the mean over their rows
+        return float(np.sum(x / size[g[rows]]) / len(np.unique(g[rows])))
+
     for _ in range(n_splits):
-        idx = rng.permutation(n)
-        cal, test = idx[:n_cal], idx[n_cal:]
+        in_cal = np.zeros(n, bool)
+        in_cal[rng.permutation(n)[:n_cal]] = True
+        cal, test = np.flatnonzero(in_cal[g]), np.flatnonzero(~in_cal[g])
+        gc = g[cal]
         for a in alphas:
-            u = calibrate(pred[cal], tre[cal], gate[cal], a, limit)
-            out[a]["silent"].append(silent(pred[test], tre[test], gate[test], u, limit).mean())
-            out[a]["accepted"].append((gate[test] & (pred[test] < u)).mean())
+            u = calibrate(pred[cal], tre[cal], gate[cal], a, limit, None if groups is None else gc)
+            out[a]["silent"].append(mean_of_groups(silent(pred[test], tre[test], gate[test], u, limit), test))
+            out[a]["accepted"].append(mean_of_groups(gate[test] & (pred[test] < u), test))
             out[a]["u"].append(u)
     rows = []
     for a in alphas:

@@ -18,7 +18,10 @@ Commands
              stay clear of marker, spheres and pendulum
     s1       ray casting of the head spheres from every phone position and along the video path (they must stay out
              of sight of the phone), and candidate positions on the bone hidden from the phone and seen by the scanner
-    render   the dataset: sessions x registrations x states x (4 photos + video frames); resumable, one state at a time
+    render   the dataset: sessions x registrations x states x (4 photos + video frames); resumable, one state at a time;
+             a drawn drape is laid only when it keeps DRAPE_GAP_MM from the marker as placed and the pendulum, else
+             the next drape that does (or none)
+    drapecheck  the drapes of rendered sessions against the marker as placed in their images (OUT/drape_check.json)
 
 Head spheres. The head spheres and their frame (gt_sphere_mandible_*, gt_frame_mandible*) are left out of the images
 and of the drape simulation unless --head-spheres is given: on the bench they are in sight of the phone, and a
@@ -115,7 +118,8 @@ HEAD_REF = (HEAD_SPHERES, "gt_frame_mandible")   # head spheres and their frame:
 CAP = "surgical_cap"    # green surgical cap on the head (prefix), when the scene has it
 CAP_RAY_MM = 15.0       # skin is under the cap when the cap is within this distance along the vertex normal
 DRAPE = "synth_drape"
-DRAPE_CLEAR = ("marker_", "gt_sphere", "gt_frame", "a1_", "b1_")   # the drape keeps 5 mm from these
+DRAPE_CLEAR = ("marker_", "gt_sphere", "gt_frame", "a1_", "b1_")   # the drape keeps DRAPE_GAP_MM from these
+DRAPE_GAP_MM = 5.0      # in the simulation (scene pose) and in every image (marker and pendulum as placed there)
 LABELS = {"background": 0, "face": 1, "marker": 2, "drape": 3, "interface": 4, "head_spheres": 5, "head": 6,
           "pendulum": 7, "bench": 8, "cap": 9}
 TARGETS = ROOT / "03_data" / "processed" / "targets" / "mandible_targets.csv"   # TRE targets (role "proposed")
@@ -222,6 +226,23 @@ def world_mesh(ob, evaluated=True):
     src.to_mesh_clear()
     mw = mat(ob.matrix_world)
     return co @ mw[:3, :3].T + mw[:3, 3], tri
+
+
+def mesh_tree(ob):
+    """BVH tree of a mesh object in world coordinates (mm)."""
+    v, f = world_mesh(ob)
+    return BVHTree.FromPolygons(v.tolist(), f.tolist())
+
+
+def clearance(points, trees, reach=50.0):
+    """Smallest distance (mm) from the points to the surfaces of the trees, at most reach (reach without trees)."""
+    gap = reach
+    for t in trees:
+        for p in points:
+            d = t.find_nearest(Vector(p), gap)[3]
+            if d is not None and d < gap:
+                gap = d
+    return float(gap)
 
 
 def parent_depth(ob):
@@ -439,6 +460,54 @@ class Twin:
         wb, _ = self.world_from_board()
         T_M_B = np.linalg.inv(wb)
         return wb, T_M_B, T_M_B @ np.linalg.inv(st["dT"])
+
+    def moving_parts(self, variant):
+        """Rendered meshes that move between the images of a session or a state: the parts that move with the marker
+        of `variant` as it is placed now (those of the other interface left out) and the pendulum."""
+        other = set()
+        for v, (cname, _) in VARIANTS.items():
+            if v != variant and cname in bpy.data.collections:
+                other |= {ob.name for ob in bpy.data.collections[cname].all_objects}
+        obs = [ob for r in self.roots[variant] for ob in [r, *r.children_recursive]]
+        obs += [self.objs[n] for n in sorted(self.pend_names) if n in self.objs]
+        return list({ob.name: ob for ob in obs if ob.type == "MESH" and ob.name not in other and self.rendered(ob)}
+                    .values())
+
+    def rendered(self, ob):
+        """True when the object is in the images: not hidden for render, in at least one collection that renders
+        (itself and every collection above it enabled for render and not excluded from the view layer)."""
+        if ob.hide_render:
+            return False
+        if not hasattr(self, "_coll_up"):
+            up = {}
+            for c in [self.sc.collection, *bpy.data.collections]:
+                for ch in c.children:
+                    up[ch.name] = c
+            self._coll_up = up
+        for c in ob.users_collection:
+            ok = True
+            while c is not None and c != self.sc.collection:
+                lc = self.find_layer_collection(c.name)
+                if c.hide_render or (lc is not None and lc.exclude):
+                    ok = False
+                    break
+                c = self._coll_up.get(c.name)
+            if ok and c is not None:
+                return True
+        return False
+
+    def clear_drape(self, drapes, k, variant):
+        """The drape to lay: drape k (drawn for the state) when it keeps DRAPE_GAP_MM from the moving parts as they are
+        placed now (Twin.moving_parts; the drapes were simulated and checked with the marker at its scene pose, which
+        Q and dT move by up to about 17 degrees), else the next ones in turn. Returns its index (None: no drape fits)
+        and its gap in mm."""
+        trees = [mesh_tree(ob) for ob in self.moving_parts(variant)]
+        for j in range(len(drapes)):
+            i = (k + j) % len(drapes)
+            gap = clearance(drapes[i]["vertices"], trees)
+            if gap >= DRAPE_GAP_MM:
+                return i, gap
+        return None, None
 
     def set_pendulum(self, deg):
         if self.pend_mw0 is None:
@@ -1100,7 +1169,10 @@ def cmd_render(tw, args):
                 t0 = time.perf_counter()
                 st = sample_state(tw, sess, reg, s, drapes)
                 wb, T_M_B, T_M_B0 = tw.place_marker(reg, st)      # marker in the world: start Q, then dT^-1
-                shift = np.linalg.norm(targets @ st["dT"][:3, :3].T + st["dT"][:3, 3] - targets, axis=1)
+                drape_gap = None
+                if st["drape"] is not None:     # the drawn drape, or the next one clear of the marker as placed
+                    st["drape"], drape_gap = tw.clear_drape(drapes, st["drape"], reg["interface"])
+                shift =np.linalg.norm(targets @ st["dT"][:3, :3].T + st["dT"][:3, 3] - targets, axis=1)
                 target_mm = {"mean": round(float(shift.mean()), 4), "max": round(float(shift.max()), 4)} if len(shift) else None
                 disp, dpar = fm.deformation(tw.face_w0, tw.face_n0, w, np.random.default_rng(st["def_seed"]),
                                             amp_mm=st["amp_mm"])
@@ -1160,7 +1232,7 @@ def cmd_render(tw, args):
                         "T_M_B": lst(T_M_B), "T_M_B0": lst(T_M_B0), "dT": lst(st["dT"]), "interface": reg["interface"],
                         "motion": st["motion"], "target_shift_mm": target_mm, "arm_deg": round(v["arm_deg"], 4), "tilt_deg": round(v["tilt_deg"], 4),
                         "face": sess["face"], "deformation": dpar, "drape": None if st["drape"] is None else drapes[st["drape"]]["name"],
-                        "light": st["light"], "albedo": st["albedo"], "pendulum_deg": sess["pendulum_deg"],
+                        "drape_gap_mm": None if drape_gap is None else round(drape_gap, 2), "light": st["light"], "albedo": st["albedo"], "pendulum_deg": sess["pendulum_deg"],
                         "head_spheres": bool(args.head_spheres), "pixels": cnt, "ms": {"rgb": round((t2 - t1) / n * 1e3), "label": round((t3 - t2) / n * 1e3),
                                               "model": round((t4 - t3) / n * 1e3), "setup": round((t1 - t0) * 1e3)}})
                 with fl.open("a", encoding="utf-8") as fh:
@@ -1392,8 +1464,7 @@ def cmd_drapes(tw, args):
         if not args.head_spheres and ob.name.startswith(HEAD_REF):
             continue
         if ob.type == "MESH" and not ob.hide_render and ob.name.startswith(DRAPE_CLEAR):
-            v, f = world_mesh(ob)
-            clear.append(BVHTree.FromPolygons(v.tolist(), f.tolist()))
+            clear.append(mesh_tree(ob))
     sim = bpy.data.scenes.new("synth_cloth")
     sim.unit_settings.system, sim.unit_settings.scale_length = "METRIC", 1.0
     sim.frame_start, sim.frame_end = 1, args.frames
@@ -1494,9 +1565,10 @@ def cmd_drapes(tw, args):
         if deep > 0.01 * len(v):
             print(json.dumps({"try": tries, "rejected": "sank into the head", "lifted": lifted, "deep": deep}), flush=True)
             continue
-        gap = min(min((t.find_nearest(Vector(p))[3] or 1e9) for p in v[::7]) for t in clear) if clear else 1e9
-        if not np.isfinite(v).all() or v[:, 2].min() < face_v[:, 2].min() - 40 or gap < 5.0:
-            print(json.dumps({"try": tries, "rejected": "clearance" if gap < 5.0 else "fell", "gap_mm": round(gap, 1)}), flush=True)
+        gap = clearance(v, clear)       # every vertex; with the marker at its scene pose (render checks it again)
+        if not np.isfinite(v).all() or v[:, 2].min() < face_v[:, 2].min() - 40 or gap < DRAPE_GAP_MM:
+            print(json.dumps({"try": tries, "rejected": "clearance" if gap < DRAPE_GAP_MM else "fell",
+                              "gap_mm": round(gap, 1)}), flush=True)
             continue
         tw.set_drape({"vertices": v, "faces": f, "color": srgb_to_linear(DRAPE_SRGB).tolist()})
         cov = coverage_counts(tw, views, K, size, args.out)
@@ -1540,6 +1612,62 @@ def lift_outside(v, bvh, centre, gap=1.0, reach=12.0, rounds=4, deep=2.5):
     return v, int(lifted.sum()), int((np.linalg.norm(v - v0, axis=1) > deep).sum())
 
 
+def cmd_drapecheck(tw, args):
+    """Drapes of the rendered sessions (OUT/sessions, range --sessions) against the parts that move between images:
+    per state with a drape, the marker put back at its recorded pose T_M_B and the pendulum at the session direction,
+    the gap (mm) from the drape to the moving parts there and with the marker at its scene pose (where the drape was
+    checked when it was simulated), and the drape render would lay now (Twin.clear_drape). Writes OUT/drape_check.json."""
+    drapes = load_drapes(args.out)
+    names = {d["name"]: k for k, d in enumerate(drapes)}
+    a, b = (int(x) for x in args.sessions.split(":"))
+    tw.show_head_spheres(args.head_spheres)
+    rows = []
+    for sdir in sorted((args.out / "sessions").glob("s[0-9][0-9][0-9][0-9]")):
+        if not a <= int(sdir.name[1:]) < b or not (sdir / "frames.jsonl").exists():
+            continue
+        sess = json.loads((sdir / "session.json").read_text(encoding="utf-8"))
+        tw.set_pendulum(sess["pendulum_deg"])
+        states = {}
+        for line in (sdir / "frames.jsonl").read_text(encoding="utf-8").splitlines():
+            fr = json.loads(line) if line else None
+            if fr and fr.get("drape") and fr["state_key"] not in states:
+                states[fr["state_key"]] = fr
+        for key, fr in states.items():
+            variant = fr["interface"]
+            tw.set_variant(variant)
+            tw.set_marker(variant, np.eye(4))
+            wb0, _ = tw.world_from_board()
+            k = names[fr["drape"]]
+            trees = [mesh_tree(ob) for ob in tw.moving_parts(variant)]
+            at_scene = clearance(drapes[k]["vertices"], trees)
+            want = np.linalg.inv(np.array(fr["T_M_B"]))
+            u, _, vt = np.linalg.svd(want[:3, :3])      # the record is rounded: back to a rotation
+            want[:3, :3] = u @ vt
+            tw.set_marker(variant, want @ np.linalg.inv(wb0))
+            off = float(np.abs(tw.world_from_board()[0] - want)[:3].max())
+            trees = [mesh_tree(ob) for ob in tw.moving_parts(variant)]
+            placed = clearance(drapes[k]["vertices"], trees)
+            j, gap = tw.clear_drape(drapes, k, variant)
+            rows.append({"state": f"{sdir.name}/{key}", "split": fr["split"], "interface": variant,
+                         "pendulum_deg": sess["pendulum_deg"], "drape": fr["drape"], "gap_scene_mm": round(at_scene, 2),
+                         "gap_placed_mm": round(placed, 2), "pose_check_mm": round(off, 6),
+                         "drape_now": None if j is None else drapes[j]["name"],
+                         "gap_now_mm": None if gap is None else round(gap, 2)})
+            print(json.dumps(rows[-1]), flush=True)
+    tw.set_marker("a1", np.eye(4))
+    n = len(rows)
+    count = lambda f: sum(1 for r in rows if f(r))
+    summary = {"states_with_drape": n,
+               "gap_scene_below_mm": {str(t): count(lambda r: r["gap_scene_mm"] < t) for t in (1.0, DRAPE_GAP_MM)},
+               "gap_placed_below_mm": {str(t): count(lambda r: r["gap_placed_mm"] < t) for t in (1.0, DRAPE_GAP_MM)},
+               "drape_changed": count(lambda r: r["drape_now"] not in (r["drape"], None)),
+               "drape_dropped": count(lambda r: r["drape_now"] is None),
+               "pose_check_max_mm": max((r["pose_check_mm"] for r in rows), default=0.0)}
+    (args.out / "drape_check.json").write_text(json.dumps({"summary": summary, "states": rows}, indent=1),
+                                               encoding="utf-8")
+    print(json.dumps(summary, indent=1))
+
+
 def coverage_counts(tw, views, K, size, out):
     tw.label_mode(depth=False)
     tw.hide_phone(True)
@@ -1556,7 +1684,7 @@ def coverage_counts(tw, views, K, size, out):
 
 def main(argv):
     p = argparse.ArgumentParser(prog="synth_twin.py")
-    p.add_argument("command", choices=("probe", "test", "meshes", "drapes", "s1", "render", "copy"))
+    p.add_argument("command", choices=("probe", "test", "meshes", "drapes", "s1", "render", "drapecheck", "copy"))
     p.add_argument("--out", type=Path, default=OUT)
     p.add_argument("--force-copy", action="store_true")
     p.add_argument("--sessions", default="0:1", help="range a:b of session indices")
@@ -1580,7 +1708,7 @@ def main(argv):
         return
     tw = open_twin(args.out, args.force_copy)
     {"probe": cmd_probe, "test": cmd_test, "meshes": cmd_meshes, "drapes": cmd_drapes, "s1": cmd_s1,
-     "render": cmd_render}[args.command](tw, args)
+     "render": cmd_render, "drapecheck": cmd_drapecheck}[args.command](tw, args)
 
 
 if __name__ == "__main__":

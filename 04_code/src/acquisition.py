@@ -14,7 +14,11 @@ and the cause is copy_failed. ImpactGuide then files it under the trial name
 (trials.Run.store) or discards it, so nothing reaches 03_data/raw before the
 operator keeps it. For the video the same key starts and stops the recording;
 with switch_modes the camera app is first moved to its video mode and back to
-its photo mode afterwards through the standard Android camera intents.
+its photo mode afterwards through the standard Android camera intents. That
+is its plain Photo mode: no intent brings back its Pro mode, so the operator
+chooses Pro again on the phone after a video (the trial's step says so), and a
+trial photo taken out of it is said (trials.deep_check_codes, photo_auto).
+Never left in the video mode, where the next shutter would start a film.
 Which phone, on which link (cable or Wi-Fi), is phone_link.py's to say: every
 operation asks it for the serial first, so a Wi-Fi link that came back on a
 new port is followed, and a link that is down is said as such (wifi_lost).
@@ -96,7 +100,7 @@ _LOGGER = logging.getLogger("acquisition")
 
 PHOTO_SUFFIXES = (".jpg", ".jpeg")
 VIDEO_SUFFIXES = (".mp4",)
-SCAN_SUFFIXES = (".ply", ".stl", ".obj", ".asc")
+SCAN_SUFFIXES = (".ply", ".stl", ".obj", ".asc", ".3mf")   # what the EinScan-SP's software exports
 KEYCODES = {"volume_down": 25, "volume_up": 24, "camera": 27}
 CAMERA_DIR = "/sdcard/DCIM/Camera"
 CAMERA_APP = "com.android.camera"  # the camera app of the Poco X7 Pro (HyperOS)
@@ -630,7 +634,7 @@ class FakePhone:
     the time written on it, and an 8 s video. With a link (a simulated one, phone_link.SimulatedAdb)
     it answers only while the phone is there on the chosen link, with the link's cause otherwise."""
 
-    def __init__(self, photo_px=(4080, 3072), video_s=8.0, link=None):
+    def __init__(self, photo_px=(4096, 3072), video_s=8.0, link=None):
         self.photo_px, self.video_s, self.link = photo_px, video_s, link
         self.scene = None           # () -> image: what the camera sees (a calibration board), in place of the grey
         self.left_on_phone = []

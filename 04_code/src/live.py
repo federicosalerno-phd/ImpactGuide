@@ -73,7 +73,6 @@ logger = logging.getLogger(__name__)
 
 SERVER_REMOTE = "/data/local/tmp/scrcpy-server.jar"
 SCRCPY_VERSION = "4.1"          # the server refuses a client of another version
-PORT = 27183
 BIT_RATE = 20_000_000           # high, so that compression does not move the ChArUco corners
 # per link: over Wi-Fi the camera stream shares the air with the AR view sent back to the phone (phone_view.py)
 BIT_RATES = {phone_link.USB: BIT_RATE, phone_link.WIFI: 5_000_000}
@@ -341,11 +340,15 @@ class PhoneStream:
     itself, quietly, as long as restarts bring frames back; when it stays behind (a slow Wi-Fi link) for BEHIND_HOLD_S
     it starts again too, dropping what the link held back. See the module docstring for start() and close()."""
 
-    def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=None, camera_id=None, port=PORT,
+    def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=None, camera_id=None, port=None,
                  restarts=RESTARTS, log=None, record=None, codec_options=None, drop_late=True):
         self.fixed = serial             # given by hand (command line): no link to follow
         self.serial = pick_serial(serial)
         self.link = phone_link.transport_of(self.serial)
+        # the port of this PC its tunnel uses: its own (phone_link.forward_port, given back at close), so that no
+        # other stream, ending or starting again late, can lay or remove this one's tunnel
+        self._port_lease = phone_link.forward_port() if port is None else None
+        port = self._port_lease if port is None else port
         self.record = record            # an open binary file that gets the raw H.264 (`record`)
         self.frame_times = []           # decoding time of every frame while recording
         self.frame_pts = []             # and its capture time (s, phone clock)
@@ -428,6 +431,8 @@ class PhoneStream:
         self._close_socket()
         self._end_server()
         self._unforward()
+        lease, self._port_lease = self._port_lease, None
+        phone_link.release_port(lease)
         self._phone_restore()
         me = threading.current_thread()
         for th in (self.thread, self._awake_thread, self._log_thread):
@@ -1271,6 +1276,16 @@ def lifecycle_check(expect, units):
 
         def _unforward(self):
             self.unforwarded += 1
+    # each stream its own tunnel's port: an old stream that ends (or starts again late) never touches a newer one's
+    old, new = _NoPhone(), _NoPhone()
+    ports = (old.port, new.port)
+    old.close()
+    newer = _NoPhone()
+    expect(ports[0] != ports[1] and newer.port not in ports and old._port_lease is None
+           and _NoPhone(port=5555).port == 5555,
+           f"a port of its own for each stream's tunnel ({ports[0]}, {ports[1]}, then {newer.port}), given back at close")
+    new.close()
+    newer.close()
     g = GivesUp()
     g.unforwarded = 0
     g._read(1.0)

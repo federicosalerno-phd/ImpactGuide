@@ -24,11 +24,15 @@ const HOME = {
     setStcell($('hsPhone'), PHONE.ok ? 'ok' : busy ? 'busy' : 'warn', T(word));
   },
 
-  // the intrinsics stored for the two camera modes
+  // the intrinsics stored for the three camera modes: the phone's photos, its videos (the trials'), the live stream;
+  // the modes calibrated, and on the hint those still to do
   cal: function (s) {
-    const p = !!s.modes.photo.stored, v = !!s.modes.stream.stored;
-    setStcell($('hsCal'), p && v ? 'ok' : 'warn',
-              T(p && v ? 'home.cal.both' : p ? 'home.cal.photo' : v ? 'home.cal.stream' : 'home.cal.none'));
+    const modes = ['photo', 'video', 'stream'];
+    const name = function (m) { return T('home.cal.m.' + m); };
+    const have = modes.filter(function (m) { return s.modes[m] && s.modes[m].stored; });
+    const missing = modes.filter(function (m) { return have.indexOf(m) < 0; });
+    setStcell($('hsCal'), missing.length ? 'warn' : 'ok', have.length ? have.map(name).join(' · ') : T('home.cal.none'));
+    $('hsCal').title = missing.length ? T('home.cal.missing', missing.map(name).join(', ')) : T('home.cal');
   },
 
   // the trial open now, or the next one of the sequence

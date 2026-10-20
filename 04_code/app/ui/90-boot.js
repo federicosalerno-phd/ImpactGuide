@@ -36,6 +36,8 @@ function onEvent(raw) {
   TRIALS.onEvent(e);
   LIVE.onEvent(e);
   TWIN.onEvent(e);
+  SCANS.onEvent(e);
+  DATASET.onEvent(e);
   LINK.onEvent(e);
 }
 
@@ -59,6 +61,8 @@ function boot() {
     LIVE.wire();
     LINK.wire();
     TWIN.wire();
+    SCANS.wire();
+    DATASET.wire();
     showWork();         // the pill: what the app is doing, or the phone, in the new language
   };
   askQuiet('app_info', function (info, bad) {

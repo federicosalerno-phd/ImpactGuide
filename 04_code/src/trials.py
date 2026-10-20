@@ -132,7 +132,9 @@ RAW = ROOT / "03_data" / "raw"
 PROTOCOL = ROOT / "03_data" / "processed" / "protocol"
 WORK = Path(os.environ.get("IMPACTGUIDE_WORK", r"C:\work\marker-impact")) / "trials_test"
 
-PREFIX = {"campaign": "t", "pilot": "p"}
+PRE_IMPACT = "pre_impact"      # positions of the marker without an impact (pre_impact.py), ids m001...
+PREFIX = {"campaign": "t", "pilot": "p", PRE_IMPACT: "m"}
+LIGHTS = ("full", "half", "left_off", "right_off")      # the panels of a pre-impact position
 SUFFIXES = {
     "scan": (".ply", ".stl", ".obj", ".asc", ".3mf"),
     "photo": (".jpg", ".jpeg"),
@@ -155,11 +157,17 @@ LOG_COLUMNS = (
     ("swing_mass_g", "g", "start", "Weighed mass of the swinging part"),
     ("drape", "0/1", "start", "1 if a drape covers part of the face from before the impact; photos and video are "
      "taken with it, then again after taking it off, then the scans"),
+    ("set", "", "start", "Pre-impact: the set of positions (1, 2, 3...); the dataset is split by set"),
+    ("position", "", "start", "Pre-impact: the marker's position in its set (1 from the jig, then moved by hand)"),
+    ("light", "", "start", "Pre-impact: the panels for the photos and the video: full, half, left_off, right_off"),
     ("reference", "", "start", "Why reference scans precede the impact (first, holder, no_scan, reposition, "
      "session, manual; ';' separated); empty if none"),
     ("pre_scan", "", "start", "Scans giving the pre-impact registration: <trial>_ref, or the previous trial "
      "(its post-impact scans)"),
     ("time_start", "ISO 8601", "start", "Trial opened"),
+    ("config_version", "", "start", "Version of the phase configuration in force when the trial started "
+     "(config_<phase>.json, 1 for the first, one more at each change): the trial's steps and expected files follow "
+     "it, whatever the configuration is today; empty for trials logged before versions were kept"),
     ("time_impact", "ISO 8601", "release", "Pendulum released"),
     ("cap_shift_mm", "mm", "scan", "Online: cap displacement since the last reference, from the post-impact "
      "scans; above the threshold the next trial starts with a reposition. Final values come from the "
@@ -185,12 +193,12 @@ LOG_NAME, EDITS_NAME, MANIFEST_NAME, LOCK_NAME = ("trial_log.csv", "trial_log_ed
                                                   "trial_log.lock")
 PART_SUFFIX = ".part"           # a raw file being copied, beside its final name
 TEST_MARKER = ".impactguide-test"   # a folder made by a test, which a later test may empty
-NUMERIC_FIELDS = ("angle_deg", "direction_deg", "washers_per_side", "swing_mass_g", "cap_shift_mm")
+NUMERIC_FIELDS = ("angle_deg", "direction_deg", "washers_per_side", "swing_mass_g", "cap_shift_mm", "set", "position")
 SEQUENCE_NUMERIC = ("slot", "replicate", "angle_deg", "direction_deg", "drape")
 FLAG_FIELDS = ("drape", "spheres_ok", "second_hit", "cap_replaced")
 TIME_FIELDS = ("time_start", "time_impact", "time_end")
 TEXT_FIELDS = ("void_reason", "notes")
-NOT_EDITABLE = ("trial", "phase")
+NOT_EDITABLE = ("trial", "phase", "config_version")
 FORMULA_START = ("=", "+", "-", "@", "\t", "\r")    # a spreadsheet would run a cell that starts so
 MAX_TEXT = 2000                 # characters of a note or a reason
 NOTE_JOIN = "; "                # notes added later follow the earlier ones
@@ -273,7 +281,7 @@ class Config:
     photo_az: tuple = (40, 55, 70, 85)
     video_az: tuple = (35, 95)
     video_min_s: float = 7.0
-    photo_px: tuple = (4080, 3072)
+    photo_px: tuple = (4096, 3072)  # the camera app's 12.5 MP photo, as its files are (the calibration's, when kept)
     highspeed: bool = False  # 240 fps side video of the impact
 
 
@@ -283,6 +291,9 @@ PILOT = Config(phase="pilot", holders=("A",), repetitions=1, drape_trials=0, ord
 
 def default_config(phase: str) -> Config:
     """The configuration a phase starts with."""
+    if phase == PRE_IMPACT:
+        from pre_impact import PRE          # the sets of positions: their own defaults
+        return PRE
     return PILOT if phase == "pilot" else Config(phase=phase)
 
 
@@ -290,6 +301,31 @@ def config_from_dict(d: dict) -> Config:
     """A Config from its JSON form (lists become tuples, unknown keys are left out)."""
     names = {f.name for f in fields(Config)}
     return Config(**{k: tuple(v) if isinstance(v, list) else v for k, v in d.items() if k in names})
+
+
+# The cap and the repositioning rule
+
+HOLDER_JSON = PROTOCOL / "marker_holder.json"   # pilot.py model: the marker holder read from the bench scene
+
+
+def cap_point_M(path: Path | str = HOLDER_JSON) -> np.ndarray | None:
+    """The cap's strike point in the board frame M (mm; the point of the cap's axis at the height the pendulum's nose
+    hits), from the marker holder of the bench scene; None when the file is missing or cannot be read."""
+    try:
+        p = np.asarray(json.loads(Path(path).read_text(encoding="utf-8"))["strike_point_M"], np.float64)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return p if p.shape == (3,) and np.isfinite(p).all() else None
+
+
+def cap_shift_mm(T_ref: np.ndarray, T_now: np.ndarray, p_M: np.ndarray | None = None) -> float:
+    """How far the cap moved on the head between two registrations T_M_head (4 x 4, board M from a head frame, any
+    one of the head's frames): |T_now^-1 p - T_ref^-1 p| with p the strike point in M (cap_point_M())."""
+    p = cap_point_M() if p_M is None else np.asarray(p_M, np.float64)
+    if p is None:
+        raise ValueError("no cap point: run pilot.py model")
+    h = np.append(p, 1.0)
+    return float(np.linalg.norm((np.linalg.solve(T_now, h) - np.linalg.solve(T_ref, h))[:3]))
 
 
 # Sequence
@@ -368,7 +404,10 @@ def design(cfg: Config, fixed: dict | None = None) -> list[dict]:
 
 
 def cell(r: dict) -> tuple:
-    """(holder, angle, direction, drape) of a trial or a slot. Raises ValueError on a value that is not a number."""
+    """(holder, angle, direction, drape) of a trial or a slot; (holder, "set", set, position) of a pre-impact one.
+    Raises ValueError on a value that is not a number."""
+    if str(r.get("position") or "") != "":
+        return (r["holder"], "set", int(float(r.get("set") or r.get("replicate"))), int(float(r["position"])))
     return (r["holder"], int(float(r["angle_deg"])), int(float(r["direction_deg"])), int(float(r["drape"] or 0)))
 
 
@@ -616,27 +655,47 @@ def file_kind(name: str) -> str | None:
     return next((k for k in ("highspeed", "video", "photo", "scan") if f"_{k}" in stem), None)
 
 
-def deep_check_codes(cfg: Config, path: Path) -> list[dict]:
-    """Problems inside a photo or video, as codes: [{"code": "photo_size" | "video_short" | "video_fps" |
-    "unreadable", "file", "got", "want"}] (empty when the file is fine)."""
+EXIF_IFD = 0x8769               # the EXIF block of a photo...
+EXPOSURE_PROGRAM = 34850        # ... and its ExposureProgram: 1 manual (the camera app's Pro mode), 2 automatic...
+MANUAL_PROGRAM = 1
+
+
+def deep_check_codes(cfg: Config, path: Path, sizes: dict | None = None) -> list[dict]:
+    """Problems inside a photo or video, as codes: [{"code": "photo_size" | "photo_auto" | "video_size" |
+    "video_short" | "video_fps" | "unreadable", "file", "got", "want"}] (empty when the file is fine). sizes: the
+    image size of each camera mode's calibration ({"photo", "video"}, Run.camera_sizes): a photo or a trial video of
+    another size (either way round) was taken in another mode than the one calibrated; a photo without a
+    calibration is held against cfg.photo_px. photo_auto: the photo's exposure was not set by hand (its EXIF says so:
+    the camera app left its Pro mode, as after a video), so it is not taken as the calibration's were."""
     kind = file_kind(path.name)
+    sizes = sizes or {}
     if kind == "photo":
         from PIL import Image
         try:
             with Image.open(path) as im:
                 size = im.size
+                program = im.getexif().get_ifd(EXIF_IFD).get(EXPOSURE_PROGRAM)
         except Exception:   # noqa: BLE001  PIL raises many kinds for a file that is not an image
             return [{"code": "unreadable", "file": path.name, "got": None, "want": None}]
-        if sorted(size) != sorted(cfg.photo_px):
-            return [{"code": "photo_size", "file": path.name, "got": [int(size[0]), int(size[1])],
-                     "want": [int(cfg.photo_px[0]), int(cfg.photo_px[1])]}]
+        want = sizes.get("photo") or cfg.photo_px
+        out = []
+        if sorted(size) != sorted(want):
+            out.append({"code": "photo_size", "file": path.name, "got": [int(size[0]), int(size[1])],
+                        "want": [int(want[0]), int(want[1])]})
+        if isinstance(program, int) and program != MANUAL_PROGRAM:
+            out.append({"code": "photo_auto", "file": path.name, "got": program, "want": MANUAL_PROGRAM})
+        return out
     elif kind in ("video", "highspeed"):
         import cv2
         cap = cv2.VideoCapture(str(path))
         frames, fps = cap.get(cv2.CAP_PROP_FRAME_COUNT), cap.get(cv2.CAP_PROP_FPS)
+        size = [int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))]
         cap.release()
         if not fps or frames <= 0:
             return [{"code": "unreadable", "file": path.name, "got": None, "want": None}]
+        want = sizes.get("video")
+        if kind == "video" and want and all(size) and sorted(size) != sorted(want):
+            return [{"code": "video_size", "file": path.name, "got": size, "want": [int(want[0]), int(want[1])]}]
         if kind == "video" and frames / fps < cfg.video_min_s:
             return [{"code": "video_short", "file": path.name, "got": round(frames / fps, 1),
                      "want": cfg.video_min_s}]
@@ -645,15 +704,18 @@ def deep_check_codes(cfg: Config, path: Path) -> list[dict]:
     return []
 
 
-def deep_check(cfg: Config, path: Path) -> list[tuple[str, str]]:
-    """Problems inside a photo or video: pixel size, duration, frame rate, as (kind, plain sentence)."""
+def deep_check(cfg: Config, path: Path, sizes: dict | None = None) -> list[tuple[str, str]]:
+    """Problems inside a photo or video: pixel size, exposure mode, duration, frame rate, as (kind, plain
+    sentence); sizes as in deep_check_codes."""
     out = []
-    for p in deep_check_codes(cfg, path):
+    for p in deep_check_codes(cfg, path, sizes):
         if p["code"] == "unreadable":
             out.append(("unreadable", p["file"]))
-        elif p["code"] == "photo_size":
+        elif p["code"] in ("photo_size", "video_size"):
             out.append(("content", f"{p['file']}: {p['got'][0]} x {p['got'][1]} px, expected {p['want'][0]} x "
                                    f"{p['want'][1]}"))
+        elif p["code"] == "photo_auto":
+            out.append(("content", f"{p['file']}: exposure not set by hand (the camera app out of its Pro mode)"))
         elif p["code"] == "video_short":
             out.append(("content", f"{p['file']}: {p['got']:.1f} s, expected at least {p['want']:g} s"))
         else:
@@ -708,6 +770,8 @@ def check_value(field: str, value: object, holders: Sequence[str] | None = None)
         raise bad()
     if field == "status" and text not in (OPEN, OK, VOID):
         raise bad()
+    if field == "light" and text not in LIGHTS:
+        raise bad("one of " + ", ".join(LIGHTS))
     if field == "holder" and not (text in holders if holders else HOLDER_RE.fullmatch(text)):
         raise bad("not a holder of the configuration")
     if field in FLAG_FIELDS:
@@ -719,7 +783,7 @@ def check_value(field: str, value: object, holders: Sequence[str] | None = None)
         v = _number(text)
         if v is None:
             raise bad("a number")
-        if field == "washers_per_side" and (v < 0 or not v.is_integer()):
+        if field in ("washers_per_side", "set", "position") and (v < 0 or not v.is_integer()):
             raise bad("a whole number")
         if field in ("swing_mass_g",) and v <= 0:
             raise bad("above 0")
@@ -740,6 +804,8 @@ def check_value(field: str, value: object, holders: Sequence[str] | None = None)
         raise bad()
     if field == "pre_scan" and not PRE_SCAN_RE.fullmatch(text):
         raise bad()
+    if field == "config_version" and not (text.isdigit() and int(text) >= 1):
+        raise bad("a whole number from 1")
     if field in TEXT_FIELDS:
         if len(text) > MAX_TEXT:
             raise bad(f"at most {MAX_TEXT} characters")
@@ -1066,6 +1132,9 @@ def pendulum_text(row: dict, ch: set) -> str:
 
 def trial_steps(cfg: Config, row: dict, prev: dict | None = None) -> list[Step]:
     """Steps of one trial in order."""
+    if cfg.phase == PRE_IMPACT:
+        from pre_impact import position_steps      # a position of the marker: no pendulum, no impact
+        return position_steps(cfg, row, prev)
     t, holder = row["trial"], row["holder"]
     reasons = {r for r in (row.get("reference") or "").split(";") if r}
     ch = set(changes(prev, row))
@@ -1104,7 +1173,8 @@ def trial_steps(cfg: Config, row: dict, prev: dict | None = None) -> list[Step]:
         a, b = cfg.video_az
         s.append(Step(f"{tag}video", f"Video{what}: lift the index plunger and sweep the arm from end stop to end "
                       f"stop ({a}° to {b}°) in about {round((b - a) / VIDEO_SPEED)} s, then back to "
-                      f"{cfg.photo_az[0]}°.", (file_name(t, "video", drape=with_drape),)))
+                      f"{cfg.photo_az[0]}°. Then the camera app back in its Pro mode.",
+                      (file_name(t, "video", drape=with_drape),)))
 
     if drape:
         views(with_drape=True)
@@ -1127,17 +1197,48 @@ class Run:
 
     The configuration and the sequence are read again when their files change (another program, the command
     line); a missing sequence is made again from the configuration, never the configuration from the defaults.
+
+    Versions. Each configuration written has a version (1 for the first, one more at each change; the earlier ones
+    stay in its history) and each trial logs the version it started under (config_version): the steps and the
+    files a trial expects follow its own configuration, so a trial closed under one stays complete after the
+    configuration changed (a trial logged before versions were kept follows today's).
+
+    Camera sizes. A photo or video filed is checked against the size of the camera mode's calibration when one is
+    kept in `calibration` (intrinsics_photo.json, intrinsics_video.json; by default beside the protocol folder),
+    else a photo against the configuration's photo_px.
+
+    Run("pre_impact") is a pre_impact.PreImpactRun: the sets of marker positions, with their own sequence and steps.
     """
 
-    def __init__(self, phase: str = "campaign", raw: Path | str = RAW, protocol: Path | str = PROTOCOL) -> None:
+    pendulum = True                 # the trials weigh the swinging part and release the pendulum
+    required = REQUIRED             # log fields a closed trial must have
+    online = ONLINE                 # values the scans give while the phase runs
+    sequence_fields = SEQUENCE_FIELDS
+    sequence_numeric = SEQUENCE_NUMERIC
+
+    def __new__(cls, phase: str = "campaign", *args, **kwargs):
+        if cls is Run and phase == PRE_IMPACT:
+            from pre_impact import PreImpactRun
+            return super().__new__(PreImpactRun)
+        return super().__new__(cls)
+
+    def _make_sequence(self, cfg: Config, done: Sequence[dict]) -> list[dict]:
+        return make_sequence(cfg, done)
+
+    def __init__(self, phase: str = "campaign", raw: Path | str = RAW, protocol: Path | str = PROTOCOL,
+                 calibration: Path | str | None = None) -> None:
         self.phase = phase
         self.folder = Path(raw) / phase
         self.protocol = Path(protocol)
+        self.calibration = Path(calibration) if calibration is not None else self.protocol.parent / "calibration"
         self.log = Log(self.folder)
         self.config_path = self.protocol / f"config_{phase}.json"
         self.sequence_path = self.protocol / f"sequence_{phase}.csv"
         self._protocol_lock = PhaseLock(self.protocol, f"protocol_{phase}.lock")
         self._config = default_config(phase)
+        self._version = 1                   # the configuration's version (config_version of the trials it starts)
+        self._versions: dict[int, Config] = {}     # every version of the configuration, today's included
+        self._sizes: dict[str, tuple] = {}  # mode -> (file stamp, size) of the calibrations read (camera_sizes)
         self._sequence: list[dict] = []
         self._stamp = None
         self._load()
@@ -1161,10 +1262,76 @@ class Run:
                            file=self.config_path.name) from e
         if cfg.phase != self.phase:
             raise LogError("config_corrupt", f"{self.config_path.name} is for {cfg.phase}", file=self.config_path.name)
+        self._read_versions(doc, cfg)
         return cfg
 
+    @staticmethod
+    def _doc_version(doc: dict) -> int:
+        """The version of a configuration file's own configuration: its "version", else one more than its history
+        (a file written before versions were kept)."""
+        v = doc.get("version")
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else len(doc.get("history") or []) + 1
+
+    def _read_versions(self, doc: dict, cfg: Config) -> None:
+        """Every version of the configuration from its file: today's and those of its history (an entry that cannot
+        be read is left out: its trials follow today's)."""
+        version = self._doc_version(doc)
+        versions = {}
+        for i, h in enumerate(doc.get("history") or []):
+            try:
+                v = h.get("version")
+                v = v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else i + 1
+                old = config_from_dict(h["config"])
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+            if old.phase == self.phase and v < version:
+                versions[v] = old
+        versions[version] = cfg
+        self._version, self._versions = version, versions
+
+    @property
+    def config_version(self) -> int:
+        """The version of today's configuration (config_version of the trials started now)."""
+        self._refresh()
+        return self._version
+
+    def config_for(self, row: dict) -> Config:
+        """The configuration a logged trial follows: that of its config_version, else (logged before versions were
+        kept, or a version no longer in the history) today's."""
+        self._refresh()
+        v = str(row.get("config_version") or "")
+        return self._versions.get(int(v), self._config) if v.isdigit() else self._config
+
+    def camera_sizes(self) -> dict[str, list[int] | None]:
+        """{"photo", "video"}: the image size of each camera mode's calibration kept in `calibration`, or None (no
+        calibration, or one that cannot be read). Read again when its file changes."""
+        out = {}
+        for mode in ("photo", "video"):
+            p = self.calibration / f"intrinsics_{mode}.json"
+            try:
+                st = p.stat()
+                stamp = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                out[mode] = None
+                continue
+            got = self._sizes.get(mode)
+            if got is None or got[0] != stamp:
+                size = None
+                try:
+                    s = json.loads(p.read_text(encoding="utf-8"))["image_size"]
+                    size = [int(s[0]), int(s[1])] if len(s) == 2 and int(s[0]) > 0 and int(s[1]) > 0 else None
+                except (OSError, ValueError, KeyError, TypeError, IndexError):
+                    _LOGGER.warning("%s cannot be read: its size is not checked", p.name)
+                got = self._sizes[mode] = (stamp, size)
+            out[mode] = got[1]
+        return out
+
+    def file_problems(self, trial: str, path: Path | str) -> list[dict]:
+        """deep_check_codes of a file for a trial: with the trial's own configuration and the calibrations' sizes."""
+        return deep_check_codes(self.config_for(self.log.row(trial)), Path(path), self.camera_sizes())
+
     def _read_sequence(self) -> list[dict]:
-        return _normalise(read_csv(self.sequence_path, required=SEQUENCE_FIELDS), SEQUENCE_NUMERIC)
+        return _normalise(read_csv(self.sequence_path, required=self.sequence_fields), self.sequence_numeric)
 
     def _load(self) -> None:
         if self.config_path.exists():
@@ -1214,12 +1381,16 @@ class Run:
                                    file=self.config_path.name) from e
             if old is None or old["config"] != new or not self.sequence_path.exists():
                 done = [r for r in self.log.rows() if r["status"] in (OPEN, OK)]
-                write_csv(self.sequence_path, make_sequence(cfg, done), SEQUENCE_FIELDS)
+                write_csv(self.sequence_path, self._make_sequence(cfg, done), self.sequence_fields)
             if old is None or old["config"] != new:
-                history = old.get("history", []) + [{"written": old.get("written", ""), "config": old["config"]}] \
-                    if old else []
-                doc = {"written": now(), "config": new, "history": history}
+                was = self._doc_version(old) if old else 0
+                history = old.get("history", []) + [{"written": old.get("written", ""), "version": was,
+                                                     "config": old["config"]}] if old else []
+                doc = {"written": now(), "version": was + 1, "config": new, "history": history}
                 write_text_atomic(self.config_path, json.dumps(doc, indent=1) + "\n")
+                self._read_versions(doc, cfg)
+            elif old is not None:
+                self._read_versions(old, cfg)
             self._config = cfg
             self._sequence = self._read_sequence()
             self.log.holders = cfg.holders
@@ -1246,7 +1417,12 @@ class Run:
                       if p.is_file() and p.stem.lower() == stem and p.suffix.lower() in allowed)
 
     def has_scans(self, trial: str) -> bool:
-        return all(self.find(trial, file_name(trial, "scan", az)) for az in self.config.scan_az)
+        """The trial has every post-impact scan of its own configuration."""
+        try:
+            cfg = self.config_for(self.log.row(trial))
+        except NotFound:
+            cfg = self.config
+        return all(self.find(trial, file_name(trial, "scan", az)) for az in cfg.scan_az)
 
     def next(self, today: date | None = None, reference: str | None = None, settings: dict | None = None) -> dict | None:
         """The trial to do now: the open one (resume, with the index of the step to resume from) or a
@@ -1308,8 +1484,10 @@ class Run:
 
     def start(self, plan: dict, when: datetime | None = None, **values: object) -> dict:
         """Opens a planned trial: log row with status open, and its folder. Raises LogError trial_open when a trial
-        is open already, bad_field for a value that is not valid."""
-        row = {**{k: plan.get(k, "") for k in LOG_FIELDS}, **values, "time_start": now(when), "status": OPEN}
+        is open already, bad_field for a value that is not valid. The trial logs the version of the configuration it
+        starts under (config_version): its steps and files follow it from then on."""
+        row = {**{k: plan.get(k, "") for k in LOG_FIELDS}, **values, "time_start": now(when), "status": OPEN,
+               "config_version": str(self.config_version)}
         with self.log.lock:
             others = [r["trial"] for r in self.log.rows() if r["status"] == OPEN]
             if others:
@@ -1324,7 +1502,7 @@ class Run:
         i = next((i for i, r in enumerate(rows) if r["trial"] == trial), None)
         if i is None:
             raise NotFound("unknown_trial", trial, trial=trial)
-        return trial_steps(self.config, rows[i], rows[i - 1] if i else None)
+        return trial_steps(self.config_for(rows[i]), rows[i], rows[i - 1] if i else None)
 
     def _step(self, trial: str, key: str) -> Step:
         step = next((s for s in self.steps(trial) if s.key == key), None)
@@ -1414,9 +1592,9 @@ class Run:
                     want = sizes.get(hits[0].name.lower())
                     if want and want != str(hits[0].stat().st_size):
                         out.append(("changed", hits[0].name))
-                    out += deep_check(self.config, hits[0])
-            out += [("log", f) for f in REQUIRED if not row[f]]
-            out += [("online", f) for f in ONLINE if not row[f]]
+                    out += deep_check(self.config_for(row), hits[0], self.camera_sizes())
+            out += [("log", f) for f in self.required if not row[f]]
+            out += [("online", f) for f in self.online if not row[f]]
         for f in LOG_FIELDS:
             try:
                 check_value(f, row[f])          # holders of past trials need not be in today's configuration
@@ -1784,8 +1962,27 @@ def run_test(work: Path | str = WORK) -> int:
     expect(("changed", file_name("t003", "scan", cfg.scan_az[0])) in run.missing("t003", deep=True),
            "deep completeness: a raw file whose size is not the one filed is said")
 
+    # each trial follows the configuration it started under (config_version), whatever today's says
+    rows = run.log.rows()
+    closed = next(r for r in rows if r["status"] == OK and r["trial"] != "t003")
+    early, late = rows[0], rows[-1]
+    before, v0 = run.missing(closed["trial"]), run.config_version
+    run.configure(replace(run.config, scan_az=(55, 85)))
+    doc = json.loads(run.config_path.read_text(encoding="utf-8"))
+    expect(closed["config_version"].isdigit() and run.config_version == v0 + 1 == doc["version"]
+           and [h.get("version") for h in doc["history"]] == list(range(1, v0 + 1))
+           and run.missing(closed["trial"]) == before and run.config_for(closed).scan_az == cfg.scan_az
+           and run.config_for(early).drape_trials == 20 and run.config_for(late).drape_trials == 24
+           and run.config_for({"config_version": ""}) == run.config and run.has_scans(closed["trial"]),
+           f"{closed['trial']} follows its own configuration (version {closed['config_version']}): the arm "
+           f"positions changed today ({run.config_version}), nothing of it missing; an older trial its own drape "
+           f"count; a trial logged without a version today's")
+    expect(_raises(lambda: run.log.edit(closed["trial"], "config_version", "1", "test"), LogError),
+           "the configuration version of a trial is never edited")
+    run.configure(replace(run.config, scan_az=cfg.scan_az))
+
     import cv2
-    cases = {"good.jpg": (3072, 4080), "small.jpg": (480, 640)}
+    cases = {"good.jpg": (cfg.photo_px[1], cfg.photo_px[0]), "small.jpg": (480, 640)}
     for name, shape in cases.items():
         cv2.imwrite(str(src / f"t900_photo_{name}"), np.zeros(shape + (3,), np.uint8))
     for name, seconds in (("long", 8), ("short", 3)):
@@ -1802,6 +1999,31 @@ def run_test(work: Path | str = WORK) -> int:
            and codes["t900_photo_small.jpg"][0]["got"] == [640, 480]
            and codes["t900_video_short.mp4"][0]["code"] == "video_short" and not codes["t900_photo_good.jpg"],
            "deep check as codes: photo_size with the size found and wanted, video_short")
+    # against the calibrations kept: a video or a photo of another size than its camera mode's calibration
+    calib = work / "kept_calibration"       # not the default beside the protocol, which has none
+    calib.mkdir()
+    for mode, size in (("photo", [640, 480]), ("video", [1920, 1080])):
+        (calib / f"intrinsics_{mode}.json").write_text(json.dumps({"image_size": size}), encoding="utf-8")
+    sized = Run("campaign", raw, protocol, calibration=calib)
+    sizes = sized.camera_sizes()
+    long_ = deep_check_codes(cfg, src / "t900_video_long.mp4", sizes)
+    expect(sizes == {"photo": [640, 480], "video": [1920, 1080]}
+           and long_ == [{"code": "video_size", "file": "t900_video_long.mp4", "got": [64, 48], "want": [1920, 1080]}]
+           and not deep_check_codes(cfg, src / "t900_photo_small.jpg", sizes)
+           and deep_check_codes(cfg, src / "t900_photo_good.jpg", sizes)[0]["code"] == "photo_size"
+           and Run("campaign", raw, protocol).camera_sizes() == {"photo": None, "video": None},
+           "against the calibrations kept: a trial's video of another size than intrinsics_video.json, a photo held "
+           "against intrinsics_photo.json (else the configuration)")
+    # the photo's exposure, from its EXIF: not set by hand (the camera app out of its Pro mode) is said
+    from PIL import Image
+    for name, program in (("pro", MANUAL_PROGRAM), ("auto", 2)):
+        ex = Image.Exif()
+        ex.get_ifd(EXIF_IFD)[EXPOSURE_PROGRAM] = program
+        Image.new("RGB", (cfg.photo_px[0], cfg.photo_px[1])).save(src / f"t900_photo_{name}.jpg", exif=ex)
+    auto = deep_check_codes(cfg, src / "t900_photo_auto.jpg")
+    expect(not deep_check_codes(cfg, src / "t900_photo_pro.jpg") and [p["code"] for p in auto] == ["photo_auto"]
+           and deep_check(cfg, src / "t900_photo_auto.jpg")[0][0] == "content",
+           "a trial photo whose exposure was not set by hand (out of the Pro mode): said; one in Pro: nothing")
 
     test_integrity(work, expect)
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed")

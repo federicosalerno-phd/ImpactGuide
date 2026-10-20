@@ -140,7 +140,10 @@ const TWIN = {
     TWIN.openMs = 0;
     showView('twin');
     showPanel('twin');
-    $('twFoot').classList.toggle('hidden', TWIN.mode !== 'trials');
+    // the way back: to the trial, or to the scans it was opened from (ui/22-scans.js)
+    const back = $('twBack').querySelector('.btn-label');
+    back.setAttribute('data-t', TWIN.mode === 'results' ? 'twin.back.scans' : 'twin.back');
+    back.textContent = T(back.getAttribute('data-t'));
     $('twPick').classList.toggle('hidden', TWIN.mode !== 'results');
     $('hint').textContent = '';
     if (TWIN.prepare()) {
@@ -1083,7 +1086,7 @@ const TWIN = {
   },
 
   wire: function () {
-    $('twBack').onclick = function () { go('trials', 'guide'); };
+    $('twBack').onclick = function () { if (TWIN.mode === 'results') go('results', 'scans'); else go('trials', 'guide'); };
     $('twUpdate').onclick = function () {
       ask('twin_update', function (a) { if (a) { toast(T('twin.model.updating')); TWIN.modelRows(a.model || {}); } });
     };

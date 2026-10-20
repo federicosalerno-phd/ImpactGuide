@@ -55,6 +55,7 @@ import torch.nn as nn
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 import correct as co          # noqa: E402
+import score as sc            # noqa: E402
 import synth_data as sd       # noqa: E402
 
 ROOT = SRC.parents[1]
@@ -345,30 +346,33 @@ class Refiner:
 
 class PriorProblem(co.Problem):
     """correct.Problem with a Gaussian prior N(0, diag(sigma^2)) on the update from the registration it starts at (the
-    network output; sigma: its predicted standard deviations, deg then mm): extra residuals PRIOR_MM . p / sigma, so
-    that the prior weighs as the outline residuals do (kappa sigma^2 of view_guidance.py)."""
+    network output; sigma: its predicted standard deviations, deg then mm). In the cost the prior is the residuals
+    PRIOR_MM . p / sigma with weight 1 (quadratic, never under the Huber weights of the outline residuals), so that it
+    weighs as outline residuals of scale PRIOR_MM (kappa sigma^2 of view_guidance.py); it stays out of the residual
+    scale, the degrees of freedom and the point count, and the Laplace covariance adds its information diag(sigma^-2)."""
 
-    def __init__(self, renderer, views, T_M_B0, mode="a1", center=None, sigma=None):
-        super().__init__(renderer, views, T_M_B0, mode, center)
+    def __init__(self, renderer, views, T_M_B0, mode="a1", center=None, sigma=None, trim=co.TRIM, cut=False):
+        super().__init__(renderer, views, T_M_B0, mode, center, trim, cut)
         sig = np.asarray(sigma, np.float64)
-        self.w = PRIOR_MM / np.maximum(np.r_[np.radians(sig[:3]), sig[3:]], 1e-6)
+        sig = np.maximum(np.r_[np.radians(sig[:3]), sig[3:]], 1e-6)[:self.p]
+        self.w = PRIOR_MM / sig
+        self.prior_info = np.diag(sig ** -2.0)
 
-    def residuals(self, R, s, data, jac=True):
-        out = super().residuals(R, s, data, jac)
-        rp = self.w * np.r_[co.rotvec(R), s][:self.p]
-        if not jac:
-            return np.r_[out, rp]
-        return np.r_[out[0], rp], np.vstack([out[1], np.diag(self.w)])
+    def prior(self, R, s):
+        return self.w * np.r_[co.rotvec(R), s][:self.p], np.diag(self.w)
 
 
 def optimize(renderer, views, T_M_B_init, targets, mode="a1", center=None, max_renders=co.MAX_RENDERS, kappa=1.0,
-             sigma=None):
+             sigma=None, trim=co.TRIM, cut=False):
     """The optimisation of correct.py from one start, the given registration (the network output): same residuals,
-    Levenberg-Marquardt, convergence test and Laplace uncertainty, no multi-start; with sigma (the network's predicted
-    standard deviations) a Gaussian prior on the update (PriorProblem). Returns a correct.Result."""
+    trimming, Levenberg-Marquardt, convergence test and Laplace uncertainty, no multi-start; with sigma (the network's
+    predicted standard deviations) a Gaussian prior on the update (PriorProblem). Returns a correct.Result; raises
+    ValueError with fewer views than correct.MIN_VIEWS."""
+    if not co.allowed(mode, len(views)):
+        raise ValueError(f"{mode}: at least {co.MIN_VIEWS[mode]} views")
     t0 = time.perf_counter()
-    pb = (co.Problem(renderer, views, T_M_B_init, mode, center) if sigma is None
-          else PriorProblem(renderer, views, T_M_B_init, mode, center, sigma))
+    pb = (co.Problem(renderer, views, T_M_B_init, mode, center, trim, cut) if sigma is None
+          else PriorProblem(renderer, views, T_M_B_init, mode, center, sigma, trim, cut))
     st = pb.run({"i": 0, "R": np.eye(3), "s": np.zeros(3), "data": None, "renders": 0, "done": False}, max_renders)
     R, s, data = st["R"], st["s"], st["data"]
     cov, sigma_r, n_pts = pb.covariance(R, s, data, kappa)
@@ -444,7 +448,7 @@ def cmd_prepare(a):
         obs = observed_mask(sam, d["labels"])
         o = obs > 0
         T = d["T_C_B"]
-        mmpp = float(np.median(face.v @ T[2, :3] + T[2, 3]) / d["K"][0, 0])
+        mmpp = sc.mm_per_px(d["K"], T, face.v)
         od = sd.outline_distance(o, gt) if o.any() and gt.any() else np.array([np.inf])
         iou = lambda m_: float((m_ & gt).sum() / max((m_ | gt).sum(), 1))
         rows.append({"image": f"{s.name}/{fr['image']}", "split": fr["split"], "mode": fr["mode"],

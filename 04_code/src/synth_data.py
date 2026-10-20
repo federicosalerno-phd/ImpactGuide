@@ -207,6 +207,7 @@ def timed(fn, n):
 def cmd_check(args):
     sys.path.insert(0, str(SRC))
     import mesh_overlay
+    import score
     root = Path(args.root)
     z = np.load(root / "meshes" / "face_phantom_r20k.npz")
     v, f = z["vertices"].astype(np.float64), z["faces"].astype(np.int64)
@@ -227,8 +228,7 @@ def cmd_check(args):
             if not ref.any():           # the face is out of this view: nothing to compare
                 continue
             K, T, size = np.array(fr["K"]), np.array(fr["T_C_B"]), tuple(fr["size"])
-            depth = float(np.median((v @ T[:3, :3].T + T[:3, 3])[:, 2]))
-            mm_per_px = depth / K[0, 0]
+            mm_per_px = score.mm_per_px(K, T, v)        # the scale of the misalignment score and of the correction
             ys, xs = np.nonzero(ref)
             centre = ((xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2)
             side = CROP_MM / mm_per_px

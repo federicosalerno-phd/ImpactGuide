@@ -13,7 +13,7 @@
 const MODULES = {
   calibration: { steps: ['board', 'photos', 'result'], start: 'board' },
   live: { steps: ['board', 'view'], start: 'view' },
-  trials: { steps: ['guide', 'log', 'sequence', 'config'], start: 'guide' },
+  trials: { steps: ['guide', 'log', 'sequence', 'config', 'holders'], start: 'guide' },
   results: { steps: ['scans', 'analysis', 'charts', 'dataset'], start: 'scans' },
 };
 // The word of each step on the rail (its key in ui/strings).
@@ -21,7 +21,7 @@ const STEP_WORD = {
   calibration: { board: 'cal.step.board', photos: 'cal.step.photos', result: 'cal.step.result' },
   live: { board: 'live.step.board', view: 'live.step.view' },
   trials: { guide: 'trials.view.guide', log: 'trials.view.log', sequence: 'trials.view.sequence',
-            config: 'trials.view.config' },
+            config: 'trials.view.config', holders: 'hold.step' },
   results: { scans: 'page.scans.title', analysis: 'page.analysis.title', charts: 'page.charts.title',
              dataset: 'page.dataset.title' },
 };
@@ -390,8 +390,12 @@ function go(p, step) {
   be('set_page', p);
   if (p === 'calibration') { CAL.enter(s); return; }
   if (p === 'live') { LIVE.enter(s); return; }
+  if (p === 'trials' && s === 'holders') { HOLDERS.enter(); return; }     // the holders on their own (28-holders.js)
   if (p === 'trials') { TRIALS.enter(); return; }
-  if (p === 'results' && s === 'scans') { TWIN.open('results'); return; }     // the scans on the twin (18-twin.js)
+  if (p === 'results' && s === 'scans') { SCANS.enter(); return; }     // the scans (22-scans.js; in 3D: the twin)
+  if (p === 'results' && s === 'analysis') { ANALYSIS.enter(); return; }   // what the trials say (24-analysis.js)
+  if (p === 'results' && s === 'charts') { CHARTS.enter(); return; }       // the figures (26-charts.js)
+  if (p === 'results' && s === 'dataset') { DATASET.enter(); return; }     // the dataset and its package (28-dataset.js)
   showView('soon');
   showPanel('soon');
   $('soonTitle').textContent = T('page.' + s + '.title');

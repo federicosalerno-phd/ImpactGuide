@@ -427,6 +427,18 @@
 .live-dot.off{background:var(--control-hover)}
 .live-dot.warn{background:var(--warn)}
 .live-dot.busy{background:var(--accent);animation:pulse 1s infinite}
+/* the registration watched over: its state by shape as well as colour (never a red-green pair alone): a full disc
+   with a tick when aligned, a diamond with a bar when moved or the board is damaged, a ring while it checks */
+.chk-light{margin-top:6px}
+.chk-dot{position:relative;flex:none;width:13px;height:13px;border-radius:50%;box-shadow:inset 0 0 0 2px var(--text-4)}
+.chk-dot.ok{background:var(--ok);box-shadow:none}
+.chk-dot.ok::after{content:'';position:absolute;left:4.6px;top:2.2px;width:2.8px;height:6px;
+  border:solid var(--on-status);border-width:0 1.7px 1.7px 0;transform:rotate(45deg)}
+.chk-dot.lost,.chk-dot.board{border-radius:1px;transform:rotate(45deg) scale(.86);box-shadow:none;background:var(--warn)}
+.chk-dot.board{background:var(--err)}
+.chk-dot.lost::after,.chk-dot.board::after{content:'';position:absolute;left:5.5px;top:3px;width:2px;height:7px;
+  border-radius:1px;background:var(--on-status);transform:rotate(-45deg)}
+.chk-dot.wait{box-shadow:inset 0 0 0 2px var(--accent);animation:pulse 1s infinite}
 .live-idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
 .live-idle .say{max-width:560px}
 /* What the view draws, in its panel: SlantUI's metric rows, a heading per group and a row per element; a shown row
@@ -488,3 +500,56 @@
   .view.home-view{padding:20px 16px}
   #where{display:none}
 }
+/* ── the scans of a trial (ui/22-scans.js) ─────────────────────────────────
+   Before and after the impact side by side, one row per scan: its state as a sign that differs in shape, not
+   only in colour (a ring dashed while it waits, a spinner while it is measured, a tick on its spheres found, a
+   cross on spheres missing), the arm position, the spheres found. Then what they measure, in the tiles of the
+   trial's settings and the twin's colour scale; a run without an impact as a count and a grid of its scans. */
+.sc-side{gap:8px}
+.sc-side-hd{display:flex;align-items:baseline;gap:10px;min-width:0}
+.sc-side-hd .sec-lbl{margin:0;white-space:nowrap}
+.sc-side-sub{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.sc-slots{display:flex;flex-direction:column;gap:6px}
+.sc-slot{display:flex;align-items:center;gap:10px;min-width:0;padding:8px 10px;border-radius:var(--r-md);background:var(--surface-2)}
+.sc-slot-t{flex:1;min-width:0}
+.sc-slot-n{font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc-slot-s{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc-slot-v{flex:none;font-size:var(--fs-lg);font-weight:var(--w-strong);color:var(--text-1);font-variant-numeric:tabular-nums}
+.sc-slot .chip{flex:none;white-space:nowrap}
+.sc-slot.sc-later,.sc-slot.sc-skipped{background:var(--surface-1)}
+.sc-slot.sc-later .sc-slot-n{color:var(--text-3)}
+.sc-slot.sc-bad .sc-slot-s{color:var(--warn-text)}
+.sc-slot.sc-ok .sc-slot-s{color:var(--ok-text)}
+.sc-st{position:relative;flex:none;width:16px;height:16px;border-radius:50%;box-sizing:border-box}
+.sc-waiting .sc-st{border:2px dashed var(--accent);animation:pulse 1.6s infinite}
+.sc-later .sc-st,.sc-skipped .sc-st{border:2px solid var(--control-hover)}
+.sc-skipped .sc-st{border-color:var(--warn)}
+.sc-measuring .sc-st .spinner{position:absolute;inset:0}
+.sc-ok .sc-st{background:var(--ok)}
+.sc-bad .sc-st{background:var(--warn)}
+.sc-ok .sc-st::after{content:'';position:absolute;left:5.6px;top:2.6px;width:3.2px;height:7.2px;
+                     border:solid var(--on-status);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.sc-bad .sc-st::before,.sc-bad .sc-st::after{content:'';position:absolute;left:7px;top:3px;width:2px;height:10px;
+                     border-radius:1px;background:var(--on-status);transform:rotate(45deg)}
+.sc-bad .sc-st::after{transform:rotate(-45deg)}
+.sc-result{gap:10px}
+.sc-res-hd{align-items:center}
+.sc-res-hd .sec-lbl{margin:0}
+.sc-res-hd .chip{white-space:nowrap}
+.sc-res-say{display:flex;align-items:center;gap:10px;font-size:15px;color:var(--text-2);line-height:1.5;padding:4px 0}
+.sc-res-say.sc-bad{color:var(--warn-text)}
+.sc-result .tiles,#scRunRes .tiles{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.tile-set.sc-over{background:var(--warn-surface)}
+.tile-set.sc-over .tile-v,.tile-set.sc-over .tile-c{color:var(--warn-text)}
+.sc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px}
+.sc-cell{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--r-md);background:var(--surface-2);min-width:0}
+.sc-cell-n{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1);font-variant-numeric:tabular-nums}
+.sc-cell-v{margin-left:auto;font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap}
+.sc-verdict{display:flex;align-items:center;gap:8px;font-size:var(--fs);font-weight:var(--w-strong);white-space:nowrap}
+.sc-verdict.sc-ok{color:var(--ok-text)}
+.sc-verdict.sc-bad{color:var(--warn-text)}
+#scRunCount.enough #scRunN,#scRunCount.enough .count-say{color:var(--ok-text)}
+#scRunCount.enough .progress-fill{background:var(--ok)}
+#scRunCount .progress-fill{transform-origin:left;transition:transform var(--t-out)}
+#scTwin{flex:none}
+#scRunN{font-size:40px;font-weight:300;letter-spacing:-1px;font-variant-numeric:tabular-nums}

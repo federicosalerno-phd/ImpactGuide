@@ -20,9 +20,15 @@ import os
 import sys
 from pathlib import Path
 
-import bpy
-import numpy as np
-from mathutils import Matrix
+# Blender's Python ignores PYTHONPYCACHEPREFIX: apply it here, and write no bytecode next to the sources without it
+if os.environ.get("PYTHONPYCACHEPREFIX"):
+    sys.pycache_prefix = os.environ["PYTHONPYCACHEPREFIX"]
+else:
+    sys.dont_write_bytecode = True
+
+import bpy  # noqa: E402
+import numpy as np  # noqa: E402
+from mathutils import Matrix  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = ROOT / "04_code" / "tools" / "build_test_bench.py"

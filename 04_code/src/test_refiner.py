@@ -1,5 +1,5 @@
-"""Quick checks of refiner.py: update parametrisation and kinematic layer, crop geometry, network shapes and
-view invariance, losses, masks, and the crop of a twin view when the twin dataset is there. CPU, about 10 s.
+"""Quick checks of refiner.py: update parametrisation and kinematic layer, the Gaussian prior of the
+optimisation, crop geometry, network shapes and view invariance, losses, masks, and the crop of a twin view when the twin dataset is there. CPU, about 10 s.
 
     python 04_code/src/test_refiner.py
 """
@@ -53,10 +53,38 @@ def test_parametrisation():
           "rigid: same update as correct.Problem.delta")
     pp = rf.PriorProblem(type("R", (), {"v": X})(), [], np.eye(4), "rigid", sigma=np.array([1.0, 2.0, 0.5, 1.0, 3.0, 2.0]))
     d = np.array([0.01, -0.02, 0.005, 0.3, -0.1, 0.2])
-    r, J = pp.residuals(co.rodrigues(d[:3]), d[3:], [])
+    r, J = pp.prior(co.rodrigues(d[:3]), d[3:])
     sig = np.r_[np.radians([1.0, 2.0, 0.5]), [1.0, 3.0, 2.0]]
-    check(np.allclose(r, rf.PRIOR_MM * d / sig) and np.allclose(J, np.diag(rf.PRIOR_MM / sig)),
-          "prior residuals and Jacobian of PriorProblem")
+    check(np.allclose(r, rf.PRIOR_MM * d / sig) and np.allclose(J, np.diag(rf.PRIOR_MM / sig))
+          and np.allclose(pp.prior_info, np.diag(sig ** -2.0)), "prior residuals, Jacobian and information of PriorProblem")
+    check(len(pp.residuals(co.rodrigues(d[:3]), d[3:], [])[0]) == 0, "prior rows kept out of the outline residuals")
+
+
+def test_gaussian_prior():
+    """The prior of PriorProblem is quadratic (never under the Huber weights of the outline residuals) and stays out of
+    the residual scale and the point count: on linear outline residuals (20 per axis saying s = 3 mm) the optimum and
+    the covariance are those of a Gaussian prior N(0, 1 mm^2)."""
+    class Linear(rf.PriorProblem):
+        def residuals(self, R, s, data, jac=True):
+            r = np.r_[np.repeat(s, 20) - 3.0, 10.0 * co.rotvec(R)]
+            J = np.zeros((63, 6))
+            for k in range(3):
+                J[20 * k:20 * k + 20, 3 + k] = 1.0
+            J[60:, :3] = 10.0 * np.eye(3)
+            return (r, J) if jac else r
+
+    pb = Linear(type("R", (), {"v": np.zeros((4, 3))})(), [], np.eye(4), "rigid", sigma=np.ones(6))
+    R, s, _ = pb.lm(np.eye(3), np.zeros(3), None, iters=50)
+    w = rf.PRIOR_MM
+    gauss, huber = 20 * 3.0 / (20 + w * w), 3.0 - w * co.HUBER_MM / 20      # optimum with the prior quadratic or Huber
+    check(np.allclose(s, gauss, atol=1e-6), f"Gaussian prior: s = {s[0]:.4f} mm (quadratic {gauss:.4f}, "
+          f"under Huber {huber:.4f})")
+    cov, sigma, n = pb.covariance(R, s, None)
+    r = pb.residuals(R, s, None, jac=False)
+    s2 = float(np.sum(co.huber_w(r) * r * r) / (len(r) - 6))
+    check(n == 63 and abs(sigma ** 2 - s2) < 1e-12 and abs(cov[3, 3] - 1 / (20 / s2 + 1.0)) < 1e-9,
+          f"Laplace covariance with the prior information (sd {np.sqrt(cov[3, 3]):.4f} mm), sigma and points from the "
+          f"outline residuals only ({n})")
 
 
 def test_crop_geometry():
@@ -154,7 +182,8 @@ def stack_ok(v):
 
 
 if __name__ == "__main__":
-    for t in (test_rotations, test_parametrisation, test_crop_geometry, test_network, test_masks, test_twin_crop):
+    for t in (test_rotations, test_parametrisation, test_gaussian_prior, test_crop_geometry, test_network, test_masks,
+              test_twin_crop):
         t()
     print(f"{len(FAILED)} failed" if FAILED else "all passed")
     sys.exit(1 if FAILED else 0)

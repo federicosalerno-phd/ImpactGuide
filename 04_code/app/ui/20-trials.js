@@ -40,6 +40,14 @@ const TRIALS = {
     ask('trials_state', function (s) { if (s) TRIALS.render(s); });
   },
 
+  // A pre-impact position (a row or a slot with a position number), not an impact.
+  pre: function (r) { return !!r && String(r.position === undefined || r.position === null ? '' : r.position) !== ''; },
+  // "Set 1 · Position 3 · left off": a position in words (the lights left out when empty)
+  where1: function (set, position, light) {
+    return T('trials.tile.set') + ' ' + set + ' · ' + T('trials.tile.position') + ' ' + position
+      + (light ? ' · ' + TRIALS.word('light.', light) : '');
+  },
+
   // A value of the log in words (a status, a phase, a reason): its string, or the value itself as it was logged.
   word: function (prefix, v) { return hasT(prefix + v) ? T(prefix + v) : String(v === undefined || v === null ? '' : v); },
 
@@ -66,6 +74,7 @@ const TRIALS = {
       return x;
     }
     if (base === 'release') return T('step.release.text', t.angle_deg);
+    if (base === 'light') return T('step.light.text', TRIALS.word('light.', t.light));
     if (base === 'video' || base === 'drape_video') {
       const a = c.video_az[0], b = c.video_az[1];
       return T('step.' + base + '.text', a, b, Math.round((b - a) / 8), c.photo_az[0]);
@@ -119,11 +128,14 @@ const TRIALS = {
     const tiles = $('gTiles');
     tiles.replaceChildren();
     const ch = t.changes || [];
+    // a pre-impact position: its set, its number and the lights, no pendulum
+    (TRIALS.pre(t) ? [['set', 'trials.tile.set', t.set], ['position', 'trials.tile.position', t.position],
+                      ['light', 'trials.tile.light', TRIALS.word('light.', t.light)]] :
     [['holder', 'trials.tile.holder', t.holder],
      ['angle_deg', 'trials.tile.hole', t.angle_deg + '°'],
      ['direction_deg', 'trials.tile.direction', t.direction_deg + '°'],
      ['washers_per_side', 'trials.tile.washers', t.washers_per_side],
-     ['drape', 'trials.tile.drape', T(String(t.drape) === '1' ? 'word.yes' : 'word.no')]].forEach(function (x) {
+     ['drape', 'trials.tile.drape', T(String(t.drape) === '1' ? 'word.yes' : 'word.no')]]).forEach(function (x) {
       const on = ch.indexOf(x[0]) >= 0 && t.prev;
       const tile = E('div', 'tile-set' + (on ? ' changed' : ''));
       tile.append(E('div', 'tile-l', T(x[1])), E('div', 'tile-v', x[2]), E('div', 'tile-c', on ? T('trials.tile.changed') : ''));
@@ -224,7 +236,8 @@ const TRIALS = {
     if (Array.isArray(staged.problem_codes)) {
       return staged.problem_codes.map(function (p) {
         const got = TRIALS.measure(p.got), want = TRIALS.measure(p.want);
-        if (p.code !== 'unreadable' && (!got || !want)) return T('problem.file.generic');
+        // codes said without their values: the file unreadable, the photo out of the camera's Pro mode
+        if (p.code !== 'unreadable' && p.code !== 'photo_auto' && (!got || !want)) return T('problem.file.generic');
         return Tcode('problem.file.', p.code, 'generic', got, want);
       });
     }
@@ -254,8 +267,12 @@ const TRIALS = {
     $('planStartL').textContent = T('trials.plan.start', t.trial);
     $('planScanner').textContent = s.scanner_folder || T('trials.scanner.none');
     $('planScannerBtn').classList.toggle('hidden', !!s.simulate);
-    $('extraForm').classList.toggle('hidden', !TRIALS.extraOpen);
-    $('extraBtn').classList.toggle('hidden', TRIALS.extraOpen);
+    // a pre-impact position has no pendulum to weigh and no extra impact
+    const pre = TRIALS.pre(t);
+    $('planMass').closest('.field').classList.toggle('hidden', pre);
+    $('extraForm').previousElementSibling.classList.toggle('hidden', pre);
+    $('extraForm').classList.toggle('hidden', !TRIALS.extraOpen || pre);
+    $('extraBtn').classList.toggle('hidden', TRIALS.extraOpen || pre);
     const c = s.config;
     setOptions($('exHolder'), c.holders.map(function (h) { return T('trials.tile.holder') + ' ' + h; }), c.holders);
     setOptions($('exAngle'), c.angles_deg.map(function (a) { return T('trials.tile.hole') + ' ' + a + '°'; }), c.angles_deg.map(String));
@@ -329,6 +346,8 @@ const TRIALS = {
       $('stSpheres').checked = t.spheres_ok !== '0';
       $('stShift').value = t.cap_shift_mm || '';
     }
+    $('stSecond').closest('label').classList.toggle('hidden', TRIALS.pre(t));     // no pendulum at a position
+    $('stCap').closest('label').classList.toggle('hidden', TRIALS.pre(t));
     if (kind === 'close' && TRIALS._closeFor !== t.trial) {
       TRIALS._closeFor = t.trial;
       $('stSecond').checked = false;
@@ -404,8 +423,8 @@ const TRIALS = {
       let det = (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '') + ' · ' + fmtTime(r.time_impact || r.time_start);
       if (r.cap_shift_mm) det += ' · ' + T('log.cap', fmtNum(r.cap_shift_mm, 2));
       if (edited[r.trial]) det += ' · ' + T('log.edited', edited[r.trial]);
-      const d = E('span', 'mitem-det', r.holder + ' · ');
-      d.append.apply(d, TRIALS.signs(r));
+      const d = E('span', 'mitem-det', TRIALS.pre(r) ? TRIALS.where1(r.set, r.position, r.light) : r.holder + ' · ');
+      if (!TRIALS.pre(r)) d.append.apply(d, TRIALS.signs(r));
       d.append(document.createTextNode(det));
       name.append(d);
       it.append(name, E('span', 'mbadge', TRIALS.word('status.', r.status)));
@@ -422,7 +441,9 @@ const TRIALS = {
     $('lgSub').textContent = r ? TRIALS.word('status.', r.status) + ' · ' + r.session : T('log.none');
     const fields = $('lgFields');
     fields.replaceChildren();
-    const editable = L.columns.filter(function (c) { return c.name !== 'trial' && c.name !== 'phase'; });
+    // never edited: the trial, its phase, the version of the configuration it started under
+    const fixed = ['trial', 'phase', 'config_version'];
+    const editable = L.columns.filter(function (c) { return fixed.indexOf(c.name) < 0; });
     if (r) {
       L.columns.forEach(function (c) {
         if (r[c.name] === '') return;
@@ -494,6 +515,12 @@ const TRIALS = {
     Q.rows.forEach(function (r) {
       const next = String(r.slot) === String(Q.next);
       const cell = E('div', 'seq-cell' + (r.trial ? ' filled' : '') + (next ? ' next' : '') + (r.drape === '1' ? ' drape' : ''));
+      if (TRIALS.pre(r)) {          // a pre-impact slot: its set, its position and the lights
+        cell.append(E('div', 'seq-n', r.slot + ' · ' + TRIALS.where1(r.replicate, r.position, '')),
+                    E('div', 'seq-v', TRIALS.word('light.', r.light)), E('div', 'seq-t', r.trial || (next ? T('trials.badge.next') : '')));
+        grid.append(cell);
+        return;
+      }
       cell.title = T('seq.cell', r.angle_deg, r.direction_deg);      // the two signs in words
       cell.append(E('div', 'seq-n', r.slot + ' · ' + r.holder + ' · R' + r.replicate + (r.drape === '1' ? ' · ' + T('trials.chip.drape') : '')),
                   (function () { const v = E('div', 'seq-v'); v.append.apply(v, TRIALS.signs(r)); return v; })(),
@@ -551,6 +578,15 @@ const TRIALS = {
     TRIALS.cfg = C;
     $('cfgPhase').value = C.phase;
     TRIALS.fillCfg(C.config);
+    // the pre-impact sets have no matrix of impacts to set here (pre_impact.py sequence --sets N)
+    const pre = C.phase === 'pre_impact';
+    ['cfgHolders', 'cfgAngles', 'cfgDirections', 'cfgReps', 'cfgDrape', 'cfgPreview', 'cfgAdv', 'cfgApply', 'cfgReset'].forEach(function (id) {
+      const el = $(id);
+      const box = el.closest('.field') || (el.parentElement.classList.contains('row') ? el.parentElement : el);
+      box.classList.toggle('hidden', pre);
+      const lbl = box.previousElementSibling;
+      if (lbl && lbl.classList.contains('sec-lbl')) lbl.classList.toggle('hidden', pre);
+    });
     const t = C.totals;
     $('cfgTotals').replaceChildren(
       piRow(T('cfg.t.phase'), TRIALS.word('phase.', C.phase)), piRow(T('seq.slots'), t.slots),
@@ -650,7 +686,7 @@ const TRIALS = {
     $('lgSave').onclick = TRIALS.saveEdit;
     $('lgVoid').onclick = function () { TRIALS.voidTrial(TRIALS.logSel, 'lgVoidReason', 'lgVoid', TRIALS.loadLog); };
     $('lgOpen').onclick = TRIALS.openFolder;
-    setOptions($('cfgPhase'), [T('phase.campaign'), T('phase.pilot')], ['campaign', 'pilot']);
+    setOptions($('cfgPhase'), [T('phase.campaign'), T('phase.pilot'), T('phase.pre_impact')], ['campaign', 'pilot', 'pre_impact']);
     setOptions($('cfgOrder'), [T('cfg.order.random'), T('cfg.order.ascending')], ['random', 'ascending']);
     $('cfgPhase').onchange = function () {
       ask('set_phase', $('cfgPhase').value, function (s) {

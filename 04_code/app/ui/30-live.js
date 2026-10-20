@@ -142,6 +142,7 @@ const LIVE = {
     const size = s.intrinsics.size;
     $('where').textContent = T(s.synthetic ? 'live.where.sim' : 'live.where', size[0], size[1]);
     LIVE.overlay(s, on);
+    LIVE.check(s, on);
 
     // the panel: what is drawn and how strongly, the phone's screen, Advanced
     LIVE.renderLayers(s);
@@ -231,6 +232,7 @@ const LIVE = {
     if (s.link_waiting) tags.push([T('live.waiting'), true]);
     if (!s.models.face) tags.push([T('live.tag.nomodel')]);
     else if (reg.source === 'demo') tags.push([Tcode('live.tag.demo.', reg.demo, 'lying'), true]);
+    else if (reg.source === 'corrected') tags.push([T('live.tag.corrected')]);
     else tags.push([T('live.tag.file', LIVE.name(reg.path))]);
     if (s.intrinsics.source === 'nominal') tags.push([T('live.tag.nominal')]);
     if (s.synthetic) tags.push([T(s.replay ? 'live.tag.replay' : 'live.tag.synthetic')]);
@@ -244,6 +246,72 @@ const LIVE = {
     }
     $('lvWhy').textContent = why;
     $('lvWhy').classList.toggle('hidden', !why);
+  },
+
+  // The registration watched over (live_check.py): one light over the picture, its state by shape and colour, and
+  // one line of what to do (move the phone as the arrow says, or correct); the command Correct, the way back after a
+  // correction; the outcome said once in a toast. Advanced: the numbers, the method, correcting by itself.
+  check: function (s, on) {
+    const c = s.check || {}, show = on && !!c.active;
+    $('lvChk').classList.toggle('hidden', !show);
+    const st = c.state || 'off';
+    const shape = { ok: 'ok', lost: 'lost', board: 'board', checking: 'wait', loading: 'wait', correcting: 'wait' }[st] || '';
+    $('lvChkDot').className = 'chk-dot' + (shape ? ' ' + shape : '');
+    $('lvChkWord').textContent = Tcode('live.chk.', st, 'checking');
+    let why = '';
+    if (show && st === 'lost') why = T(c.enough ? 'live.chk.enough' : c.arrow ? 'live.chk.move' : 'live.chk.lost.hint');
+    else if (show && st === 'board') why = T('live.chk.board.hint');
+    $('lvChkWhy').textContent = why;
+    $('lvChkWhy').classList.toggle('hidden', !why);
+    const can = show && c.worker === 'ready' && !c.correcting && st !== 'board';
+    $('lvCorrect').disabled = !can;
+    const ready = can && st === 'lost' && !!c.enough;
+    $('lvCorrect').classList.toggle('btn-primary', ready);
+    $('lvCorrect').classList.toggle('btn-2', !ready);
+    $('lvUndo').classList.toggle('hidden', !c.corrected);
+    // the outcome of a correction, once
+    const k = c.correction;
+    if (k && k.id && k.id !== LIVE.saidCorrection) {
+      if (LIVE.saidCorrection !== undefined && k.age_s < 30) {
+        if (k.applied) toast(T('live.said.corrected', fmtNum(k.wall_s || 0, 1)), TOAST_SAID_MS, 'confirm');
+        else toast(T('live.said.notcorrected'), TOAST_LONG_MS, 'error');
+      }
+      LIVE.saidCorrection = k.id;
+    } else if (LIVE.saidCorrection === undefined) LIVE.saidCorrection = k ? k.id : 0;
+    // Advanced
+    const rows = [];
+    if (show) {
+      const mm = function (v) { return v === null || v === undefined ? '-' : fmtNum(v, 2) + ' mm'; };
+      rows.push(piRow(T('live.f.score'), T('live.f.score.v', mm(c.median_mm), fmtNum(c.tau_mm, 2))),
+                piRow(T('live.f.checks'), T('live.f.hz', fmtNum(c.hz || 0, 1))),
+                piRow(T('live.f.views'), T('live.f.views.v', c.views || 0, mm(c.pred95_mm))));
+      if (c.board && c.board.rms_px !== null && c.board.rms_px !== undefined) {
+        rows.push(piRow(T('live.f.boardfit'), T('live.f.px', fmtNum(c.board.rms_px, 2))));
+      }
+      if (k) {
+        const r = piRow(T('live.f.correction'), T('live.f.correction.v', fmtNum(k.wall_s || 0, 1),
+                                                   T('live.chk.method.' + (k.method || 'net'))));
+        r.title = k.applied ? T('live.said.corrected', fmtNum(k.wall_s || 0, 1)) : T('live.said.notcorrected');
+        rows.push(r);
+      }
+    }
+    $('lvChkRows').replaceChildren.apply($('lvChkRows'), rows);
+    document.querySelectorAll('#lvChkMethods .mitem').forEach(function (it) {
+      it.classList.toggle('sel', it.dataset.method === (c.method || (s.prefs || {}).check_method));
+    });
+    $('lvChkAuto').checked = !!c.auto;
+  },
+
+  correct: function () {
+    ask('live_correct', function (s) {
+      if (!s) return;
+      if (s.check_refused) toast(T('live.chk.busy'), TOAST_SAID_MS);
+      LIVE.render(s);
+    });
+  },
+
+  checkSettings: function (change) {
+    ask('live_check_settings', JSON.stringify(change), function (s) { if (s) LIVE.render(s); });
   },
 
   // Advanced: the board, the pace and the link while the view runs; the registration; the camera.
@@ -277,7 +345,8 @@ const LIVE = {
     }
     $('lvStatus').replaceChildren.apply($('lvStatus'), rows);
     $('lvStatusLbl').classList.toggle('hidden', !on);
-    const regRow = piRow(T('live.reg.now'), reg.source === 'file' ? LIVE.name(reg.path) : Tcode('live.reg.demo.', reg.demo, 'lying'));
+    const regRow = piRow(T('live.reg.now'), reg.source === 'corrected' ? T('live.reg.corrected')
+      : reg.source === 'file' ? LIVE.name(reg.path) : Tcode('live.reg.demo.', reg.demo, 'lying'));
     regRow.title = reg.source === 'file' ? reg.path : T('live.reg.demo.hint');
     $('lvReg').replaceChildren(regRow);
     if (reg.error) $('lvReg').append(E('div', 'callout callout-warn', T('live.reg.error', LIVE.name(s.prefs.registration))));
@@ -372,5 +441,12 @@ const LIVE = {
     $('lvOpacity').oninput = function () { LIVE.sliding = true; LIVE.opacity(false); };
     $('lvOpacity').onchange = function () { LIVE.sliding = false; LIVE.opacity(true); };
     initFineRanges($('lvOpacity').parentElement);      // the wheel and the arrow keys by 0.1 %, by 1 % with Shift
+    $('lvCorrect').onclick = LIVE.correct;
+    $('lvCorrect').setAttribute('data-sound', 'confirm');
+    $('lvUndo').onclick = function () { ask('live_correct_undo', function (s) { if (s) LIVE.render(s); }); };
+    document.querySelectorAll('#lvChkMethods .mitem').forEach(function (it) {
+      onActivate(it, function () { LIVE.checkSettings({ method: it.dataset.method }); });
+    });
+    $('lvChkAuto').onchange = function () { LIVE.checkSettings({ auto: $('lvChkAuto').checked }); };
   },
 };

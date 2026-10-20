@@ -14,11 +14,18 @@ The state (R, s) is updated on the manifold: R <- exp(d_r) R, s <- s + d_t.
 Residuals: points every STEP_PX px along the outline of the silhouette rendered at the current estimate, lifted to the
 mesh through the visibility buffer (barycentric coordinates in their triangle, clamped to it); residual = signed distance
 of the projected point from the outline of the observed mask, positive outside, in mm on the object plane (score.py
-scale), bilinear on a signed distance field computed once per view. Analytic Jacobian: gradient of the field x
+scale), bilinear on a signed distance field computed once per view on a crop around the mask (extended linearly
+beyond it). Analytic Jacobian: gradient of the field x
 derivative of the projection (cv2.projectPoints, lens distortion included) x derivative of the point.
 
+Only the silhouette counts: outline points on the cut edge of the mesh (triangles on an open border, the neck and back
+of a face model) are left out, since in clinic the skin goes on there.
+
 Optimization: Levenberg-Marquardt with Huber loss (IRLS weights; scipy's "lm" takes no robust loss) on the points of one
-render, then a new render at the new estimate and new points, until the update is below TOL_DEG and TOL_MM. Multi-start:
+render, optionally trimmed (trim: in each view that share of the points farthest from the observed outline weighs zero
+for that render, so that an outline piece the mask lacks, from an unmodelled occluder, cannot pull the estimate; off
+by default, TRIM), then a new render at the new estimate and new points, until the update is below TOL_DEG and TOL_MM. Six
+degrees of freedom need at least two views (MIN_VIEWS): from one view the depth is barely observed. Multi-start:
 zero plus +-START_DEG about the three axes of B; every start runs for PROBE renders, the KEEP with the lowest
 misalignment score (score.py, the one used for the decision) go on to convergence, the lowest final score wins.
 
@@ -38,6 +45,9 @@ import score as sc
 
 STEP_PX = 5            # spacing of the outline points
 HUBER_MM = 0.5         # Huber threshold of the residuals
+TRIM = 0.0             # share of the outline points of each view left out in each pass (those farthest from the mask):
+                       # off; 0.2 worsened the median TRE on both synthetic sets (20/10), kept for unmodelled occluders
+MIN_VIEWS = {"a1": 1, "rigid": 2}   # never 6 degrees of freedom from one view: the depth is barely observed there
 START_DEG = 2.5        # multi-start offsets about the axes of B
 TOL_DEG, TOL_MM = 0.02, 0.02   # convergence: update of one render below both
 PROBE, KEEP = 2, 2     # every start runs for PROBE renders, the KEEP best go on to convergence
@@ -81,15 +91,23 @@ class Field:
         self.img = np.dstack([d, gx, gy])
 
     def sample(self, uv):
-        """Signed distance and gradient (N x 3) at image points uv (N x 2, px), bilinear, border replicated."""
+        """Signed distance and gradient (N x 3) at image points uv (N x 2, px), bilinear. Outside the crop the
+        distance goes on linearly from the nearest border point with the gradient there (first order), so that the
+        gradient stays the derivative of the distance: a clamped distance with the border gradient gave a Jacobian
+        that did not match the residual."""
         h, w = self.img.shape[:2]
-        x = np.clip(uv[:, 0] - self.x0, 0, w - 1.001)
-        y = np.clip(uv[:, 1] - self.y0, 0, h - 1.001)
+        u, v = uv[:, 0] - self.x0, uv[:, 1] - self.y0
+        x = np.clip(u, 0, w - 1.001)
+        y = np.clip(v, 0, h - 1.001)
         ix, iy = x.astype(int), y.astype(int)
         fx, fy = (x - ix)[:, None], (y - iy)[:, None]
         i = self.img
-        return (i[iy, ix] * (1 - fx) * (1 - fy) + i[iy, ix + 1] * fx * (1 - fy) + i[iy + 1, ix] * (1 - fx) * fy
-                + i[iy + 1, ix + 1] * fx * fy)
+        out = (i[iy, ix] * (1 - fx) * (1 - fy) + i[iy, ix + 1] * fx * (1 - fy) + i[iy + 1, ix] * (1 - fx) * fy
+               + i[iy + 1, ix + 1] * fx * fy)
+        off = (u != x) | (v != y)
+        if off.any():
+            out[off, 0] += out[off, 1] * (u - x)[off] + out[off, 2] * (v - y)[off]
+        return out
 
 
 @dataclass
@@ -139,14 +157,22 @@ def huber_w(r, k=HUBER_MM):
 
 
 class Problem:
-    """Residuals and Jacobian of one parametrization over a set of views."""
+    """Residuals and Jacobian of one parametrization over a set of views.
 
-    def __init__(self, renderer, views, T_M_B0, mode="a1", center=None):
+    A subclass can add a Gaussian prior on the update (prior(), prior_info): its residuals enter the cost with weight
+    1 (quadratic, no Huber) and stay out of the residual scale, the degrees of freedom and the point count; the
+    Laplace covariance adds its information to that of the outline residuals."""
+
+    prior_info = None       # information matrix (inverse covariance, rad and mm) of the prior; None: no prior
+
+    def __init__(self, renderer, views, T_M_B0, mode="a1", center=None, trim=TRIM, cut=False):
         if mode not in ("a1", "rigid"):
             raise ValueError(mode)
         if mode == "a1" and center is None:
             raise ValueError("a1 needs the ball centre (B frame)")
         self.renderer, self.views, self.mode = renderer, views, mode
+        self.trim = trim
+        self.cut_faces = None if cut else cut_triangles(renderer)
         self.T0 = np.asarray(T_M_B0, np.float64)
         self.o = np.asarray(center, np.float64) if mode == "a1" else np.asarray(renderer.v, np.float64).mean(0)
         self.p = 3 if mode == "a1" else 6
@@ -186,6 +212,8 @@ class Problem:
         p = p[v.keep[p[:, 1], p[:, 0]]]
         fid = r.faces[p[:, 1] - y0, p[:, 0] - x0]
         p, fid = p[fid >= 0], fid[fid >= 0]
+        if self.cut_faces is not None:      # the silhouette only: not the cut edge of the mesh
+            p, fid = p[~self.cut_faces[fid]], fid[~self.cut_faces[fid]]
         tri = self.renderer.v[self.renderer.f[fid]]                       # n x 3 x 3, B frame
         uv = cv2.projectPoints(tri.reshape(-1, 3), rotvec(T[:3, :3]), T[:3, 3], v.K, v.dist)[0].reshape(-1, 3, 2)
         e1, e2, q = uv[:, 1] - uv[:, 0], uv[:, 2] - uv[:, 0], p - uv[:, 0]
@@ -216,23 +244,31 @@ class Problem:
         r = np.concatenate(rs) if rs else np.empty(0)
         return (r, np.vstack(Js) if Js else np.empty((0, self.p))) if jac else r
 
+    def prior(self, R, s):
+        """Residuals of the prior on the update at (R, s) and their Jacobian, weight 1: none here."""
+        return np.empty(0), np.empty((0, self.p))
+
     def lm(self, R, s, data, iters=INNER):
-        """Levenberg-Marquardt with Huber loss on the points of one render. Returns R, s and the total update."""
+        """Levenberg-Marquardt with Huber loss on the points of one render (plus the quadratic prior, if any).
+        Returns R, s and the total update."""
         r, J = self.residuals(R, s, data)
-        if len(r) < self.p:
+        rp, Jp = self.prior(R, s)
+        if len(r) + len(rp) < self.p:
             return R, s, np.zeros(self.p)
-        cost, lam, total = huber_rho(r).sum(), 1e-3, np.zeros(self.p)
+        keep = self.kept(r, data)           # fixed for the pass, so that the costs compare
+        cost, lam, total = (keep * huber_rho(r)).sum() + 0.5 * rp @ rp, 1e-3, np.zeros(self.p)
         for _ in range(iters):
-            w = huber_w(r)
-            H = J.T @ (J * w[:, None])
-            g = J.T @ (w * r)
+            w = huber_w(r) * keep
+            H = J.T @ (J * w[:, None]) + Jp.T @ Jp
+            g = J.T @ (w * r) + Jp.T @ rp
             while lam < 1e8:
                 d = np.linalg.solve(H + lam * np.diag(np.diag(H)) + 1e-12 * np.eye(self.p), -g)
                 R2, s2 = self.update(R, s, d)
                 r2, J2 = self.residuals(R2, s2, data)
-                c2 = huber_rho(r2).sum()
+                rp2, Jp2 = self.prior(R2, s2)
+                c2 = (keep * huber_rho(r2)).sum() + 0.5 * rp2 @ rp2
                 if c2 <= cost:
-                    R, s, r, J, cost, lam = R2, s2, r2, J2, c2, max(lam / 3, 1e-7)
+                    R, s, r, J, rp, Jp, cost, lam = R2, s2, r2, J2, rp2, Jp2, c2, max(lam / 3, 1e-7)
                     total += d
                     break
                 lam *= 4
@@ -259,16 +295,38 @@ class Problem:
         st["score"] = sc.score(st["view_scores"])
         return st
 
+    def kept(self, r, data):
+        """Residuals kept by the trimming: in each view the share 1 - trim closest to the observed outline (all of them
+        without trimming). An outline piece the mask lacks (a drape, a finger, a SAM error, skin that moved) then weighs
+        nothing instead of pulling the estimate with the Huber weight."""
+        keep = np.ones(len(r), bool)
+        if not self.trim:
+            return keep
+        i = 0
+        for d in data:
+            n = len(d["X"])
+            if n:
+                a = np.abs(r[i:i + n])
+                keep[i:i + n] = a <= np.quantile(a, 1.0 - self.trim)
+                i += n
+        return keep
+
     def view_scores(self, data):
         return [sc.view_score(v.observed, d["mask"], d["scale"], v.ignore) for v, d in zip(self.views, data)]
 
     def covariance(self, R, s, data, kappa=1.0):
+        """Laplace covariance of the update: kappa sigma^2 (J^T W J)^-1 from the outline residuals alone, or with a
+        prior (J^T W J / (kappa sigma^2) + prior_info)^-1. Returns it, sigma (mm) and the number of outline points."""
         r, J = self.residuals(R, s, data)
+        keep = self.kept(r, data)
+        r, J = r[keep], J[keep]
         w = huber_w(r)
         dof = max(len(r) - self.p, 1)
         sigma2 = float(np.sum(w * r * r) / dof)
+        H = J.T @ (J * w[:, None])
         try:
-            cov = kappa * sigma2 * np.linalg.inv(J.T @ (J * w[:, None]))
+            cov = (kappa * sigma2 * np.linalg.inv(H) if self.prior_info is None
+                   else np.linalg.inv(H / max(kappa * sigma2, 1e-12) + self.prior_info))
         except np.linalg.LinAlgError:
             cov = np.full((self.p, self.p), np.inf)
         return cov, float(np.sqrt(sigma2)), len(r)
@@ -300,15 +358,44 @@ def predicted_tre(cov, R, o, targets, draws=DRAWS, seed=SEED, q=95.0):
     return float(tre.mean()), float(np.percentile(tre, q))
 
 
+def allowed(mode, n_views):
+    """True when the correction runs with this many views (MIN_VIEWS)."""
+    return n_views >= MIN_VIEWS[mode]
+
+
+def cut_triangles(renderer):
+    """Triangles of the mesh on its cut edge (a vertex on an open border: neck and back of a face model), as a bool
+    array over the triangles; cached on the renderer. In clinic the skin goes on there, so the outline points on them
+    are left out (the silhouette only)."""
+    cached = getattr(renderer, "_cut_triangles", None)
+    if cached is not None or getattr(renderer, "f", None) is None:     # no mesh given: no cut edge
+        return cached
+    f = np.asarray(renderer.f)
+    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+    u, n = np.unique(e, axis=0, return_counts=True)
+    border = np.zeros(int(f.max()) + 1 if len(f) else 0, bool)
+    border[u[n == 1].ravel()] = True
+    cut = border[f].any(1)
+    try:
+        renderer._cut_triangles = cut
+    except AttributeError:
+        pass
+    return cut
+
+
 def correct(renderer, views, T_M_B0, targets, mode="a1", center=None, start_deg=START_DEG, kappa=1.0,
-            probe=PROBE, keep=KEEP, max_renders=MAX_RENDERS):
+            probe=PROBE, keep=KEEP, max_renders=MAX_RENDERS, trim=TRIM, cut=False):
     """Correct the registration T_M_B0 from the views. targets: points (B frame) for the predicted TRE.
 
     Every start runs for `probe` renders; the `keep` starts with the lowest score then run to convergence (at most
-    max_renders renders each); the lowest final score wins.
+    max_renders renders each); the lowest final score wins. trim: share of the outline points of each view left out
+    in each pass; cut: also the outline points on the cut edge of the mesh. Raises ValueError with fewer views than
+    MIN_VIEWS (6 degrees of freedom need two).
     """
+    if not allowed(mode, len(views)):
+        raise ValueError(f"{mode}: at least {MIN_VIEWS[mode]} views")
     t0 = time.perf_counter()
-    pb = Problem(renderer, views, T_M_B0, mode, center)
+    pb = Problem(renderer, views, T_M_B0, mode, center, trim, cut)
     runs = [pb.run({"i": i, "R": rodrigues(w), "s": np.zeros(3), "data": None, "renders": 0, "done": False}, probe)
             for i, w in enumerate(starts(start_deg))]
     for st in sorted(runs, key=lambda x: x["score"])[:keep]:

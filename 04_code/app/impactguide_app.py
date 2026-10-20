@@ -94,11 +94,14 @@ import calib_video  # noqa: E402
 import calibrate_charuco  # noqa: E402
 import charuco_plate  # noqa: E402
 import live_ar  # noqa: E402
+import live_check  # noqa: E402
 import phone_link  # noqa: E402
 import phone_view  # noqa: E402
 import screen_board  # noqa: E402
 import trials  # noqa: E402
 import twin  # noqa: E402
+import scans_page  # noqa: E402  (the Scans page's side of this backend, beside this file)
+import dataset_page  # noqa: E402  (the Dataset page's side of this backend, beside this file)
 
 APP_NAME = "ImpactGuide"
 APP_VERSION = "0.1.0"
@@ -150,6 +153,8 @@ F_STD_REL_MAX = 0.005       # a focal length less certain than this (std over va
 ISSUE_ORDER = ("board_not_flat", "phone_not_still", "camera_settings", "corners_missing")
 EXTRA_MAX = 4               # photos past the plan for the corners of the photo the board has not reached yet
 LOG_MAX_BYTES = 2_000_000   # errors.log is turned over at this size (one older file kept)
+PAGE_ERRORS_MAX = 200       # errors of the page's scripts written to the log in a run, at most...
+PAGE_ERROR_CHARS = 500      # ... each cut to this length
 WRITE_RETRIES = 20          # a file held for a moment (Drive, an antivirus) is replaced again this many times
 WRITE_RETRY_S = 0.25        # this far apart
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # Windows: enough rights to ask whether a process still runs
@@ -427,8 +432,15 @@ class Roots:
             self.local = base
             self.log = base / "logs" / "errors.log"
         else:
-            self.raw, self.protocol = trials.RAW, trials.PROTOCOL
-            self.processed = trials.ROOT / "03_data" / "processed"
+            # the installed app keeps what is recorded with it in the user's Documents (IMPACTGUIDE_DATA, set by
+            # scripts/impactguide_start.pyw), laid out as the project's 03_data; else the project's 03_data
+            data = os.environ.get("IMPACTGUIDE_DATA")
+            if data:
+                self.raw, self.processed = Path(data) / "raw", Path(data) / "processed"
+                self.protocol = self.processed / "protocol"
+            else:
+                self.raw, self.protocol = trials.RAW, trials.PROTOCOL
+                self.processed = trials.ROOT / "03_data" / "processed"
             self.staging, self.board = LOCAL / "staging", LOCAL / "boards"
             self.prefs = LOCAL / "preferences.json"
             self.export_default = None
@@ -459,7 +471,7 @@ class Prefs:
         "phone": {"camera_dir": acquisition.CAMERA_DIR, "shutter": "volume_down", "switch_modes": True,
                   "link": phone_link.AUTO, "wifi_address": "", "phone_id": "", "wifi_paired": False},
         "live": {"board": "sheet", "face": True, "mandible": False, "axes": True, "registration": "",
-                 "opacity": live_ar.OPACITY},
+                 "opacity": live_ar.OPACITY, "check_method": live_check.SETTINGS["method"], "check_auto": False},
         # the calibration board: on this monitor (in the page), the 3D-printed plate or a printed A4 sheet,
         # with the caliper readings of each (mm); chosen: the first question of Calibrate was answered
         "board": {"kind": "screen", "chosen": False, "plate": {}, "sheet": {}},
@@ -602,6 +614,7 @@ class Backend(Bridge):
         self._scan_error = ""       # why the scanner folder could not be listed, last said in the log
         self._live = None
         self._live_server = None
+        self._check = None          # the registration check of the live view (live_check.py), made with it
         self._view = None           # the live AR for the phone's screen (phone_view.ViewServer), made when opened
         self._frames = LiveFrames(self)     # what that server reads, the same across a rebind
         self._view_lan = False      # the operator asked to show that view on another screen of the network
@@ -609,6 +622,8 @@ class Backend(Bridge):
         self._view_opened = False   # opened on the phone through adb: its tunnel is laid again after a reconnection
         self._phone_lock = threading.Lock()     # one adb conversation with the phone's camera at a time
         self._check_queue = []      # [(folder, photo)] waiting for their check, in the order they came
+        self._check_now = None      # (folder, photo) under its check now
+        self._importing = set()     # (folder, name) of photos added by hand while they are copied in
         # the photos of a calibration on their way, each with the pose of the plan it is for: shooting (the shutter
         # not pressed yet), shot (pressed, the file not whole yet), copying, checking; gone once checked
         self._shots = []
@@ -638,6 +653,8 @@ class Backend(Bridge):
         self._lay = None            # the board laid out for that area (screen_board.layout)
         self._lay_err, self._lay_mon, self._lay_exact = "", None, True
         self._board_img = None      # its image, as the page draws it
+        self._board_want = None     # (key, layout) whose image waits for the one being made (_board_image)
+        self._page_errors = 0       # errors of the page's scripts this run (page_error)
         self._screen_watch = False
         self._watched_screen = None
         self._live_for = "live"     # what the live AR runs for: the live view, or a calibration of the stream
@@ -663,6 +680,10 @@ class Backend(Bridge):
         self.twin = twin.Watcher(roots.local / "twin", blender=True if auto else None,
                                  seed=twin.CACHE if roots.simulate else None)
         self._twin_said = (self.twin.current() or {}).get("version")
+        # the Scans page: the scanner's folder watched for every scan, each measured as it comes (scans_page.py)
+        self.scans = scans_page.ScansPage(self)
+        # the Dataset page: what the dataset holds, its check, the package (dataset_page.py)
+        self.dataset = dataset_page.DatasetPage(self)
         self._twin_timer = QTimer(self)
         self._twin_timer.setInterval(TWIN_POLL_MS)
         self._twin_timer.timeout.connect(self._twin_poll)
@@ -715,9 +736,11 @@ class Backend(Bridge):
 
     @guarded
     def _poll_scan(self) -> None:
-        """The scanner's export folder listed in a worker; the scan, once complete, staged for the step that waits."""
+        """The scanner's export folder listed in a worker; the scan, once complete, staged for the step that waits.
+        While the trial's page waits for no step of its own, the Scans page's watch takes every export."""
         watch = self._watch
         if watch is None:
+            self.scans.poll()
             return
 
         def done(found: Path | None, error: BaseException | None) -> None:
@@ -731,10 +754,12 @@ class Backend(Bridge):
             if found is None or self._watch is not watch:
                 return
             self._watch = None
+            self.scans.consumed(found)          # never taken again by the Scans page's watch
             if self.cur.get("trial") != watch.trial:
                 log.info("scan %s left: trial %s is no longer open", found.name, watch.trial)
                 return
-            self._staged(watch.trial, watch.key, found, temp=False)
+            # staged for this step, unless the scan was taken at the arm position of another step that waits
+            self.scans.came(found, prefer=watch.key)
         self._spawn("scan_poll", watch.poll, done)
 
     def _emit(self, payload: dict[str, Any]) -> None:
@@ -831,6 +856,15 @@ class Backend(Bridge):
     def set_sound(self, on: bool) -> None:
         """The sounds switched on or off on the band (SlantUI's switch): kept for the next start."""
         self.prefs.set("sound", bool(on))
+
+    @pyqtSlot(str)
+    @guarded
+    def page_error(self, text: str) -> None:
+        """An error of the page's scripts (ui/00-errors.js), written to the log only, at most PAGE_ERRORS_MAX of
+        them a run."""
+        self._page_errors += 1
+        if self._page_errors <= PAGE_ERRORS_MAX:
+            log.warning("page: %s", str(text)[:PAGE_ERROR_CHARS])
 
     def _data_folder(self, path: Path | str) -> Path:
         """`path` as an existing folder under the data roots (Roots.data_folders).
@@ -1213,7 +1247,8 @@ class Backend(Bridge):
         """The run of a phase (the one in use by default), kept for the session."""
         phase = phase or self.prefs["phase"]
         if phase not in self._runs:
-            self._runs[phase] = trials.Run(phase, self.roots.raw, self.roots.protocol)
+            # the calibrations kept: a trial's photo or video of another size than its camera mode's is said
+            self._runs[phase] = trials.Run(phase, self.roots.raw, self.roots.protocol, calibration=self.roots.calib_out)
         return self._runs[phase]
 
     def scanner_folder(self) -> Path | None:
@@ -1364,7 +1399,7 @@ class Backend(Bridge):
             if plan is None:
                 return {"error": "complete"}
             values = {k: v for k, v in json.loads(payload or "{}").items() if k in ("swing_mass_g", "notes") and v != ""}
-            if not (values.get("swing_mass_g") or plan.get("swing_mass_g")):
+            if getattr(run, "pendulum", True) and not (values.get("swing_mass_g") or plan.get("swing_mass_g")):
                 return {"error": "swing_mass"}
             if "swing_mass_g" in values:
                 values["swing_mass_g"] = f"{float(values['swing_mass_g']):g}"
@@ -1422,6 +1457,7 @@ class Backend(Bridge):
                 else:
                     run.store(trial, name, staged["path"], move=staged["temp"])
                     del self.cur["staged"][key]
+                    self.scans.arrived(trial, key)      # a scan filed: its trial's results kept for the twin
             if key == "spheres":
                 values = {k: values[k] for k in ("spheres_ok", "cap_shift_mm") if k in values}
                 if "cap_shift_mm" in values:
@@ -1465,8 +1501,9 @@ class Backend(Bridge):
                 target.unlink(missing_ok=True)
                 shutil.move(str(path), str(target))
             path = target
-            problems = [v for _, v in trials.deep_check(run.config, path)]
-            codes = trials.deep_check_codes(run.config, path)     # the same problems as codes, for the page to say
+            # with the trial's own configuration and the sizes of the calibrations kept, as codes for the page to say
+            codes = run.file_problems(row["trial"], path)
+            problems = [v for _, v in trials.deep_check(run.config_for(row), path, run.camera_sizes())]
         old = self.cur["staged"].get(key)
         if old and old.get("temp") and Path(old["path"]) != path:
             self._unlink(Path(old["path"]))
@@ -1493,6 +1530,7 @@ class Backend(Bridge):
             self._emit({"type": "acquire_failed", "key": key, "trial": trial, **self._err(e, "copy_failed")})
             return
         self._emit({"type": "staged", "key": key, "trial": trial})
+        self.scans.arrived(trial, key)          # a scan: measured at once (scans_page.py)
 
     def _acquired(self, trial: str, key: str, video: bool = False) -> Callable[[Any, BaseException | None], None]:
         """The done() of a photo or (video) a recording stopped, taken for the step `key` of `trial`."""
@@ -1606,7 +1644,11 @@ class Backend(Bridge):
                 if self.roots.simulate:
                     stem = Path(steps[i].files[0]).stem
                     export = folder / f"export_{stem}.ply"
-                    QTimer.singleShot(FAKE_SCAN_MS, guarded(lambda: acquisition.fake_scan(export.parent, export.name)))
+                    if self.scans.synthetic():      # a synthetic scan of the bench as the trials left it
+                        self.scans.sim_export(row["trial"], key, folder, export.name)
+                    else:
+                        QTimer.singleShot(FAKE_SCAN_MS,
+                                          guarded(lambda: acquisition.fake_scan(export.parent, export.name)))
             return {"ok": True, "folder": str(folder)}
         return self._answer(go)
 
@@ -1743,18 +1785,44 @@ class Backend(Bridge):
         return p if p in ("quick", "accurate") else "quick"
 
     def _folders(self):
-        """The folders of calibration photos, newest first: name, path, number of photos, kind, board.json."""
+        """The folders of calibration photos, newest first: name, path, kind, board.json, "files" (the photos in it)
+        and "n" (those that count, _counted)."""
         folders = []
         if self.roots.calib_raw.is_dir():
             for d in sorted((d for d in self.roots.calib_raw.iterdir() if d.is_dir()), key=lambda d: d.name,
                             reverse=True):
-                n = sum(1 for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+                photos = [p for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES]
                 board = None
                 with contextlib.suppress(OSError, ValueError):
                     board = json.loads((d / calibrate_charuco.BOARD_FILE).read_text(encoding="utf-8"))
-                folders.append({"name": d.name, "path": str(d), "n": n, "kind": d.name.split("_", 1)[-1],
-                                "board": board})
+                folders.append({"name": d.name, "path": str(d), "files": len(photos),
+                                "n": len(self._counted(d, photos)), "kind": d.name.split("_", 1)[-1], "board": board})
         return folders
+
+    def _counted(self, d: Path, photos: list[Path]) -> list[Path]:
+        """The photos of a folder that count (for the plan and the calibration): those whose check kept them. In a
+        folder with no checks at all (photos from before the checks were kept, or put there by hand) every photo
+        counts, the calibration's own detection judging them."""
+        raw = read_json(Path(d) / PHOTO_CHECKS, "photo checks")
+        if not isinstance(raw, dict):
+            return list(photos)
+        return [p for p in photos if (raw.get(p.name) or {}).get("ok")]
+
+    def _unchecked(self, d: Path, checks: dict[str, dict[str, Any]]) -> list[Path]:
+        """The photos of a series with checks that have none of their own and none on its way (taken, copied, waiting
+        for or under their check): put there by hand, or left when the app stopped before their check. Oldest
+        first."""
+        busy = {x["name"] for x in self._shots_in(d) if x["name"]} | {p.name for f, p in self._check_queue
+                                                                       if str(f) == str(d)}
+        busy |= {name for f, name in self._importing if str(f) == str(d)}     # still being copied in
+        if self._check_now is not None and str(self._check_now[0]) == str(d):
+            busy.add(self._check_now[1].name)
+        try:
+            photos = sorted((p for p in Path(d).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES
+                             and p.name not in checks and p.name not in busy), key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return []
+        return photos
 
     @staticmethod
     def _photo_checks(d: Path | str) -> dict[str, dict[str, Any]]:
@@ -1773,7 +1841,7 @@ class Backend(Bridge):
         d = Path(f["path"])
         checks = self._photo_checks(d)
         photos = sorted((p for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES), key=lambda p: p.stat().st_mtime)
-        same = f["n"] == 0 or self._same_board(f["board"], active)
+        same = f["files"] == 0 or self._same_board(f["board"], active)
         rows = [{"name": p.name, **{k: (checks.get(p.name) or {}).get(k) for k in ("ok", "why", "corners", "of",
                                                                                   "blur_px")}} for p in photos]
         points = []
@@ -1883,7 +1951,7 @@ class Backend(Bridge):
 
     def _guide_board(self, series, active):
         """The board the guide draws: the series' own (board.json) when it has photos, else the one in use."""
-        b = (series or {}).get("board") if series and series.get("n") else None
+        b = (series or {}).get("board") if series and series.get("files") else None
         return b or active
 
     def _calib_state(self):
@@ -1915,7 +1983,12 @@ class Backend(Bridge):
         if series and series["same"]:
             d = Path(series["path"])
             checks_d = self._photo_checks(d)
-            on_way = sum(1 for x in self._shots_in(d) if x["state"] in ("shot", "copying"))
+            if checks_d:        # a photo of a checked series without a check of its own counts once checked
+                orphans = self._unchecked(d, checks_d)
+                if orphans:
+                    self._queue_checks(d, orphans)
+            # a photo counts once kept (_counted), and meanwhile from the shutter on, for its pose
+            on_way = sum(1 for x in self._shots_in(d) if x["state"] in ("shot", "copying", "checking"))
             taken = self._poses_taken(d, [p["name"] for p in series["photos"]], checks_d)
             series["shots"] = self._strip(d, checks_d)
         elif series:
@@ -2092,14 +2165,14 @@ class Backend(Bridge):
         """The folder for the next photo: the series of today if it has no photos yet or its photos are of the board
         in use; else a new one (the board changed: the photos start again)."""
         f = self._series()
-        if f is not None and (f["n"] == 0 or self._same_board(f["board"], self._board()["active"])):
+        if f is not None and (f["files"] == 0 or self._same_board(f["board"], self._board()["active"])):
             return Path(f["path"])
         return self._new_series()
 
     def _series_hold(self):
         """The board of the series in progress, kept on the monitor while it fits (screen_board.layout, hold)."""
         f = self._series()
-        b = f["board"] if f is not None and f["n"] > 0 else None
+        b = f["board"] if f is not None and f["files"] > 0 else None
         return b if b and b.get("kind") == "screen" and b.get("square_px") else None
 
     @pyqtSlot(str, result=str)
@@ -2397,7 +2470,7 @@ class Backend(Bridge):
         if not film["recording"] or film["stopping"] or "phone" in self._busy:
             return {"error": "busy"}
         f = self._series()
-        empty = f is not None and f["n"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
+        empty = f is not None and f["files"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
         d = Path(f["path"]) if empty else self._new_series()
         self._folder_board(d)
         board = self._board_args(d)         # here: it may ask Qt for the monitors
@@ -2485,7 +2558,7 @@ class Backend(Bridge):
             return {**self._calib_state(), "added": 0, "skipped": 0}
         src = Path(path)
         f = self._series()
-        empty = f is not None and f["n"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
+        empty = f is not None and f["files"] == 0 and not (Path(f["path"]) / calib_video.FILM_DIR).exists()
         d = Path(f["path"]) if empty else self._new_series()
         self._folder_board(d)
         board = self._board_args(d)
@@ -2668,10 +2741,20 @@ class Backend(Bridge):
 
     def _queue_checks(self, d: Path, photos: list[Path]) -> None:
         """Photos of the folder d queued for their check, one worker checking them one after the other in the order
-        they came: none is ever left unchecked because another check was running."""
+        they came: none is ever left unchecked because another check was running. In a folder never checked before
+        its photos already there go first, oldest first: they are the series the new ones join (their size, their
+        camera settings), and from now on they count only once checked (_counted)."""
+        checked = self._photo_checks(d)
+        if photos and not (Path(d) / PHOTO_CHECKS).exists():
+            new = {Path(p).name for p in photos}
+            photos = [p for p in self._unchecked(Path(d), {}) if p.name not in new] + list(photos)
+        now = self._check_now
         for p in photos:
-            if (d, p) not in self._check_queue:
-                self._check_queue.append((d, p))
+            # a photo is checked once: never again while it waits, while it is checked, or once it has its check
+            if (any(str(f) == str(d) and Path(q) == Path(p) for f, q in self._check_queue) or Path(p).name in checked
+                    or (now is not None and str(now[0]) == str(d) and Path(now[1]) == Path(p))):
+                continue
+            self._check_queue.append((d, p))
         self._next_check()
 
     def _next_check(self) -> None:
@@ -2719,12 +2802,14 @@ class Backend(Bridge):
                 return calibrate_charuco.check_photo(dest, board, size, first)
 
             def done(res: dict[str, Any] | None, error: BaseException | None, d: Path = d, dest: Path = dest) -> None:
+                self._check_now = None
                 try:
                     self._checked(d, dest, res, error)
                 finally:
                     self._next_check()
                     self._maybe_calibrate()
-            self._spawn("photo_check", work, done)
+            if self._spawn("photo_check", work, done):
+                self._check_now = (d, dest)
 
     def _checked(self, d: Path, dest: Path, res: dict[str, Any] | None, error: BaseException | None) -> None:
         """The check of a photo kept beside it (atomically); a photo that failed it goes aside."""
@@ -2908,13 +2993,17 @@ class Backend(Bridge):
                         shutil.copy2(src, dest)
                     return [dest for _, dest in todo]
 
+                coming = {(str(d), dest.name) for _, dest in todo}
+
                 def done(copied: list[Path] | None, error: BaseException | None) -> None:
+                    self._importing -= coming
                     if error is not None:
                         self._emit({"type": "acquire_failed", "key": "calibration", **self._err(error, "copy_failed")})
                         copied = [dest for _, dest in todo if dest.exists()]
                     self._queue_checks(d, copied or [])
                 if not self._spawn("import", work, done):
                     return {"error": "busy"}
+                self._importing |= coming       # never taken for photos left unchecked while they are copied in
             return {**self._calib_state(), "added": len(todo), "skipped": skipped}
         return self._answer(go)
 
@@ -2939,6 +3028,18 @@ class Backend(Bridge):
                 self._calib_waiting = leave
                 return {"ok": True, "waiting": True}
             f = self._series()
+            skip: dict[str, str] = {}
+            if f is not None and (Path(f["path"]) / PHOTO_CHECKS).exists():
+                # only the photos their check kept; one without a check yet is checked first
+                d = Path(f["path"])
+                checks = self._photo_checks(d)
+                orphans = self._unchecked(d, checks)
+                if orphans:
+                    self._queue_checks(d, orphans)
+                    self._calib_waiting = leave
+                    return {"ok": True, "waiting": True}
+                skip = {p.name: "check" for p in d.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES
+                        and not (checks.get(p.name) or {}).get("ok")}
             if f is None or not f["n"]:
                 return {"error": "nothing"}
             d, mode, plan = Path(f["path"]), self._mode(), self._calib_plan()
@@ -2947,7 +3048,7 @@ class Backend(Bridge):
 
             def work() -> tuple[dict[str, Any], str]:
                 return captured(calibrate_charuco.run_calibrate, d, None, None, *board, exclude=leave,
-                                sink=said_so_far)
+                                sink=said_so_far, skip=skip)
 
             def done(result: tuple[dict[str, Any], str] | None, error: BaseException | None) -> None:
                 if error is not None:
@@ -3313,10 +3414,9 @@ class Backend(Bridge):
     def board_area(self, payload):
         """The page's area for the board: {w, h (device pixels; 0 when no step shows it), dpr, x, y (its corner in
         the page, device pixels), iw (the page's width, CSS pixels), have (the key of the board the page has)}.
-        Answers the layout and, when the page's board is not this one, the image to draw (PNG, one pixel per device
-        pixel), with its key."""
+        Answers the layout with its key and, when the page's board is not this one, "pending": its image (PNG, one
+        pixel per device pixel) follows as a board event, made in a worker (_board_image)."""
         def go():
-            import cv2
             c = json.loads(payload)
             self._watch_screen()
             if not c.get("w") or not c.get("h"):
@@ -3332,16 +3432,49 @@ class Backend(Bridge):
             if lay is None:
                 out["key"] = ""
                 return out
-            key = (f"{lay['size_px'][0]}x{lay['size_px'][1]}:{lay['origin_px'][0]},{lay['origin_px'][1]}:"
-                   f"{lay['squares'][0]}x{lay['squares'][1]}:{lay['square_px']}:{lay['marker_px']}")
+            key = self._lay_key(lay)
             out["key"] = key
             if key != c.get("have"):
-                img = screen_board.render(lay)
-                self._board_img = img
-                ok, png = cv2.imencode(".png", img)
-                out["png"] = "data:image/png;base64," + base64.b64encode(png.tobytes()).decode("ascii")
+                out["pending"] = True
+                self._board_image(key, lay)
             return out
         return self._answer(go)
+
+    @staticmethod
+    def _lay_key(lay: dict[str, Any]) -> str:
+        """What tells one board laid out from another: its size, origin, squares, square and marker in pixels."""
+        return (f"{lay['size_px'][0]}x{lay['size_px'][1]}:{lay['origin_px'][0]},{lay['origin_px'][1]}:"
+                f"{lay['squares'][0]}x{lay['squares'][1]}:{lay['square_px']}:{lay['marker_px']}")
+
+    def _board_image(self, key: str, lay: dict[str, Any]) -> None:
+        """The image of the board laid out (screen_board.render) and its PNG, made in a worker (a whole monitor's
+        area takes some hundred ms, which the window never waits for), then sent to the page as a board event
+        {action: image, key, png (a data URL)}. A layout wanted while one is made follows it; an image that is no
+        longer the board laid out is not sent."""
+        if "board_image" in self._busy:
+            self._board_want = (key, lay)
+            return
+        self._board_want = None
+        lay = dict(lay)
+
+        def work() -> tuple[Any, str]:
+            import cv2
+            img = screen_board.render(lay)
+            ok, png = cv2.imencode(".png", img)
+            if not ok:
+                raise ValueError("the board's PNG was not made")
+            return img, "data:image/png;base64," + base64.b64encode(png.tobytes()).decode("ascii")
+
+        def done(res: tuple[Any, str] | None, error: BaseException | None) -> None:
+            nxt, self._board_want = self._board_want, None
+            if error is not None:
+                log.warning("board image not made", exc_info=error)
+            elif self._lay is not None and self._lay_key(self._lay) == key:
+                self._board_img = res[0]
+                self._emit({"type": "board", "action": "image", "key": key, "png": res[1]})
+            if nxt is not None and nxt[0] != key:
+                self._board_image(*nxt)
+        self._spawn("board_image", work, done)
 
     def _live_board(self):
         """The calibration board as live_ar wants it, and whether to hide it in the picture: the board on this
@@ -3396,7 +3529,71 @@ class Backend(Bridge):
                                         replay=self.replay, hide_board=lb["hide_board"] and p["board"] == "sheet",
                                         prepare=False)
             self._live_server = live_ar.MjpegServer(self._live)
+            # the registration watched over (live_check.py: its worker is a process of its own, started with the
+            # first frame of the patient board); in simulation the synthetic stream shows the face, moved by a
+            # small impact from the demo registration, the face is found by its colour and corrected by the
+            # optimisation (the network knows the twin's pictures, not this flat synthetic face)
+            sim = bool(self.roots.simulate)
+            self._check = live_check.RegistrationCheck(
+                {"method": self._check_method(p.get("check_method")), "auto": bool(p.get("check_auto")),
+                 **({"segmenter": "colour", "method": "opt"} if sim else {})})
+            self._live.attach_check(self._check)
+            if sim:
+                self._live.synthetic_stream = live_check.face_stream_factory(shift_deg=3.0)
         return self._live
+
+    @staticmethod
+    def _check_method(v):
+        return v if v in live_check.METHODS else live_check.SETTINGS["method"]
+
+    def _check_mode(self):
+        """How the registration is corrected: the interface of the trial under way (A: about its ball, 3 parameters;
+        B: any rigid motion), any rigid motion without one."""
+        try:
+            row = self._open_trial(self.run())
+        except Exception:  # noqa: BLE001  no trials folder yet: the general case
+            row = None
+        return "a1" if row is not None and row.get("holder") == "A" else "rigid"
+
+    @pyqtSlot(result=str)
+    def live_correct(self):
+        """The registration corrected now from the views of the face the live view keeps (live_check.py); the outcome
+        comes in the state (check.correction). Answers the state, with check_refused when it cannot start now."""
+        def go():
+            self.live()
+            got = self._check.correct(mode=self._check_mode())
+            st = self._live_state()
+            if got is False:
+                st["check_refused"] = True
+            return st
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def live_correct_undo(self):
+        """The registration before the last correction, again."""
+        def go():
+            self.live()
+            self._check.undo()
+            return self._live_state()
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def live_check_settings(self, payload):
+        """{method, auto} of the correction, kept for the next session."""
+        def go():
+            given = json.loads(payload)
+            p = dict(self.prefs["live"])
+            if "method" in given:
+                if given["method"] not in live_check.METHODS:
+                    return {"error": "bad_value", "message": "method"}
+                p["check_method"] = given["method"]
+            if "auto" in given:
+                p["check_auto"] = bool(given["auto"])
+            self.prefs.set("live", p)
+            self.live()
+            self._check.configure(method=self._check_method(p.get("check_method")), auto=bool(p.get("check_auto")))
+            return self._live_state()
+        return self._answer(go)
 
     def _free_camera(self) -> dict[str, Any] | None:
         """The phone's camera serves one at a time: a photo or a video stops the live view first (the
@@ -3418,6 +3615,8 @@ class Backend(Bridge):
         self._sync_live()       # the board changed here, on the Calibration module, or its area moved
         ar = self._live
         ln = self.link.status()
+        if self._check is not None:     # the state drawn in the picture too while the phone's own screen shows it
+            self._check.configure(badge=self._view is not None and (self._view.stats() or {}).get("viewers", 0) > 0)
         st = ar.status()
         # the stream's own code goes as live_error: an "error" at the top of an answer says the call itself failed
         st["live_error"] = st.pop("error", "") or ""
@@ -3516,6 +3715,100 @@ class Backend(Bridge):
             self.live().set_registration(None)
             self.prefs.set("live", {**self.prefs["live"], "registration": ""})
             return self._live_state()
+        return self._answer(go)
+
+    # ── the scans (scans_page.py, scan_desk.py, ui/22-scans.js) ──────────
+    @pyqtSlot(str, result=str)
+    def scans_state(self, payload: str) -> str:
+        """The Scans page: {"trial": id or ""} -> the scanner's folder and whether it is watched, the rig
+        calibration, the trial shown (the open one, else the one asked for, else the newest measured) with its scan
+        steps, their state and its result, the trials with scans, the runs without an impact."""
+        return self._answer(lambda: self.scans.state(json.loads(payload or "{}")))
+
+    @pyqtSlot(str, str, int, result=str)
+    def scans_capture(self, kind: str, action: str, want: int) -> str:
+        """A run of scans without an impact (kind calibration or repeat): start (of want scans) or stop."""
+        return self._answer(lambda: self.scans.capture_cmd(kind, action, want or None))
+
+    @pyqtSlot(result=str)
+    def scans_calibrate(self) -> str:
+        """The spheres' radii calibrated from the calibration run's scans, in a worker (a `scans` event)."""
+        return self._answer(self.scans.calibrate)
+
+    @pyqtSlot(str, result=str)
+    def scans_process(self, payload: str) -> str:
+        """The scans of a day's trials ({"day": "YYYY-MM-DD" or "", "all": bool}) measured and written into
+        gt_poses.csv, in a worker (a `scans` event)."""
+        def go() -> dict[str, Any]:
+            a = json.loads(payload or "{}")
+            return self.scans.process(str(a.get("day") or ""), bool(a.get("all")))
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def scans_simulate(self) -> str:
+        """In simulation: the stand-in scanner exports the scan the open trial waits for."""
+        return self._answer(self.scans.simulate)
+
+    @pyqtSlot(result=str)
+    def scans_open(self) -> str:
+        """The folder of the measured scans opened in Explorer."""
+        def go() -> dict[str, Any]:
+            folder = self.scans.store() / self.run().phase
+            folder.mkdir(parents=True, exist_ok=True)
+            open_externally(folder)
+            return {"ok": True}
+        return self._answer(go)
+
+    # ── the dataset (dataset_page.py, dataset_pack.py, ui/28-dataset.js) ─
+    @pyqtSlot(str, result=str)
+    def dataset_state(self, payload: str) -> str:
+        """The Dataset page: {"fresh": bool} -> what the dataset holds (None while it is read, in a worker: a
+        `dataset` event once read), the check or export on its way, the last check and package, what goes in."""
+        return self._answer(lambda: self.dataset.state(json.loads(payload or "{}")))
+
+    @pyqtSlot(str, result=str)
+    def dataset_parts(self, payload: str) -> str:
+        """What goes into the package and the check: {"real": bool, "synthetic": bool}, kept for the next start."""
+        return self._answer(lambda: self.dataset.set_parts(json.loads(payload or "{}")))
+
+    @pyqtSlot(result=str)
+    def dataset_check(self) -> str:
+        """Every file of the dataset read and compared, in a worker (a `dataset` event, checked, at the end)."""
+        return self._answer(self.dataset.check)
+
+    @pyqtSlot(str, result=str)
+    def dataset_export(self, payload: str) -> str:
+        """The package written where the operator chooses: {"to": "folder"} a folder to put it in, {"to": "zip"}
+        the zip file; in a worker (a `dataset` event, exported, at the end). {"cancelled": true} when nothing was
+        chosen."""
+        def go() -> dict[str, Any]:
+            as_zip = json.loads(payload or "{}").get("to") == "zip"
+            start = self.dataset.start_folder()
+            if as_zip:
+                name = dataset_page.dataset_pack.package_name() + ".zip"
+                chosen, _ = QFileDialog.getSaveFileName(None, "ImpactGuide", str(start / name), "zip (*.zip)")
+            else:
+                chosen = QFileDialog.getExistingDirectory(None, "ImpactGuide", str(start))
+            if not chosen:
+                return {"cancelled": True}
+            dest = self.dataset.target(chosen, as_zip)
+            return self.dataset.export(dest, as_zip, f"{APP_NAME} {APP_VERSION}")
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def dataset_stop(self) -> str:
+        """The check or export on its way stopped (its partial package removed)."""
+        return self._answer(lambda: self.dataset.stop())
+
+    @pyqtSlot(result=str)
+    def dataset_open(self) -> str:
+        """The last package's folder (or the zip's) opened in Explorer."""
+        def go() -> dict[str, Any]:
+            folder = self.dataset.opened()
+            if folder is None:
+                raise UserError("not_found")
+            open_externally(folder)
+            return {"ok": True}
         return self._answer(go)
 
     # ── the twin of the bench (twin.py, ui/18-twin.js) ───────────────────
@@ -3630,6 +3923,240 @@ class Backend(Bridge):
             return {"model": self._twin_model()}
         return self._answer(go)
 
+    # ── analysis and charts (analysis.py, chart_builder.py, ui/24-analysis.js, ui/26-charts.js) ──
+    def _results_dirs(self) -> dict[str, Path | None]:
+        """Where the analysis writes its tables and the charts their scripts and figures: the project's results,
+        figures and pictures folders; all under the simulation's folder in simulation, so that simulated tables
+        never reach the project's. charts: where an export goes without asking (simulation only)."""
+        if self.roots.simulate:
+            b = self.roots.simulate
+            return {"results": b / "results", "figures": b / "figures", "pictures": b / "pictures",
+                    "charts": b / "charts", "interfaces": self.roots.raw / "interfaces"}
+        return {"results": trials.ROOT / "05_results", "figures": APP.parent / "figures",
+                "pictures": trials.ROOT / "06_pictures", "charts": None, "interfaces": self.roots.raw / "interfaces"}
+
+    @pyqtSlot(result=str)
+    def analysis_state(self) -> str:
+        """The last analysis (analysis.summary) or None, whether one runs and how far (trials done, of)."""
+        def go() -> dict[str, Any]:
+            return {"running": "analysis" in self._busy, "result": getattr(self, "_analysis", None),
+                    "progress": getattr(self, "_analysis_at", None), "simulate": bool(self.roots.simulate),
+                    "phase": self.prefs["phase"]}
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def analysis_run(self) -> str:
+        """The analysis of the phase in use made again in a worker (the scans of a trial measured once, then kept):
+        its tables written into the results folder (only the changed ones), then an `analysis` event, ready or
+        failed (no_trials: no closed trial with its scans yet)."""
+        def go() -> dict[str, Any]:
+            run = self.run()
+            rows, pending = run.log.rows(), run.pending()
+            info, cache, d, sim = self.twin.info(), self.twin.cache, self._results_dirs(), bool(self.roots.simulate)
+            store = self.scans.store()          # the reseating run of holder B (scan_desk, kind reseat)
+            self._analysis_at = None
+
+            def progress(i: int, n: int) -> None:
+                self._analysis_at = [i, n]      # read by analysis_state; a plain pair, replaced whole
+
+            def work() -> dict:
+                import analysis
+                return analysis.analyse(run, info, cache, d["results"], simulate=sim, rows=rows, pending=pending,
+                                        progress=progress, interfaces_raw=d["interfaces"],
+                                        interfaces_store=store)
+
+            def done(res: dict | None, error: BaseException | None) -> None:
+                self._analysis_at = None
+                if error is not None:
+                    self._emit({"type": "analysis", "action": "failed", **self._err(error, "analysis_failed")})
+                    return
+                self._analysis = res
+                self._emit({"type": "analysis", "action": "ready", "n": res["n"], "written": res["written"]})
+            return {"started": self._spawn("analysis", work, done), "running": True}
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def results_open(self, what: str) -> str:
+        """A folder of the analysis opened in Explorer: results, figures, pictures or charts (the exports)."""
+        def go() -> dict[str, Any]:
+            folder = self._results_dirs().get(what) if what in ("results", "figures", "pictures", "charts") else None
+            if folder is None:
+                return {"error": "not_found"}
+            folder.mkdir(parents=True, exist_ok=True)
+            open_externally(folder)
+            return {"ok": True}
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def chart_state(self) -> str:
+        """What the Charts page offers: the charts to start from, the pinned ones (their scripts in the figures
+        folder), the tables of the results folder with their columns, the kinds, palettes, scales, legends and
+        page widths, and whether the data are simulated."""
+        def go() -> dict[str, Any]:
+            import chart_builder as cb
+            d = self._results_dirs()
+            return {"presets": cb.presets(), "saved": cb.saved(d["figures"]), "tables": cb.tables(d["results"]),
+                    "kinds": list(cb.KINDS), "palettes": list(cb.PALETTES), "scales": list(cb.SCALES),
+                    "legends": list(cb.LEGENDS), "widths": list(cb.WIDTHS_MM), "heights": list(cb.HEIGHT_MM),
+                    "default_height": {str(k): v for k, v in cb.DEFAULT_HEIGHT.items()},
+                    "simulate": bool(self.roots.simulate), "analysis": getattr(self, "_analysis", None) is not None,
+                    "analysing": "analysis" in self._busy}
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def chart_name(self, slug: str) -> str:
+        """A free figure name for a new chart: figS<n>_<slug>."""
+        def go() -> dict[str, Any]:
+            import chart_builder as cb
+            d = self._results_dirs()
+            return {"name": cb.next_name(d["figures"], d["pictures"], str(slug or "chart")[:40])}
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def chart_preview(self, payload: str) -> str:
+        """{"spec", "id"} drawn in a worker, the newest one only when several come while one draws: a `chart`
+        event, preview (svg, the checked spec) or failed, with the id it was asked with."""
+        def go() -> dict[str, Any]:
+            ask_ = json.loads(payload or "{}")
+            self._chart_want = (ask_.get("spec") or {}, ask_.get("id"))
+            self._chart_next()
+            return {"queued": True}
+        return self._answer(go)
+
+    def _chart_next(self) -> None:
+        want = getattr(self, "_chart_want", None)
+        if want is None or "chart" in self._busy:
+            return
+        self._chart_want = None
+        spec, tag = want
+        d, sim = self._results_dirs(), bool(self.roots.simulate)
+
+        def work() -> dict:
+            import chart_builder as cb
+            r = cb.preview(spec, d["results"], simulated=sim)
+            r.pop("source", None)
+            return r
+
+        def done(r: dict | None, error: BaseException | None) -> None:
+            if error is not None:
+                self._emit({"type": "chart", "action": "failed", "id": tag, **self._err(error, "chart_failed")})
+            else:
+                self._emit({"type": "chart", "action": "preview", "id": tag, **r})
+            self._chart_next()
+        self._spawn("chart", work, done)
+
+    @pyqtSlot(str, result=str)
+    def chart_export(self, payload: str) -> str:
+        """The chart as PDF, SVG and PNG at 300 dpi, under a name the operator chooses (into the simulation's charts
+        folder in simulation): a `chart` event, exported (the files) or failed."""
+        def go() -> dict[str, Any]:
+            spec = json.loads(payload or "{}").get("spec") or {}
+            d, sim = self._results_dirs(), bool(self.roots.simulate)
+            name = str(spec.get("name") or "chart")
+            if d["charts"] is not None:
+                stem = d["charts"] / name
+            else:
+                start = str(Path.home() / "Documents" / f"{name}.pdf")
+                path, _ = QFileDialog.getSaveFileName(None, "ImpactGuide", start, "PDF, SVG, PNG (*.pdf)")
+                if not path:
+                    return {"cancelled": True}
+                stem = Path(path).with_suffix("")
+
+            def work() -> list:
+                import chart_builder as cb
+                return [p.name for p in cb.export(spec, d["results"], stem, simulated=sim)]
+
+            def done(files: list | None, error: BaseException | None) -> None:
+                if error is not None:
+                    self._emit({"type": "chart", "action": "failed", **self._err(error, "chart_failed")})
+                else:
+                    self._emit({"type": "chart", "action": "exported", "files": files})
+            return {"started": self._spawn("chart_export", work, done)}
+        return self._answer(go)
+
+    @pyqtSlot(str, result=str)
+    def chart_pin(self, payload: str) -> str:
+        """{"spec", "replace"}: the chart's script written into the figures folder as <name>.py and run there on
+        its own, which writes the figure (PDF and PNG) into the pictures folder. A script of that name is replaced
+        only with replace (else the answer is script_exists, at once). Then a `chart` event, pinned or failed."""
+        def go() -> dict[str, Any]:
+            import chart_builder as cb
+            ask_ = json.loads(payload or "{}")
+            spec, replace = ask_.get("spec") or {}, bool(ask_.get("replace"))
+            d, sim = self._results_dirs(), bool(self.roots.simulate)
+            name = str(spec.get("name") or "")
+            if name and not replace and (d["figures"] / f"{name}.py").exists():
+                return {"error": "script_exists", "args": {"name": name}}
+
+            def work() -> dict:
+                return cb.pin(spec, d["results"], d["figures"], d["pictures"], simulated=sim, replace=replace)
+
+            def done(r: dict | None, error: BaseException | None) -> None:
+                if error is not None:
+                    self._emit({"type": "chart", "action": "failed", **self._err(error, "chart_failed")})
+                    return
+                self._emit({"type": "chart", "action": "pinned", "name": r["name"], "replaced": r["replaced"],
+                            "script": Path(r["script"]).name, "files": [Path(f).name for f in r["files"]]})
+            return {"started": self._spawn("chart_pin", work, done)}
+        return self._answer(go)
+
+    # ── the holders measured on their own (interfaces.py, ui/28-holders.js) ──
+    def _holders(self) -> dict[str, Any]:
+        import interfaces
+        raw, store = self.roots.raw / "interfaces", self.scans.store()
+        run = self.scans.capture_state().get("reseat") or {}
+        return {"a": interfaces.a_state(raw), "b": {**interfaces.b_state(store), "scans": run.get("n", 0),
+                                                    "good": run.get("good", 0), "want": run.get("want"),
+                                                    "files": run.get("files", [])[-6:]},
+                "b_on": self.scans.capture == "reseat", "measuring": any(w.startswith("capture:")
+                                                                         for w in self.scans.busy()),
+                "scanner": bool(self.scanner_folder()), "simulate": bool(self.roots.simulate),
+                "reseats": interfaces.RESEATS}
+
+    @pyqtSlot(result=str)
+    def holders_state(self) -> str:
+        """Holder A's slip torque as it stands (the repeat in progress, the masses tried, the repeats done) and holder
+        B's reseating (the run of scans, each seating's error against the first)."""
+        return self._answer(self._holders)
+
+    @pyqtSlot(str, result=str)
+    def holders_a(self, payload: str) -> str:
+        """{"mass_g", "arm_mm", "slipped"}: one mass tried on A, written at once into a_slip_torque.csv."""
+        def go() -> dict[str, Any]:
+            import interfaces
+            ask_ = json.loads(payload or "{}")
+            try:
+                mass = float(str(ask_.get("mass_g", "")).replace(",", "."))
+                arm = float(str(ask_.get("arm_mm", "")).replace(",", "."))
+                interfaces.record_a(self.roots.raw / "interfaces", mass, arm, bool(ask_.get("slipped")))
+            except ValueError:
+                return {"error": "bad_value", "args": {"field": "mass_g"}}
+            return self._holders()
+        return self._answer(go)
+
+    @pyqtSlot(result=str)
+    def holders_a_undo(self) -> str:
+        """The last mass tried on A taken back."""
+        def go() -> dict[str, Any]:
+            import interfaces
+            interfaces.undo_a(self.roots.raw / "interfaces")
+            return self._holders()
+        return self._answer(go)
+
+    @pyqtSlot(str, int, result=str)
+    def holders_b(self, action: str, want: int) -> str:
+        """The reseating run of B started or stopped: the Scans page's run of kind reseat (want scans, the first
+        seating and the lifts after it; 0: interfaces.RESEATS + 1). Each export is measured as it comes."""
+        def go() -> dict[str, Any]:
+            import interfaces
+            if action not in ("start", "stop"):
+                return {"error": "bad_value", "args": {"field": "action"}}
+            if action == "start" and not self.scanner_folder():
+                return {"error": "no_scanner_folder"}
+            self.scans.capture_cmd("reseat", action, int(want) if want else interfaces.RESEATS + 1)
+            return self._holders()
+        return self._answer(go)
+
     # ── the window is closing ────────────────────────────────────────────
     @guarded
     def shutdown(self) -> None:
@@ -3639,6 +4166,7 @@ class Backend(Bridge):
         self._scan_timer.stop()
         self._twin_timer.stop()
         self.twin.cancel()              # a model being made: its Blender stopped
+        self.dataset.shutdown()         # a check or an export: stopped, its partial package removed
         self._check_queue.clear()
         self._frames.close()            # the phone's page stops waiting for frames
         for signal, slot in self._connections:

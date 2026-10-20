@@ -1,0 +1,28 @@
+/* ImpactGuide · Analysis and Charts, the steps of Scans and results (ui/24-analysis.js, ui/26-charts.js).
+   Only their own layout: every colour is a role of the palette, except the figure's paper, white as the figure is. */
+
+/* Analysis: the cards side by side as the stage allows, each a grid of names and numbers */
+.an-col{max-width:1180px}
+.an-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:12px;align-items:start}
+.an-grid>.card{min-width:0;gap:8px}
+.an-t{display:grid;gap:3px 10px;align-items:baseline}
+.an-h{font-size:var(--fs-sm);color:var(--text-3);text-align:right;white-space:nowrap;overflow:hidden;
+      text-overflow:ellipsis;min-width:0}
+.an-h:first-child{text-align:left}
+.an-l{font-size:var(--fs);color:var(--text-2);min-width:0;overflow-wrap:anywhere;line-height:1.35}
+.an-v{font-size:var(--fs);color:var(--text-1);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;
+      min-width:0;line-height:1.35}
+.an-v small{display:block;font-size:var(--fs-xs);color:var(--text-3);white-space:nowrap}
+.an-note{font-size:var(--fs-sm);color:var(--text-3);line-height:1.45}
+.an-col>.say .spinner{flex:none}
+
+/* Charts: the figure on its paper, at its proportions, as large as the stage allows */
+.view.ch-view{padding:16px 20px 24px}
+.ch-col{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:1500px;margin:0 auto;min-width:0}
+.ch-col>.callout,.ch-col>.say{align-self:stretch}
+.ch-paper{position:relative;background:#fff;border-radius:var(--r-md);padding:14px;max-width:100%;box-sizing:border-box}
+.ch-paper img{display:block;max-width:100%;height:auto}
+.ch-busy{position:absolute;right:8px;top:8px}
+.ch-cap{font-size:var(--fs-sm);color:var(--text-3);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;max-width:100%}
+.ch-ctl{gap:4px}

@@ -103,6 +103,7 @@ CHECK_FOCAL = 0.001  # relative
 CHECK_CENTRE = 2.0  # px
 OUTLIER_FACTOR = 3.0  # a view whose error is above this many times the median is dropped...
 OUTLIER_FLOOR_PX = 0.3  # ... and above this
+OUTLIER_MAX_SHARE = 0.25  # at most this share of the views is dropped (more is a bad series, said by the verdict)
 # The board's shape (fit_shape): a quadratic surface, z = a u^2 + b u v + c v^2 with u, v from the board's middle in
 # SHAPE_UNIT mm, fitted with the camera and the poses after the flat solve.
 SHAPE_UNIT = 100.0      # mm
@@ -915,31 +916,38 @@ def coverage(points, size):
 
 
 def calibrate(views, size, exclude=(), square=None):
-    """Calibrate on the views but the excluded ones (chosen by hand), drop the views with an error above 3 times the
-    median, calibrate again. With square (mm), where on the board the error is (corner_residuals). Every view, used
-    or not, gets its error under the final model (per_view_all_px: PnP for those left out). Raises CalibrationError
-    few_photos with fewer than MIN_VIEWS usable photos.
+    """Calibrate on the views but the excluded ones (chosen by hand), then drop the outliers one at a time: the view
+    with the largest error goes when it is above OUTLIER_FACTOR times the median (and above OUTLIER_FLOOR_PX), the
+    camera is solved again without it and the errors judged again, until none is above, the views left would be
+    fewer than MIN_VIEWS, or OUTLIER_MAX_SHARE of them are gone. One at a time because one bad photo pulls the model
+    and raises the others' errors (all at once would drop good ones with it, or none when that left too few), and a
+    second bad one may show only once the first is gone. With square (mm), where on the board the error is
+    (corner_residuals). Every view, used or not, gets its error under the final model (per_view_all_px: PnP for those
+    left out). Raises CalibrationError few_photos with fewer than MIN_VIEWS usable photos.
 
     After each flat solve fit_shape fits the board's shape: a board that is not flat keeps the intrinsics, errors and
     poses of the model with its shape (rms_px is then that model's, rms_flat_px the flat one's) and its errors
     choose the views dropped. The result also holds "shape" (fit_shape: sag_mm, rms_flat_px, rms_shape_px, drop,
     focal_shift ...), "centre" (the optical centre free for each photo: spread_px, still ...), "coverage" (where the
-    board reached in the image, coverage()) and "issues" (codes of ISSUES)."""
+    board reached in the image, coverage()), "issues" (codes of ISSUES) and "limit_px" (the last outlier limit)."""
     exclude = sorted(set(exclude) & set(views))
     use = {k: v for k, v in views.items() if k not in exclude}
     if len(use) < MIN_VIEWS:
         raise CalibrationError("few_photos", f"only {len(use)} usable photos, at least {MIN_VIEWS} needed",
                                n=len(use), need=MIN_VIEWS)
-    rms, K, dist, std, per_view, poses = solve(use, size)
-    shape = fit_shape(use, size, K, dist, poses, square, centre=False)
-    errs = per_view if shape["flat"] else shape["per_view_rms_px"]
-    limit = max(OUTLIER_FACTOR * float(np.median(list(errs.values()))), OUTLIER_FLOOR_PX)
-    dropped = sorted(k for k, e in errs.items() if e > limit)
-    if dropped and len(use) - len(dropped) >= MIN_VIEWS:
-        use = {k: v for k, v in use.items() if k not in dropped}
+    most = int(OUTLIER_MAX_SHARE * len(use))
+    dropped = []
+    while True:
         rms, K, dist, std, per_view, poses = solve(use, size)
-    else:
-        dropped = []
+        shape = fit_shape(use, size, K, dist, poses, square, centre=False)
+        errs = per_view if shape["flat"] else shape["per_view_rms_px"]
+        limit = max(OUTLIER_FACTOR * float(np.median(list(errs.values()))), OUTLIER_FLOOR_PX)
+        worst = max(errs, key=lambda k: errs[k])
+        if errs[worst] <= limit or len(use) - 1 < MIN_VIEWS or len(dropped) >= most:
+            break
+        dropped.append(worst)
+        use = {k: v for k, v in use.items() if k != worst}
+    dropped.sort()
     shape = fit_shape(use, size, K, dist, poses, square)
     shape_poses = shape.pop("_poses", None)
     std = {k: _round(s) for k, s in zip(STD_NAMES, std)}
@@ -1278,14 +1286,20 @@ def _read_json(path, code):
         raise CalibrationError(code, f"{Path(path).name} cannot be read: {e}", file=Path(path).name) from e
 
 
-def run_calibrate(images, out, truth, square, squares=None, marker=None, exclude=(), log: Log | None = None):
+def run_calibrate(images, out, truth, square, squares=None, marker=None, exclude=(), log: Log | None = None,
+                  skip=None):
     """Calibrates on the photos of a folder (CalibrationError no_photos, few_photos); with `out` the result is written
     there in one step; with `truth` it is compared with it. Reports through `log` (print when None). "settings":
     {photo: codes of SETTINGS} of the photos used whose camera settings are wrong (against the first one used for
-    what must not change), and then the issue camera_settings."""
+    what must not change), and then the issue camera_settings. skip: {photo: why} left out before their corners are
+    looked for (the app's photos that did not pass their check), said in "skipped" with their reason."""
     board = make_board(square, squares, marker)
-    paths = find_images(images)
+    skip = {str(k): str(v) for k, v in (skip or {}).items()}
+    paths = [p for p in find_images(images) if p.name not in skip]
+    if not paths:
+        raise CalibrationError("few_photos", f"no photo left of {len(skip)}", n=0, need=MIN_VIEWS)
     views, skipped, size = detect(paths, board)
+    skipped = sorted(skipped + [(k, v) for k, v in skip.items()])
     if size is None:
         raise CalibrationError("few_photos", "no photo can be read", n=0, need=MIN_VIEWS)
     cal = calibrate(views, size, exclude, board.getSquareLength())
@@ -1319,9 +1333,14 @@ def run_check(images, intrinsics, square, squares=None, marker=None, log: Log | 
     combined standard deviations or below the floor, and when they reproject the
     new photos with an RMS below MAX_RMS.
 
+    The board is taken with the shape the calibration found for it (its
+    "shape": a bent sheet, a curved monitor) when the photos are of the same
+    board (squares and square); else, or when it was flat, as a plane.
+
     Returns (ok, report): report holds the RMS of the stored model on these
-    photos, the views used and skipped, and per parameter the stored and new
-    value, the change, the limit and whether it passed. Raises CalibrationError:
+    photos, the views used and skipped, the board's shape used ("shape": flat,
+    stored, or other_board) and per parameter the stored and new value, the
+    change, the limit and whether it passed. Raises CalibrationError:
     intrinsics_bad (the stored file cannot be read), no_photos, few_photos,
     intrinsics_size (photos of another camera mode).
     """
@@ -1332,7 +1351,16 @@ def run_check(images, intrinsics, square, squares=None, marker=None, log: Log | 
         ref_size = [int(v) for v in ref["image_size"]]
     except (KeyError, TypeError, ValueError) as e:
         raise CalibrationError("intrinsics_bad", f"{Path(intrinsics).name}: {e}", file=Path(intrinsics).name) from e
-    views, skipped, size = detect(find_images(images), make_board(square, squares, marker), prefer=ref_size)
+    board = make_board(square, squares, marker)
+    stored, mine = ref.get("board") or {}, board_spec(board)
+    shape = ref.get("shape") if isinstance(ref.get("shape"), dict) else None
+    curved = bool(shape and not shape.get("flat", True) and shape.get("coef_mm") and shape.get("middle_mm"))
+    same_board = (list(stored.get("squares") or []) == mine["squares"]
+                  and abs(float(stored.get("square_mm") or 0) - mine["square_mm"]) < 1e-6)
+    shape_used = "flat" if not curved else "stored" if same_board else "other_board"
+    views, skipped, size = detect(find_images(images), board, prefer=ref_size)
+    if shape_used == "stored":      # the board's points where the calibration found them
+        views = {k: (board_surface(o, shape), i) for k, (o, i) in views.items()}
     if size is None:
         raise CalibrationError("few_photos", "no photo can be read", n=0, need=MIN_VIEWS)
     if list(size) != ref_size:
@@ -1350,10 +1378,13 @@ def run_check(images, intrinsics, square, squares=None, marker=None, log: Log | 
     sq = sum(float(np.sum((cv2.projectPoints(o, *cv2.solvePnP(o, i, K0, d0)[1:], K0, d0)[0].reshape(-1, 2)
                            - i.reshape(-1, 2)) ** 2)) for o, i in zip(obj, img))
     rms_stored = np.sqrt(sq / sum(len(o) for o in obj))
-    say(f"views {len(views)}, stored intrinsics reproject them with RMS {rms_stored:.3f} px")
+    say(f"views {len(views)}, stored intrinsics reproject them with RMS {rms_stored:.3f} px"
+        + {"flat": "", "stored": ", the board with its stored shape",
+           "other_board": ", the board flat (the stored shape is of another board)"}[shape_used])
     ok = bool(rms_stored < MAX_RMS)
     report = {"images": str(Path(images)), "intrinsics": str(Path(intrinsics)), "n_views": len(views),
-              "skipped": dict(skipped), "rms_stored_px": round(float(rms_stored), 4), "rms_ok": ok, "params": {}}
+              "skipped": dict(skipped), "rms_stored_px": round(float(rms_stored), 4), "rms_ok": ok, "params": {},
+              "shape": shape_used}
     flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
              | cv2.CALIB_FIX_TANGENT_DIST)
     crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 200, 1e-12)
@@ -1447,6 +1478,29 @@ def test_failures(work):
     expect("NaN" not in text and json.loads(text)["rms_px"] == cal["rms_px"]
            and not list(mixed.glob(".*.tmp")) and any(x.startswith("views") for x in lines),
            "the result written in one step, strict JSON, reported through log")
+    left = run_calibrate(mixed, None, None, BOARD["square"], log=lines.append,
+                         skip={"synth_002.jpg": "check", "synth_003.jpg": "check"})
+    expect(left["skipped"].get("synth_002.jpg") == left["skipped"].get("synth_003.jpg") == "check"
+           and not {"synth_002.jpg", "synth_003.jpg"} & set(left["per_view_all_px"])
+           and left["skipped"].get("synth_000.jpg") == "size",
+           "photos the app's check put aside: left out before detection, said as skipped with their reason")
+    # outliers dropped one at a time: the worst first, the errors judged again; never below MIN_VIEWS
+    base, _, bsize = detect(find_images(work / "synth")[:12], make_board(BOARD["square"]))
+    rng = np.random.default_rng(7)
+
+    def noisy(names, sigmas):
+        out = {k: (o, i.copy()) for k, (o, i) in base.items()}
+        for k, s in zip(names, sigmas):
+            out[k] = (out[k][0], (out[k][1] + rng.normal(0, s, out[k][1].shape)).astype(np.float32))
+        return out
+    names = sorted(base)
+    two = calibrate(noisy(names[:2], (1.0, 2.0)), bsize)
+    few = calibrate({k: v for k, v in noisy(names[:2], (1.0, 2.0)).items() if k in names[:9]}, bsize)
+    many = calibrate(noisy(names[:5], (1.0, 1.2, 1.4, 1.6, 1.8)), bsize)
+    expect(two["dropped"] == sorted(names[:2]) and few["dropped"] == [names[1]] and few["n_views"] == MIN_VIEWS
+           and len(many["dropped"]) == int(OUTLIER_MAX_SHARE * 12) and set(many["dropped"]) <= set(names[:5]),
+           f"outliers dropped one at a time: two bad photos of 12 both ({two['dropped']}), of 9 the worse one only, "
+           f"8 left ({few['dropped']}), of five bad at most a quarter ({many['dropped']})")
     held = (turned.shape[1], turned.shape[0])
     views, _, size = detect(find_images(mixed), make_board(BOARD["square"]), prefer=held)
     expect(size == held and list(views) == ["synth_000.jpg"],
@@ -1553,7 +1607,8 @@ def test_quality(work, cal, real=None):
            f"{e0.max():.3f} -> {e1.max():.3f} px ({len(e1)} corners)")
     # a board bent as a 3000R monitor
     synth(work / "curved", 16, seed=4, bend_radius=3000.0, log=quiet)
-    c = run_calibrate(work / "curved", None, work / "curved" / "truth.json", BOARD["square"], log=quiet)
+    c = run_calibrate(work / "curved", work / "curved_intrinsics.json", work / "curved" / "truth.json",
+                      BOARD["square"], log=quiet)
     sag = (BOARD["squares"][0] * BOARD["square"]) ** 2 / (8 * 3000.0)
     s, fx = c["shape"], c["error"]["fx_rel"]
     flat_fx = (1 + fx) / (1 + s["focal_shift"]) - 1
@@ -1562,6 +1617,22 @@ def test_quality(work, cal, real=None):
            f"a board bent as a 3000R monitor: not flat, bends {s['sag_mm']:.2f} mm (truly {sag:.2f}), error "
            f"{s['rms_flat_px']:.3f} -> {c['rms_px']:.3f} px; focal length off the truth {100 * fx:+.3f} % with the "
            f"shape, {100 * flat_fx:+.2f} % without; issues {c['issues']}")
+    # the session check of that calibration, on new photos of the same bent board: the board with its stored shape
+    synth(work / "curved_check", 10, seed=6, bend_radius=3000.0, prefix="check", log=quiet)
+    ok_c, rep = run_check(work / "curved_check", work / "curved_intrinsics.json", BOARD["square"], log=quiet)
+    flat_ref = json.loads((work / "curved_intrinsics.json").read_text(encoding="utf-8"))
+    flat_ref["shape"] = {**flat_ref["shape"], "flat": True}
+    write_json_atomic(work / "curved_as_flat.json", flat_ref)
+    ok_f, rep_f = run_check(work / "curved_check", work / "curved_as_flat.json", BOARD["square"], log=quiet)
+    flat_ref["shape"]["flat"] = False
+    flat_ref["board"] = {**flat_ref["board"], "squares": [12, 9]}
+    write_json_atomic(work / "curved_other.json", flat_ref)
+    other = run_check(work / "curved_check", work / "curved_other.json", BOARD["square"], log=quiet)
+    expect(ok_c and rep["shape"] == "stored" and rep["rms_stored_px"] < MAX_RMS and rep_f["shape"] == "flat"
+           and rep_f["rms_stored_px"] > 2 * rep["rms_stored_px"] and other[1]["shape"] == "other_board",
+           f"the session check of a bent board's calibration takes the board with its stored shape: passes, "
+           f"{rep['rms_stored_px']:.3f} px (as a plane {rep_f['rms_stored_px']:.3f} px, "
+           f"{'passes' if ok_f else 'fails'}); a board of other squares stays a plane")
     # the optical centre moving between the photos, as a phone held in the hand
     synth(work / "held", 16, seed=5, centre_sd=15.0, log=quiet)
     h = run_calibrate(work / "held", None, None, BOARD["square"], log=quiet)

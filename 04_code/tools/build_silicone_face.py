@@ -76,7 +76,7 @@ FACE_START = (0.0, -30.0, 48.0)  # rough start of the face on the skull (Blender
 SCREW_GREY = (0.03, 0.03, 0.03, 1.0)  # dark grey (linear) of the M5 and M3 screws
 RESIN_SRGB = (242, 152, 112)  # cured Reschimica RPRO 10, sampled from the product photo
 BONE_SRGB = (227, 218, 201)   # bone PLA
-# Cuts of the face, in the skull frame (mm), from Federico's marks on the screenshots of 11/10:
+# Cuts of the face, in the skull frame (mm), from marks drawn by hand on screenshots of the face:
 NECK_CUT = (-64.165, 0.60485)  # neck corners: removed below Z = z0 + m |X| (the two marks averaged, symmetric)
 BACK_CUT = (-39.206, 0.05106)  # back of the face: removed behind Y = y0 + k Z
 

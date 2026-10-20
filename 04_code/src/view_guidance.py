@@ -25,6 +25,7 @@ angle; camera azimuths about the aim point of the bench map to arm angles by lin
 import time
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 import correct as co
@@ -63,10 +64,11 @@ def target_weight(targets, centre, mode):
 
 
 def board_corners(cand, board=BOARD, margin_px=10):
-    """ChArUco corners inside the image (margin_px from the border) when the board faces the camera, else 0."""
+    """ChArUco corners inside the image (margin_px from the border) when the board faces the camera, else 0. squares:
+    n for an n x n board, or [nx, ny]."""
     n, sq = board["squares"], board["square_mm"]
-    g = np.arange(1, n) * sq
-    P = np.stack(np.meshgrid(g, g), -1).reshape(-1, 2)
+    nx, ny = (n, n) if np.isscalar(n) else n
+    P = np.stack(np.meshgrid(np.arange(1, nx) * sq, np.arange(1, ny) * sq), -1).reshape(-1, 2)
     Xc = np.c_[P, np.zeros(len(P))] @ cand.T_C_M[:3, :3].T + cand.T_C_M[:3, 3]
     if np.mean(Xc, 0) @ cand.T_C_M[:3, 2] <= 0 or np.any(Xc[:, 2] <= 0):   # z of the board into it, away from the camera
         return 0
@@ -87,15 +89,42 @@ class _Rendered:
         return self.r
 
 
-def fisher(renderer, cand, T_M_B, mode="a1", center=None, sigma_mm=SIGMA_MM, kappa=KAPPA):
-    """Fisher information (p x p) of one candidate at the registration T_M_B and its number of outline points."""
+class NormalField:
+    """Stand-in for correct.Field when the observation is the render itself (the expected residual is zero): distance
+    0 and, as its gradient, the outward unit normal of the mask from its smoothed gradient, on the box around the mask.
+    Tens of times quicker than the two distance transforms of correct.Field, for the live view."""
+
+    def __init__(self, mask, sigma_px=1.5, pad=8):
+        m = np.asarray(mask)
+        x, y, w, h = cv2.boundingRect((m > 0).astype(np.uint8))
+        H, W = m.shape
+        self.x0, self.y0 = max(x - pad, 0), max(y - pad, 0)
+        c = (m[self.y0:min(y + h + pad, H), self.x0:min(x + w + pad, W)] > 0).astype(np.float32)
+        b = cv2.GaussianBlur(c, (0, 0), sigma_px)
+        gx, gy = cv2.Sobel(b, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(b, cv2.CV_32F, 0, 1, ksize=3)
+        n = np.sqrt(gx * gx + gy * gy)
+        n = np.where(n > 1e-6, n, np.inf)
+        self.img = np.dstack([np.zeros_like(b), -gx / n, -gy / n]).astype(np.float32)
+
+    sample = co.Field.sample
+
+
+def fisher(renderer, cand, T_M_B, mode="a1", center=None, sigma_mm=SIGMA_MM, kappa=KAPPA, fast=False):
+    """Fisher information (p x p) of one candidate at the registration T_M_B and its number of outline points. fast:
+    the outline normals from the smoothed mask (NormalField) and no edges rendered, for the live view."""
     T = cand.T_C_M @ T_M_B
-    r = renderer.render(cand.K, cand.dist, T, cand.size)
+    if fast:
+        try:
+            r = renderer.render(cand.K, cand.dist, T, cand.size, edges=False)
+        except TypeError:           # a renderer without the edges switch
+            r = renderer.render(cand.K, cand.dist, T, cand.size)
+    else:
+        r = renderer.render(cand.K, cand.dist, T, cand.size)
     p = 3 if mode == "a1" else 6
     if not r.mask.any():
         return np.zeros((p, p)), 0
-    pb = co.Problem(_Rendered(renderer, r), [co.View(cand.K, cand.T_C_M, r.mask, cand.dist, cand.ignore)], T_M_B, mode,
-                    center)
+    view = co.View(cand.K, cand.T_C_M, r.mask, cand.dist, cand.ignore, sdf=NormalField(r.mask) if fast else None)
+    pb = co.Problem(_Rendered(renderer, r), [view], T_M_B, mode, center)
     data = pb.setup(np.eye(3), np.zeros(3))
     _, J = pb.residuals(np.eye(3), np.zeros(3), data)
     return J.T @ J / (kappa * sigma_mm ** 2), len(J)

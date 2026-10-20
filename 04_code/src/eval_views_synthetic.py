@@ -9,7 +9,7 @@ Source "mandible" (fallback): the renders of render_phone_views.py in synthetic_
 frame M, so the true registration is the identity), 64 placeholder targets.
 Truth: the registration of the scene T_M_B. Candidates: the phone along the arc, camera azimuth AZIMUTHS (35 to 95 deg
 every 5); T_C_M = T_C_B . T_M_B^-1. Observed mask of each candidate: the anatomy rendered (mesh_overlay.py, or
-gl_overlay.py on the GPU with --renderer gl, about 3 times faster) at the truth, its outline moved by the smooth random field of eval_correction_synthetic.py, minus the occluders in front of it
+gl_overlay.py on the GPU, the default, about 3 times faster than --renderer cpu) at the truth, its outline moved by the smooth random field of eval_correction_synthetic.py, minus the occluders in front of it
 (depth test on the visibility buffers); the occluders, dilated by DILATE_PX, are the ignore mask of correct.py.
 Perturbations as in eval_correction_synthetic.py (a1: up to 5 deg about the ball centre; rigid: up to 5 deg and 5 mm),
 stale registration T_M_B0 = T_M_B . P.
@@ -18,7 +18,8 @@ Strategies per sample, the same noisy masks for all:
 - random: the first K of a random order of the eligible candidates;
 - fixed: the photo positions of the protocol (azimuths PHOTO_AZ): 1 (a random one), 2 (1+3 or 2+4), 4;
 - all: every eligible candidate.
-Each set is corrected with correct.py (same settings as eval_correction_synthetic.py). The first TIMING samples of
+Each set is corrected with correct.py (same settings as eval_correction_synthetic.py; rigid needs two views at least,
+correct.MIN_VIEWS, so its one-view sets are left out). The first TIMING samples of
 each perturbation run one at
 a time in this process: their times go in the table; the others run in parallel worker processes.
 
@@ -27,9 +28,10 @@ Writes
   strategy and K;
 - 05_results/views_synthetic.csv: per perturbation, strategy and K: TRE after the correction (median, 95th percentile,
   maximum), share below THRESHOLDS, predicted RMS TRE of the plan, guided views most often chosen, guided against
-  random and fixed with the same K on the same samples (paired); per perturbation and strategy: views needed for the
-  95th percentile of the TRE to go below each threshold; agreement of the predicted RMS TRE with the TRE after the
-  correction (Spearman, ratio).
+  random and fixed with the same K on the same samples (paired; Wilcoxon p and its Holm adjustment over the table);
+  per perturbation and strategy: views needed for the 95th percentile of the TRE to go below each threshold;
+  agreement of the predicted RMS TRE with the TRE after the correction (Spearman, ratio; each corrected view set of a
+  sample once).
 
     python 04_code/src/eval_views_synthetic.py [--source face|mandible] [--renderer cpu|gl] [--samples N]
                                                [--workers N] [--timing N] [--summary]
@@ -180,6 +182,7 @@ def run_sample(job):
            [("random", k, rnd[:k]) for k in range(1, min(K_MAX, len(rnd)) + 1)] + \
            [("fixed", 1, [one]), ("fixed", 2, list(pair)), ("fixed", 4, ph)] + \
            ([("all", len(pl.eligible), pl.eligible)] if pl.eligible else [])     # no eligible view: no "all" set
+    sets = [x for x in sets if co.allowed(kind, len(x[2]))]     # never 6 degrees of freedom from one view
     done, rows = {}, []
     for strategy, k, sel in sets:
         key = tuple(sorted(sel))
@@ -208,9 +211,9 @@ def paired(a, b):
     Wilcoxon signed-rank p (two-sided; equal pairs, the same views chosen, left out)."""
     d = np.asarray(a) - np.asarray(b)
     try:
-        p = f"{wilcoxon(d[d != 0]).pvalue:.3f}" if np.sum(d != 0) >= 6 else ""
+        p = float(wilcoxon(d[d != 0]).pvalue) if np.sum(d != 0) >= 6 else float("nan")
     except ValueError:
-        p = ""
+        p = float("nan")
     return f"{np.median(d):.3f}", f"{np.mean(d < 0):.2f}", p
 
 
@@ -258,10 +261,16 @@ def summarize(rows):
                 need = {"key": f"{kind}_{strategy}_needed"}
                 need.update({f"needed_{t:g}mm".replace(".", "p"): first_below(p95, t) for t in THRESHOLDS})
                 out.append(need)
-        pred, ta = np.array([r["pred_rms_mm"] for r in g]), np.array([r["tre_after_mm"] for r in g])
-        out.append({"key": f"{kind}_criterion", "n": len(g), "spearman_pred_vs_tre": f"{spearmanr(pred, ta)[0]:.2f}",
+        # one row per corrected view set: the strategies often pick the same set, which is corrected once
+        u = list({(r["sample"], tuple(sorted(r["views"].split("+"), key=float))): r for r in g}.values())
+        pred, ta = np.array([r["pred_rms_mm"] for r in u]), np.array([r["tre_after_mm"] for r in u])
+        out.append({"key": f"{kind}_criterion", "n": len(u), "spearman_pred_vs_tre": f"{spearmanr(pred, ta)[0]:.2f}",
                     "tre_over_pred_median": f"{np.median(ta / pred):.2f}",
                     "tre_over_pred_p95": f"{np.percentile(ta / pred, 95):.2f}"})
+    # many comparisons: Holm-adjusted p over all of them (the family of this table)
+    cols = [(r, f"vs_{o}_p") for r in out for o in ("random", "fixed") if f"vs_{o}_p" in r]
+    for (r, c), q in zip(cols, ecs.holm([r[c] for r, c in cols])):
+        r[c], r[c + "_holm"] = ("" if not np.isfinite(x) else f"{x:.3f}" for x in (r[c], q))
     ecs.table(RESULTS / "views_synthetic.csv", out)
     return out
 
@@ -269,7 +278,7 @@ def summarize(rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", choices=("face", "mandible"), default="face" if face_available() else "mandible")
-    ap.add_argument("--renderer", choices=("cpu", "gl"), default="cpu", help="mesh_overlay.py or gl_overlay.py (GPU)")
+    ap.add_argument("--renderer", choices=("cpu", "gl"), default="gl", help="gl_overlay.py (GPU) or mesh_overlay.py")
     ap.add_argument("--samples", type=int, default=60, help="samples per perturbation")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     ap.add_argument("--timing", type=int, default=2, help="samples per perturbation run one at a time, for the times")

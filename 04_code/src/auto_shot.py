@@ -57,7 +57,6 @@ LOOK_PX = 1280          # the preview is looked at with its long side at most th
 MIN_SEEN = 6            # corners to place the board's plane
 PHOTO_ASPECT = 4 / 3    # the photo's width over its height (the preview of the camera app, upright, is 3:4)
 DARK = 24               # a grey level below this belongs to the camera app's dark bands
-PREVIEW_PORT = 27185    # the tunnel of the mirrored screen (the live stream has its own)
 PREVIEW_SIZE = 1600     # the mirrored screen's long side
 PREVIEW_FPS = 15
 PREVIEW_BIT_RATE = 6_000_000
@@ -324,7 +323,7 @@ def preview_stream(serial=None, **kw):
         preview on the screen is what the photo will be. Nothing on the phone is changed (no rotation lock)."""
 
         def __init__(self, serial=None, **kw):
-            kw.setdefault("port", PREVIEW_PORT)
+            # its tunnel on a port of its own, as every stream's (live.PhoneStream, phone_link.forward_port)
             kw.setdefault("bit_rate", PREVIEW_BIT_RATE)
             super().__init__(serial, **kw)
             self.lock_rotation = False

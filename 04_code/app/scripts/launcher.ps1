@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   The launcher behind the ImpactGuide icon on the desktop.
 
@@ -11,28 +11,74 @@
       waits for it in a small window, looking on every drive letter;
     - it finds an interpreter that can open the window, and remembers it;
     - it does not open a second window: it brings the open one to the front;
-    - if the app dies on startup it shows the error.
+    - if the app dies on startup it says so in plain words, in the app's
+      language, with a button that opens the log; what the app wrote on its
+      way out is kept in last-error.txt and launch.log, never on screen.
 
   Checks (they do not start the app):
     powershell -File launcher.ps1 -Diag
     powershell -File launcher.ps1 -WhichPython
+  -NoWindow writes what the small window would say instead of showing it.
 #>
 param(
     [string]$App = "",         # impactguide_app.py to open; without it, target.json
     [int]$WaitSec = 900,       # how long to wait for the drive, at most
     [switch]$Diag,             # say what is visible from here, and stop
-    [switch]$WhichPython       # print the interpreter it would use, and stop
+    [switch]$WhichPython,      # print the interpreter it would use, and stop
+    [switch]$NoWindow          # the small window's words written out instead of shown
 )
 
 $ErrorActionPreference = 'Stop'
 
-# LAUNCHER-VERSION: 2
+# LAUNCHER-VERSION: 3
 # install_shortcut.ps1 reads the number above: when it changes, the local copy is rewritten.
 
 $StateDir = Join-Path $env:LOCALAPPDATA 'ImpactGuide\launch'
 $LogFile  = Join-Path $StateDir 'launch.log'
 $ErrFile  = Join-Path $StateDir 'last-error.txt'
 $PyFile   = Join-Path $StateDir 'python.txt'
+$PrefsFile = Join-Path $env:LOCALAPPDATA 'ImpactGuide\preferences.json'
+
+# The small window's words in the app's six languages; the language is the one chosen in the app
+# (preferences.json), else Windows', else English.
+$Words = @{
+    en = @{ wait = 'Waiting for Google Drive to mount the project folder. It can take a few minutes after a restart.'
+            failHead = 'ImpactGuide did not start'; fail = 'Something went wrong while it started. What happened is in the log.'
+            noPython = 'No Python with the packages of 04_code/requirements.txt was found.'
+            close = 'Close'; cancel = 'Cancel'; log = 'Open the log' }
+    it = @{ wait = 'In attesa che Google Drive monti la cartella del progetto. Dopo un riavvio può volerci qualche minuto.'
+            failHead = 'ImpactGuide non si è avviata'; fail = "Qualcosa non è andato durante l'avvio. Cosa è successo è nel log."
+            noPython = 'Nessun Python con i pacchetti di 04_code/requirements.txt.'
+            close = 'Chiudi'; cancel = 'Annulla'; log = 'Apri il log' }
+    fr = @{ wait = "En attente du montage du dossier du projet par Google Drive. Après un redémarrage, cela peut prendre quelques minutes."
+            failHead = "ImpactGuide n'a pas démarré"; fail = "Un problème est survenu au démarrage. Le journal indique ce qui s'est passé."
+            noPython = 'Aucun Python avec les paquets de 04_code/requirements.txt.'
+            close = 'Fermer'; cancel = 'Annuler'; log = 'Ouvrir le journal' }
+    es = @{ wait = 'Esperando a que Google Drive monte la carpeta del proyecto. Tras un reinicio puede tardar unos minutos.'
+            failHead = 'ImpactGuide no se inició'; fail = 'Algo falló al iniciarse. Lo ocurrido está en el registro.'
+            noPython = 'No hay ningún Python con los paquetes de 04_code/requirements.txt.'
+            close = 'Cerrar'; cancel = 'Cancelar'; log = 'Abrir el registro' }
+    de = @{ wait = 'Warten, bis Google Drive den Projektordner bereitstellt. Nach einem Neustart kann das einige Minuten dauern.'
+            failHead = 'ImpactGuide wurde nicht gestartet'; fail = 'Beim Start ist etwas schiefgegangen. Was passiert ist, steht im Protokoll.'
+            noPython = 'Kein Python mit den Paketen aus 04_code/requirements.txt gefunden.'
+            close = 'Schließen'; cancel = 'Abbrechen'; log = 'Protokoll öffnen' }
+    zh = @{ wait = '正在等待 Google Drive 挂载项目文件夹。重启后可能需要几分钟。'
+            failHead = 'ImpactGuide 未能启动'; fail = '启动时出了问题，详情见日志。'
+            noPython = '未找到装有 04_code/requirements.txt 中软件包的 Python。'
+            close = '关闭'; cancel = '取消'; log = '打开日志' }
+}
+
+function Get-Words {
+    $lang = ''
+    try {
+        if (Test-Path -LiteralPath $PrefsFile) {
+            $lang = "$((Get-Content -LiteralPath $PrefsFile -Raw -Encoding UTF8 | ConvertFrom-Json).lang)"
+        }
+    } catch { }
+    if (-not $Words.ContainsKey($lang)) { $lang = (Get-UICulture).TwoLetterISOLanguageName }
+    if (-not $Words.ContainsKey($lang)) { $lang = 'en' }
+    return $Words[$lang]
+}
 
 function Write-Log([string]$line) {
     try {
@@ -182,7 +228,13 @@ function Get-Theme {
     return $t
 }
 
-function Show-Box([string]$head, [string]$text, [bool]$isError, $shared) {
+function Show-Box([string]$head, [string]$text, [bool]$isError, $shared, [string]$logPath = '') {
+    $w = Get-Words
+    if ($NoWindow) {
+        $buttons = @($(if ($logPath) { $w.log }), $(if ($shared) { $w.cancel } else { $w.close })) | Where-Object { $_ }
+        Write-Output ("window: {0} | {1} | {2}" -f $head, $text, ($buttons -join ', '))
+        return
+    }
     try {
         Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         $t = Get-Theme
@@ -200,14 +252,25 @@ function Show-Box([string]$head, [string]$text, [bool]$isError, $shared) {
           <TextBlock x:Name="Sub" Foreground="$fg" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap"/>
         </StackPanel>
       </StackPanel>
-      <Button x:Name="Main" Content="Close" HorizontalAlignment="Right" Margin="0,12,0,0" Padding="14,4,14,4"
-              Background="$($t.control)" Foreground="$($t.text)" BorderThickness="0"/>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <Button x:Name="Log" Padding="14,4,14,4" Margin="0,0,8,0" Visibility="Collapsed"
+                Background="$($t.control)" Foreground="$($t.text)" BorderThickness="0"/>
+        <Button x:Name="Main" Padding="14,4,14,4" Background="$($t.control)" Foreground="$($t.text)" BorderThickness="0"/>
+      </StackPanel>
     </StackPanel>
   </Border>
 </Window>
 "@
+        $words = $w
         $w = [Windows.Markup.XamlReader]::Parse($xaml)
         $w.FindName('Sub').Text = $text
+        $w.FindName('Main').Content = $words.close
+        if ($logPath) {      # what the app wrote on its way out, opened as a text file: never shown here
+            $lb = $w.FindName('Log')
+            $lb.Content = $words.log
+            $lb.Visibility = 'Visible'
+            $lb.Add_Click({ try { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $logPath + '"') } catch { } })
+        }
         $ico = Join-Path $StateDir 'icon.ico'
         if (Test-Path -LiteralPath $ico) {
             $img = New-Object Windows.Media.Imaging.BitmapImage
@@ -217,7 +280,7 @@ function Show-Box([string]$head, [string]$text, [bool]$isError, $shared) {
         $w.Add_MouseLeftButtonDown({ try { $w.DragMove() } catch { } })
         $w.FindName('Main').Add_Click({ if ($shared) { $shared.Stop = $true }; $w.Close() })
         if ($shared) {
-            $w.FindName('Main').Content = 'Cancel'
+            $w.FindName('Main').Content = $words.cancel
             $timer = New-Object Windows.Threading.DispatcherTimer
             $timer.Interval = [TimeSpan]::FromMilliseconds(300)
             $timer.Add_Tick({ if ($shared.Found -or $shared.Stop) { $timer.Stop(); $w.Close() } })
@@ -288,7 +351,7 @@ try {
         $job = Start-Search $target $shared
         Start-Sleep -Milliseconds 1200
         if (-not $shared.Found -and -not $shared.Stop) {
-            Show-Box 'ImpactGuide' 'Waiting for Google Drive to mount the project folder. It can take a few minutes after a restart.' $false $shared
+            Show-Box 'ImpactGuide' (Get-Words).wait $false $shared
         }
         $shared.Stop = $true
         try { [void]$job.ps.EndInvoke($job.handle) } catch { } finally { $job.ps.Dispose(); $job.rs.Close() }
@@ -305,7 +368,8 @@ try {
     $py = Find-Python $appPath
     if (-not $py) {
         Write-Log 'no interpreter with slantui, OpenCV and PyQt6-WebEngine'
-        Show-Box 'ImpactGuide did not start' 'No Python found with the packages of 04_code/requirements.txt. Install them, or set IMPACTGUIDE_PYTHON.' $true $null
+        $w = Get-Words
+        Show-Box $w.failHead $w.noPython $true $null $LogFile
         return
     }
     $pyw = Join-Path (Split-Path -Parent $py) 'pythonw.exe'
@@ -317,6 +381,7 @@ try {
     [void]$ready.Reset()
     $proc = Start-Process -FilePath $pyw -ArgumentList ('"' + $appPath + '"') -WorkingDirectory $StateDir `
                           -PassThru -RedirectStandardError $ErrFile
+    $null = $proc.Handle     # held from now on: else its exit code is lost once it ends
     Write-Log "started pid $($proc.Id): $pyw"
     $t0 = Get-Date
     while (((Get-Date) - $t0).TotalSeconds -lt 120) {
@@ -324,9 +389,11 @@ try {
         $proc.Refresh()
         if ($proc.HasExited) {
             $tail = ''
-            try { $tail = (Get-Content -LiteralPath $ErrFile -Tail 12) -join "`n" } catch { }
-            Write-Log "exited with code $($proc.ExitCode)"
-            Show-Box 'ImpactGuide did not start' ("Exit code $($proc.ExitCode).`n" + $tail) $true $null
+            try { $tail = (Get-Content -LiteralPath $ErrFile -Tail 12) -join ' | ' } catch { }
+            # the app's own words on its way out go to the log only; the window says it in plain words
+            Write-Log "exited with code $($proc.ExitCode): $tail"
+            $w = Get-Words
+            Show-Box $w.failHead $w.fail $true $null $ErrFile
             break
         }
         Start-Sleep -Milliseconds 150
