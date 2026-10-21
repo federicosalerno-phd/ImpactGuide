@@ -155,6 +155,8 @@ const CAL = {
       : s.moved ? T('cal.ph.stand') : '';
     $('calPhWarn').textContent = warn;
     $('calPhWarn').classList.toggle('hidden', !warn);
+    // the bench plan: the bench in 3D with the board's holder on (ui/18-twin.js)
+    $('calTwin').classList.toggle('hidden', !bench || typeof TWIN === 'undefined' || TWIN.failed);
     $('calProNote').classList.toggle('hidden', s.mode !== 'photo');
 
     // the stage: the board (on this monitor) or the live picture, beside the guide

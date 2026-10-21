@@ -1892,6 +1892,72 @@ TWIN_STEPS = r"""
   return JSON.stringify(out);
 })()
 """
+# The phone's lens in the twin's view from the phone (ui/18-lens.js): a calibration with a plain phone's distortion
+# laid on, the view from the phone; points of the world on rays through a grid of the photo out to its corners, where
+# the bent frame shows each (read from the shader) and where the page puts each (labels, clicks). LENS_JS sets it,
+# LENS_READ reads it; lens_errors() holds them against OpenCV's projectPoints.
+LENS_CAL = {"size": [4080, 3072], "K": [[3050.0, 0.0, 2051.0], [0.0, 3046.0, 1529.0], [0.0, 0.0, 1.0]],
+            "dist": [0.11, -0.32, 0.001, -0.0007, 0.29]}
+LENS_JS = "TWIN.lensTest = " + json.dumps(LENS_CAL) + "; TWIN.look('phone1')"
+LENS_READ = r"""
+(function () {
+  const v = TWIN.viewer, L = LENS.of(TWIN.lensTest), pts = [];
+  TWIN.look('phone1', true);          // (there at once, whatever came in between)
+  v.place(v.shown);
+  v.eye.updateMatrixWorld();
+  const on = TWIN.probe().lens;
+  [0.02, 0.25, 0.5, 0.75, 0.98].forEach(function (a) { [0.02, 0.3, 0.5, 0.7, 0.98].forEach(function (b) {
+    const p = LENS.ideal(L, a * L.w - 0.5, b * L.h - 0.5), d = 300 + 400 * a * b;
+    pts.push(new THREE.Vector3(p[0] * d, -p[1] * d, -d).applyMatrix4(v.eye.matrixWorld).toArray());
+  }); });
+  const m = LENS.measure(v, pts);
+  v.o.changed();                      // turned by hand: the free view, straight
+  const off = !TWIN.probe().lens && TWIN.view === '';
+  TWIN.lensTest = null; v.draw();
+  return JSON.stringify({ on: on, off: off, pts: pts, m: m });
+})()
+"""
+
+
+# The board's holder on the post in the head's place (ui/18-twin.js setMount), the board taken to seat 2, then the head
+# again; nothing when the model has no holder (made before it was in the scene)
+BOARD_READ = r"""
+(function () {
+  if (!TWIN.hasBoard()) return JSON.stringify({ has: false });
+  const at = function () { const p = TWIN.probe(); return [p.mount, p.seat, p.headShown, p.boardShown, p.holderA || p.holderB, p.boardAt, p.swing]; };
+  TWIN.setMount('board', 0); const s1 = at();
+  $('twSeats').children[1].click(); const s2 = at();
+  $('twMount').children[0].click(); const h = at();
+  return JSON.stringify({ has: true, s1: s1, s2: s2, head: h, seats: $('twSeats').children.length });
+})()
+"""
+
+
+def lens_errors(got: dict) -> dict:
+    """The twin's lens against OpenCV: each point projected with LENS_CAL from the eye the page drew with, put in the
+    box as the page fits the photo (centred, all of it), and the worst distance (photo px) to where the bent frame
+    shows it and to where the page puts it."""
+    import cv2
+    import numpy as np
+    m = got.get("m") or {}
+    if not m:
+        return {"n": 0, "shown": float("inf"), "put": float("inf")}
+    M = np.array(m["eye"], float).reshape(4, 4).T                   # three's matrices are by columns
+    X = np.array(got["pts"], float)
+    C = (X - M[:3, 3]) @ M[:3, :3]                                   # in the eye (three's: y up, looking down -z)
+    C = C * [1, -1, -1]                                              # OpenCV's: y down, looking down +z
+    K, dist = np.array(LENS_CAL["K"]), np.array(LENS_CAL["dist"])
+    uv = cv2.projectPoints(C.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, dist)[0].reshape(-1, 2)
+    f = m["fit"]
+    box = np.column_stack([f["ox"] + (uv[:, 0] + 0.5) * f["s"], f["oy"] + (uv[:, 1] + 0.5) * f["s"]])
+    worst = {}
+    for key in ("shown", "put"):
+        at = m["shown"] if key == "shown" else m["fwd"]
+        d = [np.hypot(*(np.array(a) - b)) / f["s"] if a is not None else float("inf") for a, b in zip(at, box)]
+        worst[key] = float(max(d))
+    inside = (uv[:, 0] > -0.5) & (uv[:, 0] < LENS_CAL["size"][0]) & (uv[:, 1] > -0.5) & (uv[:, 1] < LENS_CAL["size"][1])
+    bend = float(np.max(np.hypot(*(uv - (C[:, :2] / C[:, 2:] * [K[0, 0], K[1, 1]] + K[:2, 2])).T)))
+    return {"n": len(uv), "inside": int(inside.sum()), "bend_px": bend, **worst}
 
 
 # The sweep: home, every step of every module, its Advanced part open, every kind of step of a trial, the Phone
@@ -2325,6 +2391,8 @@ def test_ui(work, shots):
                                       " (1 - t.y) / 2 * v.h)); })()", 900, None),
             ("ui_08u_twin_top", "TWIN.look('top')", 1200, ("twin_top", "JSON.stringify(TWIN.probe())")),
             ("-twin_phone", "TWIN.look('phone2')", 1000, ("twin_phone", "JSON.stringify(TWIN.probe())")),
+            ("-twin_lens", LENS_JS, 1500, ("twin_lens", LENS_READ)),
+            ("-twin_board", "", 300, ("twin_board", BOARD_READ)),
             ("ui_08v_twin_scans", "go('results', 'scans'); setTimeout(function () { TWIN.pick = '';"
                                   " TWIN.open('results'); }, 400)", 2900, ("twin_scans", "JSON.stringify(TWIN.probe())")),
             ("ui_08w_twin_gain", "$('twGain').value = '12'; $('twGain').dispatchEvent(new Event('input'))", 1000,
@@ -2666,6 +2734,23 @@ def test_ui(work, shots):
                and t_phone["armAz"] == 70 and t_phone["fov"] > 40,
                f"window: the twin from above, and from the phone at 70° with the phone's field of view "
                f"({t_phone and t_phone['fov']}°)")
+        t_lens = read("twin_lens") or {}
+        le = lens_errors(t_lens)
+        expect(t_lens.get("on") and t_lens.get("off") and le["n"] == le["inside"] == 25 and le["bend_px"] > 20
+               and le["shown"] < 0.5 and le["put"] < 0.5,
+               f"window: the twin from the phone through its lens, as OpenCV projects {le['n']} points out to the "
+               f"photo's corners (bent up to {le.get('bend_px', 0):.0f} px): worst {le['shown']:.3f} px in the "
+               f"frame, {le['put']:.3f} px where the page puts them; straight once turned by hand")
+        tb = read("twin_board") or {}
+        if not tb.get("has"):
+            print("skip  window: the twin's board holder, not in this model (made before it)", flush=True)
+        else:
+            s1, s2, hd = tb["s1"], tb["s2"], tb["head"]
+            expect(s1[:5] == ["board", 0, False, True, False] and s2[:4] == ["board", 1, False, True]
+                   and s2[5] != s1[5] and hd[:5] == ["head", 1, True, False, True] and tb["seats"] == 3
+                   and s1[6] == 30,
+                   f"window: the twin with the board's holder on the post in the head's place, the board moved to "
+                   f"seat 2 ({s1[5]} -> {s2[5]} mm), the pendulum hooked up; the head again")
         size = lambda p: sum(x * x for x in (p or {}).get("marker") or [0]) ** 0.5  # noqa: E731
         expect(t_scans and t_scans["mode"] == "results" and t_scans["points"] == 7 and t_gain and t_gain["ghost"]
                and t_gain["gain"] == 12 and size(t_gain) > 5 * size(t_scans) > 0,

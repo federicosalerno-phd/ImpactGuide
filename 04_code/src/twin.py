@@ -355,14 +355,32 @@ def versions(phone_print: str, dataset: Path | None = None, network: Path | None
 
 
 # ── the phone's field of view ──────────────────────────────────────────────
-def phone_view(calib: Path | None) -> dict:
-    """Vertical field of view (degrees) and aspect of the phone's photos: the saved calibration, else nominal."""
-    d = read_json(Path(calib) / "intrinsics_photo.json") if calib else None
+def lens_of(d: dict | None) -> dict | None:
+    """A saved calibration as the twin's phone view bends its picture with it: the image size, K (3 x 3) and the
+    distortion (k1 k2 p1 p2 k3, and k4 k5 k6 of the rational model when calibrated, as OpenCV has them), its
+    vertical field of view (degrees) and aspect; None when it is not a usable calibration."""
     try:
-        (w, h), fy, src = d["image_size"], float(d["K"][1][1]), "calibration"
-    except (TypeError, KeyError, IndexError, ValueError):
+        (w, h), K = d["image_size"], [[float(x) for x in row] for row in d["K"]]
+        dist = [float(x) for x in np.ravel(np.asarray(d.get("dist") or [], dtype=float))]
+        if not (w > 0 and h > 0 and K[0][0] > 0 and K[1][1] > 0) or not all(map(math.isfinite, dist + K[0] + K[1])):
+            return None
+    except (TypeError, KeyError, IndexError, ValueError, AttributeError):
+        return None
+    dist = (dist + [0.0] * 8)[:8]
+    return {"size": [int(w), int(h)], "K": K, "dist": dist,
+            "fov_y": round(math.degrees(2 * math.atan(h / 2 / K[1][1])), 3), "aspect": round(w / h, 4)}
+
+
+def phone_view(calib: Path | None) -> dict:
+    """Vertical field of view (degrees) and aspect of the phone's photos: the saved calibration, else nominal; and
+    the lens of each mode the twin shows (photo, video: lens_of, None without its calibration)."""
+    lens = {m: lens_of(read_json(Path(calib) / f"intrinsics_{m}.json") if calib else None) for m in ("photo", "video")}
+    if lens["photo"]:
+        (w, h), fy, src = lens["photo"]["size"], lens["photo"]["K"][1][1], "calibration"
+    else:
         (w, h), fy, src = NOMINAL_PHOTO[0], NOMINAL_PHOTO[1], "nominal"
-    return {"fov_y": round(math.degrees(2 * math.atan(h / 2 / fy)), 3), "aspect": round(w / h, 4), "source": src}
+    return {"fov_y": round(math.degrees(2 * math.atan(h / 2 / fy)), 3), "aspect": round(w / h, 4), "source": src,
+            "lens": lens}
 
 
 # ── the setting of a trial ──────────────────────────────────────────────────
@@ -648,8 +666,20 @@ def selftest(work: Path | None = None) -> int:
            and st["drape"], f"setting of a trial at a photo step ({st})")
     expect(setting({"trial": "t003"}, "pendulum")["arm_az"] == 40, "another step: the arm at the first photo position")
     pv = phone_view(None)
-    expect(abs(pv["fov_y"] - 53.2) < 0.1 and abs(pv["aspect"] - 4080 / 3072) < 1e-3,
-           f"the phone's nominal field ({pv})")
+    expect(abs(pv["fov_y"] - 53.2) < 0.1 and abs(pv["aspect"] - 4080 / 3072) < 1e-3
+           and pv["lens"] == {"photo": None, "video": None}, f"the phone's nominal field ({pv})")
+    cal = work / "calibration"
+    cal.mkdir(parents=True, exist_ok=True)
+    write_json(cal / "intrinsics_photo.json", {"image_size": [4080, 3072], "K": [[3050, 0, 2051], [0, 3046, 1529],
+                                                                               [0, 0, 1]],
+                                               "dist": [[0.11], [-0.32], [0.001], [-0.0007], [0.29]]})
+    write_json(cal / "intrinsics_video.json", {"image_size": [1920, 1080], "K": "broken"})
+    pv = phone_view(cal)
+    ph = pv["lens"]["photo"]
+    expect(pv["source"] == "calibration" and ph and ph["dist"] == [0.11, -0.32, 0.001, -0.0007, 0.29, 0, 0, 0]
+           and ph["size"] == [4080, 3072] and ph["K"][0][2] == 2051 and pv["lens"]["video"] is None
+           and abs(ph["fov_y"] - pv["fov_y"]) < 1e-9,
+           "the lens of each mode from its calibration (the photo's; a broken one for the video left out)")
 
     info = {"targets": [{"id": "Pog", "mandible": [0, 87.6, -88.6]}, {"id": "Co_L", "mandible": [52.5, 0, 0]}],
             "T_W_mandible": rigid(rot([1, 0, 0], -92.3745), [0, 96.36, 16.66]).tolist(),

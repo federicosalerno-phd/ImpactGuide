@@ -142,6 +142,7 @@
 .tw-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
         text-align:center;font-size:var(--fs-lg);color:var(--text-3);pointer-events:none}
 .tw-views{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.tw-seats{grid-template-columns:repeat(3,minmax(0,1fr))}
 .tw-views .btn{min-width:0}
 .tw-step{display:flex;align-items:center;gap:8px}
 .tw-step .btn{flex:none}

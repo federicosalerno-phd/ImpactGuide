@@ -11,6 +11,9 @@ fingerprint of the open scene as one JSON line; test builds a small scene in mem
 
 The model. What moves is a node of its own, named so the page can move it:
     bench           everything that stays where it is
+    head            the head on its post (connector_skull and all it carries, the collections of HEAD_COLLS)
+    board_holder    in its place, the holder of the calibration board (its collection, left out of the renders), and
+    calib_board     the board standing in it, taken from seat to seat by the matrices of extras board_seats
     marker          marker_motion and its children (board, holder, cap, marker spheres): moved by the impact
     marker_a/_b     the A1 ball stud, the B1 balls: children of marker_motion shown only with their holder
     holder_a/_b     the rest of A1, of B1, shown only with their holder
@@ -81,8 +84,14 @@ DRAPE_LINEAR = tuple(((c / 255 + 0.055) / 1.055) ** 2.4 for c in (38, 104, 112))
 MAX_VERTS = 65535       # vertices of one primitive: indices of 16 bits
 ZLIB_LEVEL = 6
 SKIP = ("face_screws", "tmp_cam", "marker_ghost", "lab_table", "synth_")     # never in the model (prefixes)
+SKIP_COLLS = ("print_tools",)       # never in the model: what is not the bench (the jigs for printing), and below
 HOLDERS = {"A": "a1_ball_stud", "B": "b1_kinematic_spring"}                  # collections of each holder
 WITH_MARKER = {"A": "a1_arm", "B": "b1_plate"}                              # moved with the marker
+# the head on its post: the connector and all it carries, and the collections of the head; in its place, put on the
+# same post by the quick release, the holder of the calibration board (a collection the renders leave out) with the
+# board in one of its seats (calib_bench.SEATS). The page shows the one or the other
+HEAD, HEAD_COLLS = "connector_skull", ("phantom", "silicone", "splint", "surgical_cap_soft", "ground_truth")
+BOARD_HOLDER, CALIB_BOARD = "board_holder", "calib_board"
 MARKER, PEND_BASE, PEND_SWING, ARM = "marker_motion", "pendulum_base", "pendulum_swing", "sensor_arm_pivot"
 BOARD, BALL, FACE, MANDIBLE = "marker_charuco", "a1_ball_stud", "silicone_face", "mandible"
 LENS, PHONE, PHONE_CAM, SCANNER_CAM = "smartphone_lens", "smartphone", "cam_phone_2", "cam_scanner_2"
@@ -153,14 +162,15 @@ def hidden_collections():
 def present():
     """The objects of the design as it stands, as the renders show it: in the view layer, not hidden in the viewport
     nor left out of the renders (by themselves or by a collection), plus both holders (one of them is always left out
-    of the renders: the page shows the one of the trial)."""
+    of the renders: the page shows the one of the trial); never what is not the bench (SKIP, SKIP_COLLS)."""
     vl = bpy.context.view_layer
     holders = {ob.name for c in HOLDERS.values() if c in bpy.data.collections
                for ob in bpy.data.collections[c].all_objects}
     hidden = hidden_collections()
+    tools = in_collection(SKIP_COLLS)
     out = []
     for ob in bpy.data.objects:
-        if ob.name.startswith(SKIP) or ob.name not in vl.objects:
+        if ob.name.startswith(SKIP) or ob.name not in vl.objects or ob.name in tools:
             continue
         shown = not ob.hide_get() and not ob.hide_render and not any(c.name in hidden for c in ob.users_collection)
         if ob.name in holders or shown:
@@ -271,7 +281,9 @@ def under(ob, name):
     return False
 
 
-def node_of(ob, coll_a, coll_b):
+def node_of(ob, coll_a, coll_b, coll_board=frozenset()):
+    if ob.name in coll_board:
+        return "calib_board" if ob.name == CALIB_BOARD else "board_holder"
     if under(ob, MARKER):
         return "marker_a" if ob.name in coll_a else "marker_b" if ob.name in coll_b else "marker"
     if under(ob, WITH_MARKER["A"]):
@@ -288,11 +300,17 @@ def node_of(ob, coll_a, coll_b):
         return "pendulum"
     if under(ob, ARM):
         return "arm"
+    if under(ob, HEAD) or any(c.name in HEAD_COLLS for c in ob.users_collection):
+        return "head"
     return "bench"
 
 
 PARTS = {   # what each node does in the page
-    "bench": {}, "marker": {"moves": "marker"}, "marker_a": {"moves": "marker", "holder": "A"},
+    # mount: on the post, the head (with the marker, its holders, the drape) or the board's holder (the board moved
+    # from seat to seat: extras board_seats)
+    "bench": {}, "head": {"mount": "head"}, "board_holder": {"mount": "board"},
+    "calib_board": {"mount": "board", "moves": "seat"},
+    "marker": {"moves": "marker"}, "marker_a": {"moves": "marker", "holder": "A"},
     "marker_b": {"moves": "marker", "holder": "B"}, "holder_a": {"holder": "A"}, "holder_b": {"holder": "B"},
     "holder_a_arm": {"moves": "marker", "holder": "A"}, "holder_b_plate": {"moves": "marker", "holder": "B"},
     # direction: about the vertical of the world through the base (synth_twin.set_pendulum); hole: about the axle,
@@ -642,6 +660,20 @@ def extras(frames):
     return ex
 
 
+def board_seats(v):
+    """The calibration board in its holder: the seat the scene has it in (0-based: the seat in whose frame its
+    vertices v lie flattest; thick_mm, how thick it is there) and, for each seat of calib_bench.SEATS, the matrix
+    that takes it there from where the scene has it (by rows, world)."""
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    import calib_bench
+    S = [np.asarray(T, np.float64) for T in calib_bench.SEATS]
+    v = np.asarray(v, np.float64)
+    flat = [float(np.ptp((v - T[:3, 3]) @ T[:3, 2])) for T in S]
+    k = int(np.argmin(flat))
+    return {"seat": k, "thick_mm": round(flat[k], 3), "seats": [rows(T @ np.linalg.inv(S[k]), 6) for T in S]}
+
+
 def board_frame(ob):
     """T_W_M of the marker's board object: origin at the outer corner of the print's grid, x along its columns, y
     along its rows, z = x cross y (its texture's corners, as synth_twin.py has it; the grid of marker_pose.BOARD);
@@ -953,6 +985,12 @@ def export(out):
     print_, items = fingerprint()           # before anything is added to the scene
     t_print = time.perf_counter() - t0
     every = [ob for ob in present() if ob.type in ("MESH", "CURVE", "SURFACE", "FONT")]
+    # the board's holder too, which the renders leave out (the page puts it on the post in the head's place)
+    coll_board = in_collection([BOARD_HOLDER])
+    have = {ob.name for ob in every}
+    every += [bpy.data.objects[n] for n in sorted(coll_board - have)
+              if bpy.data.objects[n].type in ("MESH", "CURVE", "SURFACE", "FONT")
+              and n in bpy.context.view_layer.objects]
     coarse_curves(every)
     # what follows the arm or the pendulum without being carried by it: a mesh of it at each of their poses
     posed = {}
@@ -983,7 +1021,7 @@ def export(out):
     acc = {k: {} for k in PARTS}
     acc.update(pose_parts)
     for ob in objs:
-        node = node_of(ob, coll_a, coll_b)
+        node = node_of(ob, coll_a, coll_b, coll_board)
         for mname, (p, n, t) in mesh_parts(ob, dg, inv[node]).items():
             if mname not in materials:
                 materials[mname] = material_values(bpy.data.materials.get(mname) if mname else None)
@@ -1007,8 +1045,9 @@ def export(out):
         materials["drape"] = {"color": [*DRAPE_LINEAR, 1.0], "metallic": 0.0, "roughness": 0.8, "emission": [0.0] * 3,
                               "sheen": [0.3, 0.3, 0.3]}
         merged["drape"] = {"drape": (*drape, np.zeros(len(drape[2]), np.int32), ["drape"])}
-    order = ["bench", "marker", "marker_a", "marker_b", "holder_a", "holder_a_arm", "holder_b", "holder_b_plate",
-             "pendulum", "pendulum_swing", "arm"] + sorted(pose_parts) + (["drape"] if drape is not None else [])
+    order = ["bench", "head", "marker", "marker_a", "marker_b", "holder_a", "holder_a_arm", "holder_b",
+             "holder_b_plate", "pendulum", "pendulum_swing", "arm", "board_holder", "calib_board"] + sorted(pose_parts) \
+        + (["drape"] if drape is not None else [])
     nodes = []
     for name in order:
         M = frames.get(name, np.eye(4))
@@ -1016,8 +1055,11 @@ def export(out):
             M = inv[PARTS[name]["parent"]] @ M
         nodes.append((name, M, merged[name], ["pendulum_swing"] if name == "pendulum" else []))
     ex = extras(frames)
+    if merged.get("calib_board"):
+        ex["board_seats"] = board_seats(np.concatenate([m[0] for m in merged["calib_board"].values()]))
+    # (the bounds of the bench as it is shown first: the board's holder left out)
     pts = [(frames.get(n, np.eye(4))[:3, :3] @ m[0].T).T + frames.get(n, np.eye(4))[:3, 3]
-           for n in merged for m in merged[n].values()]
+           for n in merged if PARTS[n].get("mount") != "board" for m in merged[n].values()]
     allp = np.concatenate(pts) if pts else np.zeros((1, 3))
     ex["bounds"] = [[round(float(x), 2) for x in allp.min(0)], [round(float(x), 2) for x in allp.max(0)]]
     ex["phone_print"] = print_
@@ -1116,6 +1158,26 @@ def selftest():
     pivot = empty(ARM, None, (0, -80, -250))
     mesh(PHONE, pivot, mat_=black, loc=(200, -260, 60))
     cable = mesh("cable_phone", mat_=black, loc=(150, 0, -200))
+    con = mesh(HEAD, mat_=green, loc=(0, 60, -60))              # the head on its post
+    mesh("skull", con, mat_=green, loc=(0, 0, 30))
+    cbh = bpy.data.collections.new(BOARD_HOLDER)                # the board's holder: left out of the renders
+    root.children.link(cbh)
+    cbh.hide_render = True
+    mesh("board_holder_foot", coll=cbh, mat_=green, loc=(0, 120, -80))
+    tools = bpy.data.collections.new(SKIP_COLLS[0])             # a jig for printing, beside the bench: not of it
+    root.children.link(tools)
+    mesh("ball_drill_jig", coll=tools, mat_=green, loc=(700, 0, 0))
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    import calib_bench
+    bpy.ops.mesh.primitive_cube_add(size=1.0)
+    board = bpy.context.active_object
+    board.name = CALIB_BOARD
+    for c in board.users_collection:
+        c.objects.unlink(board)
+    cbh.objects.link(board)
+    board.matrix_world = Matrix(np.asarray(calib_bench.SEATS[0]).tolist()) @ Matrix.Translation((100, 80, 4.2)) \
+        @ Matrix.Diagonal((240, 196, 8.4, 1))
     bpy.ops.object.light_add(type="SUN", location=(0, 0, 500))
     bpy.context.active_object.name = "sun_key"
     sc["sensor_arm"] = {"arm_deg": [36.0, 51.0, 66.0, 80.0], "camera_deg": [40.0, 55.0, 70.0, 85.0], "shown_deg": 51.0}
@@ -1188,6 +1250,25 @@ def selftest():
                                        f"lamps and world in the extras")
     expect(ex["phone_print"] == p4, "model: it carries the fingerprint of the scene it was made from")
     expect(ex["arm"]["camera_deg"] == [40.0, 55.0, 70.0, 85.0], "model: the arm positions in its extras")
+    objects = lambda node: {o[0] for pr in doc["meshes"][by[node]["mesh"]]["primitives"]  # noqa: E731
+                            for o in pr["extras"]["objects"]} if "mesh" in by.get(node, {}) else set()
+    expect(objects("head") == {HEAD, "skull"} and objects("board_holder") == {"board_holder_foot"}
+           and objects("calib_board") == {CALIB_BOARD} and ex["parts"]["calib_board"]["mount"] == "board"
+           and ex["parts"]["head"]["mount"] == "head",
+           "model: the head in a node of its own; the board's holder (hidden) and its board in theirs")
+    every_obj = set().union(*(objects(n["name"]) for n in doc["nodes"]))
+    expect("ball_drill_jig" not in every_obj and "cable_phone" in every_obj,
+           "model: the jigs for printing left out (print_tools)")
+    bs = ex.get("board_seats") or {}
+    bv = np.concatenate([positions(doc, binary, pr) for pr in doc["meshes"][by["calib_board"]["mesh"]]["primitives"]])
+    flat = []
+    for k, M in enumerate(bs.get("seats", [])):
+        M, T = np.array(M), np.asarray(calib_bench.SEATS[k])
+        w = bv @ M[:3, :3].T + M[:3, 3]
+        flat.append(round(float(np.ptp((w - T[:3, 3]) @ T[:3, 2])), 2))
+    expect(bs.get("seat") == 0 and abs(bs.get("thick_mm", 0) - 8.4) < 0.01 and len(flat) == 3
+           and all(abs(f - 8.4) < 0.05 for f in flat),
+           f"model: the board in seat 1, and taken to each seat it lies in it ({flat} mm thick)")
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
     return 1 if fails else 0
 

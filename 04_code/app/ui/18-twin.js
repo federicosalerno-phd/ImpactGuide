@@ -10,8 +10,10 @@
 // it, done over from 1 to 20 times on a slider (its place before the impact stays as a faint copy), and the seven
 // targets of the mandible take the colour of their error on the scale of the figures, blue (small) to yellow orange
 // (large), that keeps apart for those who confuse red and green; the face and the cap turn see-through, so that the
-// mandible shows. It opens on the whole bench; ready views: the phone at its four positions (its calibrated field of
-// view; the keypad's 0 is the phone where the arm is), the scanner, from above; the viewer of 17-plate3d.js is
+// mandible shows. On the post the head, or in its place the calibration board's holder with the board in one of its
+// seats (the switch; opened from the calibration's bench plan, at the seat and the arm of the next stop). It opens on
+// the whole bench; ready views: the phone at its four positions (through its calibrated lens, 18-lens.js; the keypad's
+// 0 is the phone where the arm is), the scanner, from above; the viewer of 17-plate3d.js is
 // navigated as Blender's viewport. It is lit as the scene is in Blender: its suns with soft shadows, the world's
 // even light and, made once after the first frame, its reflections for the metals; no tone mapping (the scene's view
 // is Standard), the world's colour behind. The panel says when the synthetic dataset and the network were made on
@@ -44,6 +46,9 @@ const TWIN = {
   PANEL_LIGHT: 0.45,    // the light panels' own light on the bench (each a soft spot from its diffuser)
   PANEL_REACH_MM: 1600,
   SKY: ['#ffffff', '#e4e7ec'],    // behind the bench: from the top of the view to its bottom
+  mount: 'head',        // on the post: the head, or the calibration board's holder ('board': the switch, the
+  seat: 0,              // calibration's bench plan), the board in this seat of it (0-based)
+  BOARD_SWING_DEG: 30,  // with the board's holder on, the pendulum hooked up on the release (hanging, it meets seat 1)
   blend: null,          // the cables between the arm's positions (false: their meshes do not allow it)
   sweepMesh: null,
   shadowKey: '', targetsKey: '',
@@ -106,6 +111,8 @@ const TWIN = {
       changed: function () { if (TWIN.view) { TWIN.view = ''; TWIN.marks(); } } });
     if (!TWIN.viewer) { TWIN.failed = true; return false; }
     const v = TWIN.viewer;
+    // the view from the phone bent by the phone's lens (18-lens.js)
+    v.lens = LENS.pass(function () { return TWIN.lensNow(); });
     // lit by the scene's own lamps and world (TWIN.light), not by the lights that go with the eye
     v.hemi.intensity = 0;
     v.cam.children.forEach(function (l) { if (l.isLight) l.intensity = 0; });
@@ -146,16 +153,23 @@ const TWIN = {
     }, TWIN.retryMs);
   },
 
-  // opened from the trial's page (mode trials) or as the Scans step of Scans and results
-  open: function (mode) {
+  // opened from the trial's page (mode trials) or as the Scans step of Scans and results, the head on the post; o
+  // (the calibration's bench plan, openCal): {mount: 'board', seat, arm: the arm angle of the stop, back: 'calibration'}
+  open: function (mode, o) {
+    o = o || {};
     TWIN.mode = mode === 'results' ? 'results' : 'trials';
+    TWIN.from = o.back || '';
+    TWIN.mount = o.mount === 'board' ? 'board' : 'head';
+    if (o.seat !== undefined) TWIN.seat = Math.max(0, Number(o.seat) || 0);
+    TWIN.calArm = isFinite(o.arm) && o.arm !== null ? Number(o.arm) : null;
     TWIN.t0 = performance.now();
     TWIN.openMs = 0;
     showView('twin');
     showPanel('twin');
-    // the way back: to the trial, or to the scans it was opened from (ui/22-scans.js)
+    // the way back: to the trial, to the scans it was opened from (ui/22-scans.js), or to the calibration
     const back = $('twBack').querySelector('.btn-label');
-    back.setAttribute('data-t', TWIN.mode === 'results' ? 'twin.back.scans' : 'twin.back');
+    back.setAttribute('data-t', TWIN.from === 'calibration' ? 'twin.back.cal'
+      : TWIN.mode === 'results' ? 'twin.back.scans' : 'twin.back');
     back.textContent = T(back.getAttribute('data-t'));
     $('twPick').classList.toggle('hidden', TWIN.mode !== 'results');
     $('hint').textContent = '';
@@ -165,6 +179,21 @@ const TWIN = {
     }
     TWIN.view = '';
     TWIN.refresh(true);
+  },
+
+  // from the calibration's bench plan: the board's holder on the post, the board in the seat of the next stop, seen
+  // from the phone with the arm at that stop
+  openCal: function () {
+    const nx = (typeof CAL !== 'undefined' && CAL.state && CAL.state.next) || {};
+    TWIN.open('trials', { mount: 'board', seat: nx.seat ? nx.seat - 1 : 0, arm: nx.arm, back: 'calibration' });
+  },
+  // the camera azimuth of an arm angle (the scene's arm positions: arm_deg against camera_deg, straight between)
+  azOfArm: function (deg) {
+    const a = TWIN.extras && TWIN.extras.arm, c = a && a.camera_deg, d = a && a.arm_deg;
+    if (!c || !d || c.length < 2) return deg;
+    let k = 0;
+    while (k < d.length - 2 && deg > d[k + 1]) k++;
+    return c[k] + (c[k + 1] - c[k]) * (deg - d[k]) / (d[k + 1] - d[k]);
   },
 
   // the backend's state of the twin; first: choose the view of the trial (the phone where the step is taken)
@@ -205,6 +234,7 @@ const TWIN = {
       if (!TWIN.showing()) TWIN.idle(TWIN.warm);
       TWIN.loadMs = performance.now() - t0;
       TWIN.apply();
+      TWIN.mounts();
       if (then) then();
       else if (TWIN.pending && TWIN.showing()) { TWIN.look(TWIN.pending); TWIN.opened(); }   // opened while it loaded
     }, function (e) {
@@ -474,6 +504,7 @@ const TWIN = {
       TWIN.cablesReady();             // the cables of the video's sweep, compiled with the rest
       r.compile(v.scene, v.eye);
       r.compile(VIEW3D.kit().quad.scene, VIEW3D.kit().quad.cam);
+      if (v.lens) v.lens.warm(r);
     } catch (e) { console.warn('twin warm: ' + e); return; }
     TWIN.idle(function () {
       if (TWIN.url !== url || TWIN.showing() || v.r !== r) return;
@@ -593,6 +624,8 @@ const TWIN = {
     const dir = dirs.reduce(function (m, d) {
       return Math.abs(d - (Number(t.direction_deg) || 0)) < Math.abs(m - (Number(t.direction_deg) || 0)) ? d : m;
     }, dirs.length ? dirs[0] : 0);
+    // on the post: the head (with the marker, its holders, the drape) or the board's holder, the board in its seat
+    const board = TWIN.mount === 'board' && TWIN.hasBoard(), seats = (x.board_seats || {}).seats || [];
     Object.keys(TWIN.parts).forEach(function (n) {
       const p = TWIN.parts[n], spec = x.parts[n];
       if (spec.pose === 'arm') return;
@@ -600,17 +633,27 @@ const TWIN = {
       if (spec.pose === 'pendulum') p.obj.visible = spec.value === dir;
       if (spec.drape) p.obj.visible = pose.drape;
       if (spec.moves === 'marker') M.decompose(p.obj.position, p.obj.quaternion, p.obj.scale);
+      if (spec.mount === 'board') p.obj.visible = board;
+      else if (board && (spec.mount === 'head' || spec.holder || spec.moves === 'marker' || spec.drape)) p.obj.visible = false;
+      if (spec.moves === 'seat' && seats[TWIN.seat]) {
+        const S = seats[TWIN.seat];
+        new THREE.Matrix4().set(S[0][0], S[0][1], S[0][2], S[0][3], S[1][0], S[1][1], S[1][2], S[1][3],
+                                S[2][0], S[2][1], S[2][2], S[2][3], 0, 0, 0, 1)
+          .decompose(p.obj.position, p.obj.quaternion, p.obj.scale);
+      }
     });
     TWIN.turn('pendulum', Number(t.direction_deg) || 0);
-    TWIN.turn('pendulum_swing', pose.swing);
+    TWIN.turn('pendulum_swing', board ? TWIN.BOARD_SWING_DEG : pose.swing);
+    TWIN.points.visible = !board;
     // the place before the impact, while the marker is seen elsewhere
-    const moved = !!scan && scan.shift_mm * TWIN.gain > TWIN.GHOST_MM;
+    const moved = !!scan && scan.shift_mm * TWIN.gain > TWIN.GHOST_MM && !board;
     TWIN.ghost.visible = moved;
     TWIN.ghost.children.forEach(function (g) { g.visible = !g.userData.holder || g.userData.holder === t.holder; });
     const tk = scan ? JSON.stringify(scan.tre || []) : '';
     if (tk !== TWIN.targetsKey) { TWIN.targetsKey = tk; TWIN.marksTargets(scan); }
     TWIN.skin(!!scan);
-    TWIN.shadowState = [t.holder, dir, t.direction_deg, pose.swing, pose.drape, TWIN.gain, tk.length, !!scan].join();
+    TWIN.shadowState = [t.holder, dir, t.direction_deg, pose.swing, pose.drape, TWIN.gain, tk.length, !!scan,
+                        board, TWIN.seat].join();
     TWIN.arm();
   },
 
@@ -833,6 +876,24 @@ const TWIN = {
     });
   },
 
+  // ── the phone's lens ───────────────────────────────────────────────────────
+  // the camera mode of the step on show (the video's sweep, else the photos'), and its calibration (twin.py
+  // lens_of: size, K, dist; each mode only with its own, never another's); lensTest: one the tests lay on instead
+  lensTest: null,
+  lensMode: function () { return TWIN.pose().az === null ? 'video' : 'photo'; },
+  lensCal: function () {
+    const ph = TWIN.state && TWIN.state.phone;
+    return TWIN.lensTest || (ph && ph.lens && ph.lens[TWIN.lensMode()]) || null;
+  },
+  // the field of the phone's pictures in that mode: its calibration's, else the photos' (calibrated or nominal)
+  phoneField: function () {
+    const c = TWIN.lensCal(), ph = TWIN.state && TWIN.state.phone;
+    if (c && c.size && c.K) return { fov_y: 2 * Math.atan(c.size[1] / 2 / c.K[1][1]) * 180 / Math.PI, aspect: c.size[0] / c.size[1] };
+    return ph || null;
+  },
+  // the lens the view is bent with: only from the phone (not once turned by hand), when it bends anything
+  lensNow: function () { return /^phone\d$/.test(TWIN.view) ? LENS.of(TWIN.lensCal()) : null; },
+
   // ── the ready views ────────────────────────────────────────────────────────
   // name: phone0..phone3 (the arm positions), scanner (from the arm where it stands), top; follow: the phone
   // where the arm is now (the sweep), at once
@@ -868,8 +929,9 @@ const TWIN = {
       const W = new THREE.Matrix4().multiplyMatrices(node.matrixWorld, Mc);
       eye = new THREE.Vector3(); q = new THREE.Quaternion();
       W.decompose(eye, q, new THREE.Vector3());
-      // the phone's own field (its calibration), else the camera of the scene; all of the picture in the box
-      const ph = name === 'scanner' ? null : TWIN.state && TWIN.state.phone;
+      // the phone's own field (the calibration of the mode on show, else the photos'), else the camera of the scene;
+      // all of the picture in the box
+      const ph = name === 'scanner' ? null : TWIN.phoneField();
       const fy = ph ? ph.fov_y : cam.fov_y, aspect = ph ? ph.aspect : cam.aspect || 4 / 3;
       fov = box >= aspect ? fy : 2 * Math.atan(Math.tan(fy / 2 * Math.PI / 180) * aspect / box) * 180 / Math.PI;
       const focus = new THREE.Vector3().fromArray(x.target || x.board_centre || [0, 0, 0]);
@@ -894,6 +956,13 @@ const TWIN = {
     TWIN.marks();
     TWIN.stepMarks();
     TWIN.sweep(p.az === null);
+    // from the calibration's bench plan: from the phone, the arm at the stop
+    if (TWIN.calArm !== null && TWIN.calArm !== undefined && TWIN.extras && TWIN.extras.arm) {
+      TWIN.sweep(false);
+      TWIN.armAz = TWIN.azOfArm(TWIN.calArm);
+      TWIN.arm();
+      TWIN.look('phone' + TWIN.armIndex(TWIN.armAz), true);
+    }
   },
 
   // the arm's position of a pose (a camera azimuth): the video's starts at its first end stop
@@ -1001,6 +1070,7 @@ const TWIN = {
       $('twPick').classList.toggle('hidden', !list.length);
     }
     TWIN.views();
+    TWIN.mounts();
     TWIN.scanPanel(s.scan);
     TWIN.modelRows(m);
     TWIN.apply();
@@ -1047,6 +1117,50 @@ const TWIN = {
     document.querySelectorAll('#twViews .btn').forEach(function (b) {
       b.classList.toggle('on', b.dataset.view === TWIN.view);
     });
+  },
+
+  // ── on the post: the head or the board's holder ─────────────────────────────
+  // (a model made before the holder was in it has none: no switch)
+  hasBoard: function () { return !!(TWIN.parts.board_holder || TWIN.parts.calib_board); },
+  seatCount: function () { return ((TWIN.extras && TWIN.extras.board_seats) || {}).seats ? TWIN.extras.board_seats.seats.length : 1; },
+  setMount: function (m, seat) {
+    TWIN.mount = m === 'board' ? 'board' : 'head';
+    if (seat !== undefined && seat !== null) TWIN.seat = Math.max(0, Math.min(TWIN.seatCount() - 1, Number(seat) || 0));
+    TWIN.mounts();
+    TWIN.apply();
+  },
+  // the switch and, with the holder on, its seats
+  mounts: function () {
+    const has = TWIN.hasBoard(), n = TWIN.seatCount(), host = $('twMount'), seats = $('twSeats');
+    $('twMountBox').classList.toggle('hidden', !has);
+    if (!has) return;
+    const button = function (label, title, on) {
+      const b = E('button', 'btn btn-2 btn-sm');
+      b.type = 'button';
+      if (title) b.title = title;
+      b.append(E('span', 'btn-label', label));
+      b.onclick = on;
+      return b;
+    };
+    if (host.dataset.lang !== LANG) {
+      host.dataset.lang = LANG;
+      host.replaceChildren(
+        button(T('twin.mount.head'), T('twin.mount.head.hint'), function () { TWIN.setMount('head'); }),
+        button(T('twin.mount.board'), T('twin.mount.board.hint'), function () { TWIN.setMount('board'); }));
+      host.children[0].dataset.mount = 'head'; host.children[1].dataset.mount = 'board';
+    }
+    if (seats.dataset.lang !== LANG + n) {
+      seats.dataset.lang = LANG + n;
+      seats.replaceChildren();
+      for (let k = 0; k < n; k++) {
+        const b = button(T('twin.seat', k + 1), T('twin.seat.hint'), function () { TWIN.setMount('board', k); });
+        b.dataset.seat = String(k);
+        seats.append(b);
+      }
+    }
+    host.querySelectorAll('.btn').forEach(function (b) { b.classList.toggle('on', b.dataset.mount === TWIN.mount); });
+    seats.querySelectorAll('.btn').forEach(function (b) { b.classList.toggle('on', Number(b.dataset.seat) === TWIN.seat); });
+    seats.classList.toggle('hidden', TWIN.mount !== 'board' || n < 2);
   },
 
   scanPanel: function (scan) {
@@ -1136,6 +1250,10 @@ const TWIN = {
       eye: v ? v.goal.at.clone().add(new THREE.Vector3(0, 0, v.goal.dist).applyQuaternion(v.goal.q)).toArray()
         .map(Math.round) : null,
       fov: v ? Math.round(v.cam.fov * 10) / 10 : null, nodes: x ? Object.keys(TWIN.parts).sort() : [],
+      lens: !!(v && v.lens && v.lens.on(v)), lensMode: TWIN.lensMode(),
+      mount: TWIN.mount, seat: TWIN.seat, hasBoard: TWIN.hasBoard(),
+      boardShown: !!(p('calib_board') && p('calib_board').visible), headShown: !!(p('head') && p('head').visible),
+      boardAt: p('calib_board') ? p('calib_board').position.toArray().map(Math.round) : null,
       stale: !$('twStale').classList.contains('hidden'), drawn: !!(v && v.r),
       noGl: !$('twMsg').classList.contains('hidden') && $('twMsg').textContent === T('twin.no_gl'),
       steps: TWIN.steps.length, entries: TWIN.entries.length, entry: TWIN.entry, now: TWIN.now,
@@ -1148,7 +1266,12 @@ const TWIN = {
   },
 
   wire: function () {
-    $('twBack').onclick = function () { if (TWIN.mode === 'results') go('results', 'scans'); else go('trials', 'guide'); };
+    $('twBack').onclick = function () {
+      if (TWIN.from === 'calibration') go('calibration', 'photos');
+      else if (TWIN.mode === 'results') go('results', 'scans');
+      else go('trials', 'guide');
+    };
+    $('calTwin').onclick = function () { TWIN.openCal(); };
     $('twUpdate').onclick = function () {
       ask('twin_update', function (a) { if (a) { toast(T('twin.model.updating')); TWIN.modelRows(a.model || {}); } });
     };
@@ -1176,7 +1299,7 @@ const TWIN = {
       });
     }
     if (TWIN.state) {
-      TWIN.views(); TWIN.scanPanel(TWIN.state.scan); TWIN.modelRows(TWIN.state.model || {}); TWIN.stepMarks();
+      TWIN.views(); TWIN.mounts(); TWIN.scanPanel(TWIN.state.scan); TWIN.modelRows(TWIN.state.model || {}); TWIN.stepMarks();
     }
   },
 };

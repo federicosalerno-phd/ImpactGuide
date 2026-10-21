@@ -63,7 +63,22 @@
    ]
   },
   "corner_gap_mm": 0.1,
-  "min_feature_mm": 1.0
+  "min_feature_mm": 1.0,
+  "back": {
+   "face_mm": 1.0,
+   "rib_mm": 1.6,
+   "pockets": [
+    8,
+    6
+   ],
+   "pocket_mm": [
+    28.2,
+    29.07
+   ],
+   "pocket_depth_mm": 7.0,
+   "bottom_band_mm": 12.0,
+   "bottom_band_thickness_mm": 8.4
+  }
  },
  "files": {
   "white": "charuco_plate_11x8_20mm_white.stl",

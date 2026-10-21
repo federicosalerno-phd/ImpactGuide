@@ -6,15 +6,25 @@ ticks) / 11, as for the A4 sheet, so the code that finds the A4 board finds this
 
 Plate (mm, plate coordinates: X right, Y up, Z up from the bed face, origin at the plate's lower left corner):
     white body   PLATE_W x PLATE_H x BASE, corners rounded in plan (vertical edges only: the face and the bed face keep
-                 sharp edges), solid, flat on the bed. Printed with PRINT it is a sandwich: a bottom skin of 3 solid
-                 layers, a top skin of 5 (under the black: 3 white and the 2 black), a 10 % grid between them and 2
-                 walls. The skins hold most of the plastic (about 10 g a layer; a millimetre of grid about 7 g): the
-                 plastic is saved in PRINT, not in BASE. BASE buys flatness: a bow after the plate leaves the bed goes
-                 as 1 / (distance between the skins), the sag under its own weight as its square, and the face must
-                 stay flat within 0.1 mm along its diagonals (a board curved by 2 mm biases the focal length by about
-                 1 %). 8.0 keeps the skins 7.4 apart: held flat by one edge the plate sags by at most 0.25 mm, nearly
-                 all a tilt (the 70 corners leave their best plane by 0.01 mm RMS); leaned or two-handed, by about
-                 0.01 mm. A thinner plate saves little (5.0: 20 g less) and bows more, as 1 / d (5.0: 1.7 times).
+                 sharp edges), printed face up. Its back is a grid of pockets, BASE - FACE deep: a face FACE thick
+                 (five solid layers, the first bridged over the pockets) on straight ribs RIB thick that run from
+                 edge to edge into a rim RIB thick and a solid band BAND wide along the bottom edge, with no fillets
+                 (the ribs, the rim and the band are the bed face). The pockets are equal, as near RIB_PITCH as the
+                 plate divides (8 x 6 of about 28 x 29 mm): the face bridges them without supports. The band is the
+                 edge the bench's board holder grips in its grooves (GROOVE: 8.8 wide, 10 deep): there the plate is
+                 solid and BASE + INK thick, as the solid plate was, so the holder is the same. The outside is the
+                 solid plate's, 240 x 196 x 8.4; only plastic inside it goes.
+                 Why: the solid plate printed as a sandwich (a bottom skin of 3 layers, a top skin of 5, a 10 % grid
+                 between them) held most of its plastic in the skins, about 12 g a layer. The ribs drop the bottom
+                 skin and the grid: about 30 g less of 150, and 15 minutes. A thinner plate saves less and bows more
+                 (5.0: 20 g less, 1.7 times the bow: a bow after the bed goes as 1 / (distance between the skins)).
+                 The face must stay flat within 0.1 mm along its diagonals (a board curved by 2 mm biases the focal
+                 length by about 1 %). Bending stiffness: 0.36 of the sandwich's; held flat by one short edge the
+                 plate sags by 0.47 mm (sandwich 0.24), nearly all a tilt (the 70 corners leave their best plane by
+                 0.04 mm); leaned or in the holder, by 0.01 mm. Bow after the bed, against the sandwich's: 1.35 times
+                 if the last skin printed holds the residual stress (the estimate that gives the 1 / d above), 0.25
+                 times if the layers on the hot bed do (the ribs leave little plastic on it). A thinner face bows
+                 less (the ribs are deeper): FACE is the thinnest wall, MIN_WALL.
     black body   INK above the white face (two layers of 0.2 mm, from BASE to BASE + INK): the black squares, the
                  markers, the two dimension marks and the label. Two black cells that touch only at a corner (the
                  chessboard corners, and diagonal bits inside a marker) are parted there by CORNER_GAP (a diamond
@@ -39,6 +49,8 @@ Checks (build runs them; check runs them on the files):
     mesh         each body closed and two-manifold, outward and positive volume, no self intersections, the bodies
                  touch but do not overlap, the plate fits the bed
     walls        every black feature at least MIN_WIDTH wide (eroded by just under half of it, none vanishes or splits)
+    back         face, ribs and rim at least MIN_WALL thick, every pocket closed, its shorter side at most MAX_BRIDGE
+                 (bridged), the bottom band solid at full thickness and fit for the holder's grooves
     detection    synthetic photos of the face rasterised from the black mesh, at 30 to 60 cm, frontal and tilted up
                  to 45 degrees, stream and photo mode: calibrate_charuco.detect finds all 70 corners, and a flat
                  board's pose fits them within MAX_FIT_PX
@@ -84,6 +96,13 @@ CELLS = 56              # grid cells per square: the marker's 7 bits are 6 cells
 # the plate, mm
 BASE = 8.0              # white body; the black starts at this height (top of layer 40 at 0.2 mm)
 INK = 0.4               # black above the white face: two layers of 0.2 mm
+FACE = 1.0              # the white face over the pockets of the back: five layers, the first bridged
+RIB = 1.6               # ribs and rim of the back: four wall lines of a 0.4 nozzle
+RIB_PITCH = 30.0        # the pockets as near this as the plate divides evenly
+MAX_BRIDGE = 30.0       # a pocket's shorter side, bridged by the face's first layer without supports
+BAND = 12.0             # solid along the bottom edge, full thickness: the board holder's grooves (GROOVE)
+GROOVE = (8.8, 10.0)    # the bench's board holder: the plate's bottom edge in grooves this wide and deep
+MIN_WALL = 1.0          # thinnest white wall
 MARGIN = {"left": 6.0, "right": 14.0, "top": 14.0, "bottom": 22.0}
 CORNER_R = 5.0          # plate corners in plan
 CORNER_GAP = 0.1        # two black cells touching only at a corner are parted by this there
@@ -110,7 +129,7 @@ BOTH_NOZZLES_X = (20.5, 256.0)
 BED_EDGE = 5.0
 LAYER_H = 0.2
 # Bambu Studio settings of the plate (0.20 mm layers, PLA), written into the 3MF as the object's own: the X2D's 0.20
-# Standard but for the grid, 10 % instead of 15 (5 solid layers above it carry the face), and no brim (sharp bed edge)
+# Standard but for the grid, 10 % instead of 15 (only inside the bottom band), and no brim (sharp bed edge)
 PRINT = {"wall_loops": "2", "top_shell_layers": "5", "top_shell_thickness": "1", "bottom_shell_layers": "3",
          "bottom_shell_thickness": "0", "sparse_infill_density": "10%", "sparse_infill_pattern": "grid",
          "enable_support": "0", "brim_type": "no_brim"}
@@ -311,13 +330,34 @@ def build():
     for _, c, rule in mk:
         parts.append(CrossSection(c, rule))
     ink = CrossSection.batch_boolean(parts, OpType.Add)
-    r = CORNER_R
-    outline = CrossSection.square((PLATE_W - 2 * r, PLATE_H - 2 * r)).translate((r, r)).offset(
-        r, JoinType.Round, circular_segments=72)
-    white = Manifold.extrude(outline, BASE)
+    pockets, grid = back_pockets()
+    # the pockets cut from below the bed face up to the face (a cutter through the bed face, not on it)
+    white = Manifold.extrude(plate_outline(), BASE) - Manifold.extrude(pockets, BASE - FACE + 1.0).translate(
+        (0.0, 0.0, -1.0))
     black = Manifold.extrude(ink, INK).translate((0.0, 0.0, BASE))
-    facts = {"corner_cuts": len(cuts), "label_width_mm": round(label_w, 1), "cells": black_cells}
+    facts = {"corner_cuts": len(cuts), "label_width_mm": round(label_w, 1), "cells": black_cells,
+             "pockets": pockets, "grid": grid}
     return white, black, ink, facts
+
+
+def plate_outline(inset=0.0):
+    """The plate in plan, corners rounded by CORNER_R; inset: the same outline that much inside (corners concentric)."""
+    r = CORNER_R
+    return CrossSection.square((PLATE_W - 2 * r, PLATE_H - 2 * r)).translate((r, r)).offset(
+        r - inset, JoinType.Round, circular_segments=72)
+
+
+def back_pockets():
+    """The pockets of the back in plan: inside the rim (the outline inset by RIB) and above the band, parted by ribs
+    RIB thick into a grid of equal pockets as near RIB_PITCH as the plate divides. Returns the cross-section and
+    (pockets across, pockets up, pocket width, pocket height) in mm."""
+    x0, x1, y0, y1 = RIB, PLATE_W - RIB, BAND, PLATE_H - RIB
+    nx = max(1, round((x1 - x0 + RIB) / RIB_PITCH))
+    ny = max(1, round((y1 - y0 + RIB) / RIB_PITCH))
+    cw, ch = (x1 - x0 - (nx - 1) * RIB) / nx, (y1 - y0 - (ny - 1) * RIB) / ny
+    cells = [CrossSection.square((cw, ch)).translate((x0 + i * (cw + RIB), y0 + j * (ch + RIB)))
+             for i in range(nx) for j in range(ny)]
+    return CrossSection.batch_boolean(cells, OpType.Add) ^ plate_outline(RIB), (nx, ny, cw, ch)
 
 
 # ── files ────────────────────────────────────────────────────────────────────
@@ -442,6 +482,7 @@ def write_3mf(path, bodies):
 def spec_json():
     """What NAME.json says: the board, what to measure, the plate."""
     nx, ny = SQUARES
+    _, (nx_p, ny_p, cw, ch) = back_pockets()
     return {
         "name": NAME,
         "board": {"dictionary": DICTIONARY, "squares": [nx, ny], "square_mm": SQUARE, "marker_mm": MARKER,
@@ -460,7 +501,10 @@ def spec_json():
                   "corner_radius_mm": CORNER_R, "board_origin_mm": [MARGIN["left"], PLATE_H - MARGIN["top"],
                                                                      BASE + INK],
                   "board_axes": {"x": [1, 0, 0], "y": [0, -1, 0], "z": [0, 0, -1]},
-                  "corner_gap_mm": CORNER_GAP, "min_feature_mm": MIN_WIDTH},
+                  "corner_gap_mm": CORNER_GAP, "min_feature_mm": MIN_WIDTH,
+                  "back": {"face_mm": FACE, "rib_mm": RIB, "pockets": [nx_p, ny_p],
+                           "pocket_mm": [round(cw, 2), round(ch, 2)], "pocket_depth_mm": BASE - FACE,
+                           "bottom_band_mm": BAND, "bottom_band_thickness_mm": BASE + INK}},
         "files": {"white": f"{NAME}_white.stl", "black": f"{NAME}_black.stl", "3mf": f"{NAME}.3mf"},
         "print": {"layer_mm": LAYER_H, "colour_change_mm": BASE, "filament_1": "white", "filament_2": "black",
                   "settings": PRINT},
@@ -537,6 +581,28 @@ def check_widths(ink):
             bad.append((k, n, [round(v, 1) for v in b]))
     expect(not bad, f"walls: {len(comps)} black features, all at least {MIN_WIDTH} mm wide"
                     + (f"; too thin: {bad[:6]}" if bad else ""))
+
+
+def check_back(white, pockets, grid):
+    """The back: ribs and rim at least MIN_WALL (the pockets grown by just under half of it stay apart, grown by just
+    under all of it stay inside the plate), the face too; every pocket closed by ribs that run into the rim and the
+    band; each pocket's shorter side bridged; the bottom band solid at full thickness, wider than the grooves are
+    deep and thinner than they are wide."""
+    nx, ny, cw, ch = grid
+    apart = len([c for c in pockets.offset(MIN_WALL / 2 - 0.02, JoinType.Miter, 2.0).decompose() if c.area() > 1e-9])
+    inside = (pockets.offset(MIN_WALL - 0.02, JoinType.Miter, 2.0) - plate_outline()).area()
+    n = len(pockets.decompose())
+    expect(n == nx * ny and apart == n and inside < 1e-9 and FACE >= MIN_WALL and RIB >= MIN_WALL,
+           f"back: {nx} x {ny} pockets of {cw:.1f} x {ch:.1f} mm, {BASE - FACE:g} deep, each closed; face {FACE:g} mm,"
+           f" ribs and rim {RIB:g} mm (at least {MIN_WALL:g})")
+    expect(min(cw, ch) <= MAX_BRIDGE, f"back: the face bridges {min(cw, ch):.1f} mm over a pocket (at most "
+                                      f"{MAX_BRIDGE:g}), no supports")
+    box = Manifold.cube((PLATE_W + 2.0, BAND, BASE + 2.0)).translate((-1.0, 0.0, -1.0))
+    solid = (plate_outline() ^ CrossSection.square((PLATE_W + 2.0, BAND)).translate((-1.0, 0.0))).area() * BASE
+    band = (white ^ box).volume()
+    expect(abs(band / solid - 1) < 1e-6 and BAND >= GROOVE[1] and BASE + INK <= GROOVE[0] - 0.4,
+           f"bottom band: solid, {BASE + INK:g} mm thick over {BAND:g} mm (the holder's grooves {GROOVE[0]:g} wide,"
+           f" {GROOVE[1]:g} deep)")
 
 
 def check_fit():
@@ -663,6 +729,7 @@ def cmd_check(_args):
     expect(abs(zb.min() - BASE) < 1e-5 and abs(zb.max() - BASE - INK) < 1e-5 and abs(Vw[:, 2].max() - BASE) < 1e-5,
            f"heights: white 0-{Vw[:, 2].max():.3f}, black {zb.min():.3f}-{zb.max():.3f}")
     check_widths(ink)
+    check_back(white, facts["pockets"], facts["grid"])
     expect(facts["label_width_mm"] <= SQUARES[0] * SQUARE - 10,
            f"label {facts['label_width_mm']} mm long, clear of the caliper's place at the lower right")
     print(f"      {facts['corner_cuts']} corners parted by {CORNER_GAP} mm")

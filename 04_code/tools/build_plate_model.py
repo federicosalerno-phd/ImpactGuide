@@ -2,7 +2,8 @@
 as one binary glTF, 04_code/app/ui/models/charuco_plate.glb.
 
 Two meshes, the white plate and the black print in relief, each with its colour as printed (PLA white and black,
-matte), vertices welded, in metres as glTF wants them, Y up (the plate's face looking up, +Y), centred on the plate.
+matte: rough enough that the face never mirrors the viewer's lights), vertices welded, in metres as glTF wants
+them, Y up (the plate's face looking up, +Y), centred on the plate.
 The scene's extras say where the caliper reads (the two lengths of the plate's JSON, between the outer faces of the
 ticks, at the middle of the ticks and just above the face): `check` holds them to the nominal lengths (the page draws
 nothing over the model: the plate's own printed marks show both lengths).
@@ -25,8 +26,12 @@ ROOT = Path(__file__).resolve().parents[2]
 STL = ROOT / "02_cad" / "stl"
 PLATE = STL / "charuco_plate_11x8_20mm.json"
 OUT = ROOT / "04_code" / "app" / "ui" / "models" / "charuco_plate.glb"
-# printed colours, linear RGB for glTF (sRGB #F2F1EC and #1A1A1A): the white and black of a matte PLA
-COLOURS = {"white": ((0.888, 0.879, 0.838, 1.0), 0.62), "black": ((0.010, 0.010, 0.010, 1.0), 0.48)}
+# printed colours, linear RGB for glTF (sRGB #F2F1EC and #1A1A1A): the white and black of a matte PLA. Both rough
+# (MATTE at least): the viewer's lights go with the eye, and a glossier black (0.48) mirrored them over the whole flat
+# face between about 10 and 30 degrees of elevation, turning the black light grey so that the markers vanished in
+# the white
+MATTE = 0.85
+COLOURS = {"white": ((0.888, 0.879, 0.838, 1.0), 0.9), "black": ((0.010, 0.010, 0.010, 1.0), 0.9)}
 
 
 def read_stl(path):
@@ -155,6 +160,9 @@ def check():
               f"{'closed' if closed else 'NOT closed'}, {1000 * (hi[0] - lo[0]):.1f} x {1000 * (hi[2] - lo[2]):.1f} "
               f"x {1000 * (hi[1] - lo[1]):.2f} mm")
         ok &= closed and same
+        rough = doc["materials"][i]["pbrMetallicRoughness"]["roughnessFactor"]
+        print(f"{part}: roughness {rough} ({'matte' if rough >= MATTE else 'TOO GLOSSY'}, at least {MATTE})")
+        ok &= rough >= MATTE
     print("check: " + ("ok" if ok else "FAILED"))
     return 0 if ok else 1
 

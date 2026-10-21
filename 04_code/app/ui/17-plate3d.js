@@ -713,8 +713,11 @@ VIEW3D.proto = {
       && s.at.distanceTo(g.at) < v.radius * 2e-4;
     if (still) { s.q.copy(g.q); s.dist = g.dist; s.at.copy(g.at); }
     v.place(s);
+    // a lens on the view (18-lens.js): the frame drawn into its picture, then bent onto the canvas
+    const lens = v.lens && v.lens.begin(v);
     v.r.render(v.scene, v.eye);
     const fading = v.highlightDraw(dt);
+    if (lens) v.lens.end(v);
     v.gizmoDraw();
     if (still && !fading) v.last = 0;
     else { v.last = t; v.draw(); }
@@ -729,7 +732,7 @@ VIEW3D.proto = {
     const v = this;
     if (!v.w || !v.h) return null;
     const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2(x / v.w * 2 - 1, 1 - y / v.h * 2), v.eye);
+    ray.setFromCamera(v.ndcOf(x, y), v.eye);
     // what is nearer than the view's near plane is not drawn, and is not picked (the phone's own glass in its view)
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(v.eye.quaternion), near = v.ortho ? -Infinity : v.eye.near;
     const shown = function (o) {
@@ -874,7 +877,9 @@ VIEW3D.proto = {
     const list = [hl.sel, hl.hov].concat(hl.out).filter(function (s) { return s && s.a > 0; }).slice(0, 3);
     v.labelPlace(hl.sel);
     if (!list.length) return moving;
-    const r = v.r, kit = VIEW3D.kit(), size = r.getDrawingBufferSize(new THREE.Vector2());
+    // (drawn where the frame is: the canvas, or the lens's picture while one bends the view)
+    const r = v.r, kit = VIEW3D.kit(), lensRT = v.lensOn ? v.lensOn.rt : null;
+    const size = lensRT ? new THREE.Vector2(lensRT.width, lensRT.height) : r.getDrawingBufferSize(new THREE.Vector2());
     if (!v.maskRT || v.maskRT.width !== size.x || v.maskRT.height !== size.y) {
       if (v.maskRT) v.maskRT.dispose();
       v.maskRT = new THREE.WebGLRenderTarget(size.x, size.y);
@@ -921,7 +926,7 @@ VIEW3D.proto = {
       v.scene.background = sky;
       rt.viewport.set(0, 0, size.x, size.y);
       rt.scissorTest = false;
-      r.setRenderTarget(null);
+      r.setRenderTarget(lensRT);
       r.setClearColor(clear, alpha);
     }
     const u = kit.quad.material.uniforms, amt = [0, 0, 0], sel = [0, 0, 0];
@@ -964,6 +969,18 @@ VIEW3D.proto = {
     return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
   },
 
+  // a point of the world on the box (css px from its top left) and its depth as project() gives it; and the point of
+  // the view (as a raycaster takes it) a point of the box shows. Through the lens when one bends the view (18-lens.js)
+  onBox: function (p) {
+    if (this.lens && this.lens.on(this)) return this.lens.onBox(this, p);
+    const q = p.clone().project(this.eye);
+    return { x: (q.x + 1) / 2 * this.w, y: (1 - q.y) / 2 * this.h, z: q.z };
+  },
+  ndcOf: function (x, y) {
+    if (this.lens && this.lens.on(this)) return this.lens.ndc(this, x, y);
+    return new THREE.Vector2(x / this.w * 2 - 1, 1 - y / this.h * 2);
+  },
+
   // the tag beside the part, on the side chosen when it was selected where there is room (right, left, above, below
   // the part as the screen shows it; a big part: near the point clicked), inside the box; its line from the point
   // clicked to the tag's nearest edge; it follows the part as the view turns (in fractions of a pixel: no
@@ -975,16 +992,15 @@ VIEW3D.proto = {
       if (!s) t.style.visibility = 'hidden';
       return;
     }
-    const p = s.anchor.clone().project(v.eye);
+    const p = v.onBox(s.anchor);
     if (p.z > 1 || p.z < -1) { t.style.opacity = 0; L.style.opacity = 0; return; }
-    const ax = (p.x + 1) / 2 * v.w, ay = (1 - p.y) / 2 * v.h, W = t.__w || t.offsetWidth, H = t.__h || t.offsetHeight;
+    const ax = p.x, ay = p.y, W = t.__w || t.offsetWidth, H = t.__h || t.offsetHeight;
     const gap = VIEW3D.TAG_GAP, m = 8;
     // the part on the screen
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     const b = s.box, q = new THREE.Vector3();
     [b.min.x, b.max.x].forEach(function (x) { [b.min.y, b.max.y].forEach(function (y) { [b.min.z, b.max.z].forEach(function (z) {
-      q.set(x, y, z).project(v.eye);
-      const sx = (q.x + 1) / 2 * v.w, sy = (1 - q.y) / 2 * v.h;
+      const o = v.onBox(q.set(x, y, z)), sx = o.x, sy = o.y;
       x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
     }); }); });
     if (!s.side) {

@@ -487,6 +487,8 @@
           <div class="callout callout-warn hidden" id="cpNote"></div>
           <!-- what the last photo or the last calibration says to change: the camera's settings, the phone still -->
           <div class="callout callout-warn hidden" id="calPhWarn"></div>
+          <!-- the bench plan: the bench in 3D with the board's holder on, the board in the seat of the next stop -->
+          <button class="btn btn-2 btn-wide hidden" id="calTwin" type="button"><span data-icon="cube"></span><span class="btn-label" data-t="twin.title"></span></button>
           <div class="note hidden" id="calProNote" data-t="cal.pro.note"></div>
           <!-- the photo taken by itself when the phone holds the guide's pose still: one switch, and what it waits for -->
           <div class="stack auto-row" id="calAutoRow">
@@ -811,6 +813,8 @@
           </div>
           <div class="sec-lbl" data-t="twin.views"></div>
           <div class="tw-views" id="twViews"></div>
+          <!-- on the post: the head or the calibration board's holder, its seats (ui/18-twin.js) -->
+          <div class="stack hidden" id="twMountBox"><div class="sec-lbl" data-t="twin.mount.sec"></div><div class="tw-views" id="twMount"></div><div class="tw-views tw-seats hidden" id="twSeats"></div></div>
           <div class="row"><span class="sec-lbl grow" data-t="twin.scan.sec"></span><span class="chip chip-warn hidden" id="twSim" data-t="twin.scan.simulated"></span><span class="chip chip-warn hidden" id="twNoCal" data-t="twin.scan.uncalibrated" data-t-title="twin.scan.uncalibrated.hint"></span></div>
           <div class="note" id="twScanNote"></div>
           <div class="stack hidden" id="twScan">
@@ -925,6 +929,7 @@
 <script src="ui/15-board.js"></script>
 <script src="ui/16-boardview.js"></script>
 <script src="ui/17-plate3d.js"></script>
+<script src="ui/18-lens.js"></script>
 <script src="ui/18-twin.js"></script>
 <script src="ui/19-parts.js"></script>
 <script src="ui/20-trials.js"></script>
