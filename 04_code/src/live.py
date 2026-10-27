@@ -1,8 +1,9 @@
 """Live video from the phone camera to the PC, by cable or Wi-Fi, for the live AR page of ImpactGuide.
 
 The phone runs the scrcpy server (shipped with scrcpy, which also brings adb) with the back camera as video source;
-the stream comes over an adb tunnel as H.264 with scrcpy's frame meta (the capture time of each frame on the phone),
-is decoded here with PyAV and only the newest frame is kept, with the time it was decoded and the time it was taken
+the stream comes over an adb tunnel as H.264 (H.265 over Wi-Fi, VIDEO_CODECS) with scrcpy's frame meta (the capture
+time of each frame on the phone), is decoded here with PyAV and only the newest frame is kept, with the time it was
+decoded and the time it was taken
 (on this computer's clock). Frames that come in a burst are decoded but only the newest is passed on. Nothing is
 installed on the phone and it needs no app: USB debugging, or wireless debugging for Wi-Fi. While the stream runs
 the phone's screen is kept on and its auto-rotate is off (put back after): on the Poco X7 Pro both the lock screen
@@ -79,6 +80,12 @@ BIT_RATES = {phone_link.USB: BIT_RATE, phone_link.WIFI: 5_000_000}
 # per link: 1920x1440 at 20 Mbit/s fills a cable but stalls a shared Wi-Fi link; 1280x960 keeps the board
 # readable at 40-60 cm and leaves room for the AR view going back to the phone (15/10/2026, Wi-Fi stalls)
 SIZES = {phone_link.USB: "1920x1440", phone_link.WIFI: "1280x960"}
+# per link: the phone's encoder (scrcpy's video_codec) and PyAV's decoder for it. HEVC, in the phone's hardware
+# (c2.mtk.hevc.encoder on the Poco X7 Pro), keeps the picture clean at the few Mbit/s a shared Wi-Fi link carries,
+# where H.264 broke it into blocks; on the cable H.264 has bit rate to spare. A recording is always H.264 (OUT.h264,
+# which live_ar replays)
+VIDEO_CODECS = {phone_link.USB: "h264", phone_link.WIFI: "h265"}
+DECODERS = {"h264": "h264", "h265": "hevc"}
 RESTARTS = 8                    # restarts in a row that bring no frame back before the stream gives up (about 20 s)
 RESTART_GOOD_FRAMES = 30        # a restart that brought this many frames was a good one
 # the phone's screen is kept on while the stream runs: when it goes off and comes back (the phone moved), the lock
@@ -341,7 +348,7 @@ class PhoneStream:
     it starts again too, dropping what the link held back. See the module docstring for start() and close()."""
 
     def __init__(self, serial=None, size="1920x1440", fps=30, bit_rate=None, camera_id=None, port=None,
-                 restarts=RESTARTS, log=None, record=None, codec_options=None, drop_late=True):
+                 restarts=RESTARTS, log=None, record=None, codec_options=None, drop_late=True, video_codec=None):
         self.fixed = serial             # given by hand (command line): no link to follow
         self.serial = pick_serial(serial)
         self.link = phone_link.transport_of(self.serial)
@@ -357,6 +364,9 @@ class PhoneStream:
             size = SIZES.get(self.link, size)
         self.size, self.fps, self.bit_rate, self.camera_id, self.port = size, fps, bit_rate, camera_id, port
         self.codec_options = CODEC_OPTIONS if codec_options is None else codec_options
+        self.video_codec = "h264" if record is not None else video_codec or VIDEO_CODECS.get(self.link, "h264")
+        if self.video_codec not in DECODERS:
+            raise ValueError(f"video codec {self.video_codec}: not one of {sorted(DECODERS)}")
         self.drop_late = drop_late      # False: every frame is passed on
         self.max_restarts, self.restarts, self.failed_restarts = restarts, 0, 0
         self.keep_awake = True          # the phone's screen kept on (see KEEP_AWAKE_S)
@@ -511,7 +521,7 @@ class PhoneStream:
         adb shell."""
         args = [f"scid={self.scid:08x}", "log_level=info", "video_source=camera", "audio=false", "control=false",
                 "tunnel_forward=true", "send_device_meta=false", "send_dummy_byte=false", "send_stream_meta=true",
-                "send_frame_meta=true", "video_codec=h264", f"video_bit_rate={self.bit_rate}",
+                "send_frame_meta=true", f"video_codec={self.video_codec}", f"video_bit_rate={self.bit_rate}",
                 f"camera_size={self.size}", f"camera_fps={self.fps}", "cleanup=true"]
         if self.codec_options:
             args.append(f"video_codec_options={self.codec_options}")
@@ -588,7 +598,8 @@ class PhoneStream:
             late = np.array(self._late_ms)
             item = self._item
         more = {"link": self.link, "restarts": self.restarts, "link_drops": self.link_drops, "waiting": self.waiting,
-                "bit_rate": self.bit_rate, "dropped": self.dropped, "sessions": len(self.sessions),
+                "bit_rate": self.bit_rate, "codec": self.video_codec, "dropped": self.dropped,
+                "sessions": len(self.sessions),
                 "size": list(item.size) if item is not None else None,
                 "late_ms": float(np.median(late)) if len(late) else float("nan"),
                 "late_p95_ms": float(np.percentile(late, 95)) if len(late) else float("nan")}
@@ -738,7 +749,7 @@ class PhoneStream:
             self._session += 1
             self._offsets.clear()
         framing = _Framing()
-        codec = av.CodecContext.create("h264", "r")
+        codec = av.CodecContext.create(DECODERS[self.video_codec], "r")
         codec.flags |= av.codec.context.Flags.low_delay
         behind_since = None
         while not self._stop.is_set():

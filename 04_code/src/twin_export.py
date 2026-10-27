@@ -12,8 +12,10 @@ fingerprint of the open scene as one JSON line; test builds a small scene in mem
 The model. What moves is a node of its own, named so the page can move it:
     bench           everything that stays where it is
     head            the head on its post (connector_skull and all it carries, the collections of HEAD_COLLS)
-    board_holder    in its place, the holder of the calibration board (its collection, left out of the renders), and
-    calib_board     the board standing in it, taken from seat to seat by the matrices of extras board_seats
+    board_holder    in its place, the ball joint of the calibration board (its collection, left out of the renders):
+                    what stays (the adapter on the post, the base and the ring of the joint), and
+    calib_board     what turns with its ball (the ball, its stud, the board), taken from pose to pose by the matrices
+                    of extras board_poses
     marker          marker_motion and its children (board, holder, cap, marker spheres): moved by the impact
     marker_a/_b     the A1 ball stud, the B1 balls: children of marker_motion shown only with their holder
     holder_a/_b     the rest of A1, of B1, shown only with their holder
@@ -88,10 +90,12 @@ SKIP_COLLS = ("print_tools",)       # never in the model: what is not the bench 
 HOLDERS = {"A": "a1_ball_stud", "B": "b1_kinematic_spring"}                  # collections of each holder
 WITH_MARKER = {"A": "a1_arm", "B": "b1_plate"}                              # moved with the marker
 # the head on its post: the connector and all it carries, and the collections of the head; in its place, put on the
-# same post by the quick release, the holder of the calibration board (a collection the renders leave out) with the
-# board in one of its seats (calib_bench.SEATS). The page shows the one or the other
+# same post by the quick release, the ball joint of the calibration board (a collection the renders leave out) with
+# the board on its ball in one of its poses (calib_bench.POSES): the ball's pose is an empty of the scene. The page
+# shows the one or the other
 HEAD, HEAD_COLLS = "connector_skull", ("phantom", "silicone", "splint", "surgical_cap_soft", "ground_truth")
 BOARD_HOLDER, CALIB_BOARD = "board_holder", "calib_board"
+HOLDER_BALL = "board_holder_ball_pose"
 MARKER, PEND_BASE, PEND_SWING, ARM = "marker_motion", "pendulum_base", "pendulum_swing", "sensor_arm_pivot"
 BOARD, BALL, FACE, MANDIBLE = "marker_charuco", "a1_ball_stud", "silicone_face", "mandible"
 LENS, PHONE, PHONE_CAM, SCANNER_CAM = "smartphone_lens", "smartphone", "cam_phone_2", "cam_scanner_2"
@@ -283,7 +287,7 @@ def under(ob, name):
 
 def node_of(ob, coll_a, coll_b, coll_board=frozenset()):
     if ob.name in coll_board:
-        return "calib_board" if ob.name == CALIB_BOARD else "board_holder"
+        return "calib_board" if ob.name == CALIB_BOARD or under(ob, HOLDER_BALL) else "board_holder"
     if under(ob, MARKER):
         return "marker_a" if ob.name in coll_a else "marker_b" if ob.name in coll_b else "marker"
     if under(ob, WITH_MARKER["A"]):
@@ -306,10 +310,10 @@ def node_of(ob, coll_a, coll_b, coll_board=frozenset()):
 
 
 PARTS = {   # what each node does in the page
-    # mount: on the post, the head (with the marker, its holders, the drape) or the board's holder (the board moved
-    # from seat to seat: extras board_seats)
+    # mount: on the post, the head (with the marker, its holders, the drape) or the board's ball joint (its ball moved
+    # from pose to pose: extras board_poses)
     "bench": {}, "head": {"mount": "head"}, "board_holder": {"mount": "board"},
-    "calib_board": {"mount": "board", "moves": "seat"},
+    "calib_board": {"mount": "board", "moves": "ball"},
     "marker": {"moves": "marker"}, "marker_a": {"moves": "marker", "holder": "A"},
     "marker_b": {"moves": "marker", "holder": "B"}, "holder_a": {"holder": "A"}, "holder_b": {"holder": "B"},
     "holder_a_arm": {"moves": "marker", "holder": "A"}, "holder_b_plate": {"moves": "marker", "holder": "B"},
@@ -660,18 +664,48 @@ def extras(frames):
     return ex
 
 
-def board_seats(v):
-    """The calibration board in its holder: the seat the scene has it in (0-based: the seat in whose frame its
-    vertices v lie flattest; thick_mm, how thick it is there) and, for each seat of calib_bench.SEATS, the matrix
-    that takes it there from where the scene has it (by rows, world)."""
+def board_poses():
+    """The calibration board on its ball joint: for each pose of calib_bench.POSES (in order) its name, its angles
+    (pan, lean, turn), the arm angle the board faces, the arm stops it is photographed at and the matrix (by rows,
+    world) that takes what turns with the ball (node calib_board) there from where the scene has it, about the scene's
+    own ball centre; "pose" the one the scene has (its index, None when none); ball_off_mm how far the scene's ball
+    centre is from calib_bench's, board_off_mm how far the board's box in the scene is from where
+    calib_bench.drawing_frame puts it for the scene's angles. None without the ball's empty."""
+    o = bpy.data.objects
+    if HOLDER_BALL not in o:
+        return None
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
     import calib_bench
-    S = [np.asarray(T, np.float64) for T in calib_bench.SEATS]
-    v = np.asarray(v, np.float64)
-    flat = [float(np.ptp((v - T[:3, 3]) @ T[:3, 2])) for T in S]
-    k = int(np.argmin(flat))
-    return {"seat": k, "thick_mm": round(flat[k], 3), "seats": [rows(T @ np.linalg.inv(S[k]), 6) for T in S]}
+    S0 = mat(o[HOLDER_BALL].matrix_world)       # Rz(psi) Ry(90 - lean) Rz(turn) at the ball's centre
+    z = S0[:3, 2]
+    psi = math.degrees(math.atan2(z[1], z[0]))
+    b = math.degrees(math.acos(max(-1.0, min(1.0, z[2]))))
+    a, c = math.radians(psi), math.radians(b)
+    Rzp = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1.0]])
+    Ryb = np.array([[math.cos(c), 0, math.sin(c)], [0, 1.0, 0], [-math.sin(c), 0, math.cos(c)]])
+    T = (Rzp @ Ryb).T @ S0[:3, :3]              # Rz(turn)
+    here = (psi, 90.0 - b, math.degrees(math.atan2(T[1, 0], T[0, 0])))
+    poses, k = [], None
+    for i, (name, ang) in enumerate(calib_bench.POSES.items()):
+        Sk = calib_bench.stem_frame(*ang)
+        Sk[:3, 3] = S0[:3, 3]
+        poses.append({"name": name, "angles": list(ang), "face": calib_bench.face(name),
+                      "stops": [round(a, 2) for a, _ in calib_bench.stops(name)],
+                      "ball": rows(Sk @ np.linalg.inv(S0), 6)})
+        if k is None and max(abs((a - b + 180.0) % 360.0 - 180.0) for a, b in zip(ang, here)) < 0.5:
+            k = i
+    out = {"pose": k, "angles": [round(a, 3) for a in here], "poses": poses,
+           "ball_off_mm": round(float(np.linalg.norm(S0[:3, 3] - calib_bench.BALL_CENTRE)), 3)}
+    if CALIB_BOARD in o:
+        v = world_mesh(o[CALIB_BOARD], bpy.context.evaluated_depsgraph_get())[0]
+        D = np.linalg.inv(calib_bench.drawing_frame(*here))
+        m = v @ D[:3, :3].T + D[:3, 3]
+        pw, ph, pt = calib_bench.PLATE_MM
+        ox, oy, oz = calib_bench.BOARD_ORIGIN
+        want = np.array([[-ox, oy - ph, oz - pt], [pw - ox, oy, oz]])     # the plate's box in the drawing's frame
+        out["board_off_mm"] = round(float(np.abs(np.stack([m.min(0), m.max(0)]) - want).max()), 3)
+    return out
 
 
 def board_frame(ob):
@@ -1046,7 +1080,8 @@ def export(out):
                               "sheen": [0.3, 0.3, 0.3]}
         merged["drape"] = {"drape": (*drape, np.zeros(len(drape[2]), np.int32), ["drape"])}
     order = ["bench", "head", "marker", "marker_a", "marker_b", "holder_a", "holder_a_arm", "holder_b",
-             "holder_b_plate", "pendulum", "pendulum_swing", "arm", "board_holder", "calib_board"] + sorted(pose_parts) \
+             "holder_b_plate", "pendulum", "pendulum_swing", "arm", "board_holder", "calib_board"] \
+        + sorted(pose_parts) \
         + (["drape"] if drape is not None else [])
     nodes = []
     for name in order:
@@ -1055,8 +1090,9 @@ def export(out):
             M = inv[PARTS[name]["parent"]] @ M
         nodes.append((name, M, merged[name], ["pendulum_swing"] if name == "pendulum" else []))
     ex = extras(frames)
-    if merged.get("calib_board"):
-        ex["board_seats"] = board_seats(np.concatenate([m[0] for m in merged["calib_board"].values()]))
+    bp = board_poses() if merged.get("calib_board") else None
+    if bp:
+        ex["board_poses"] = bp
     # (the bounds of the bench as it is shown first: the board's holder left out)
     pts = [(frames.get(n, np.eye(4))[:3, :3] @ m[0].T).T + frames.get(n, np.eye(4))[:3, 3]
            for n in merged if PARTS[n].get("mount") != "board" for m in merged[n].values()]
@@ -1170,14 +1206,27 @@ def selftest():
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
     import calib_bench
+    # the ball joint: the empty of the ball's pose, the ball and the plate on it, in pose P2
+    psi, lean, turn = calib_bench.POSES["P2"]
+    ball = bpy.data.objects.new(HOLDER_BALL, None)
+    cbh.objects.link(ball)
+    ball.matrix_world = Matrix(calib_bench.stem_frame(psi, lean, turn).tolist())
+    bpy.context.view_layer.update()
+    sphere = mesh("board_holder_ball_head", coll=cbh, mat_=black, loc=tuple(calib_bench.BALL_CENTRE))
+    sphere.parent = ball
+    sphere.matrix_parent_inverse = ball.matrix_world.inverted()
     bpy.ops.mesh.primitive_cube_add(size=1.0)
     board = bpy.context.active_object
     board.name = CALIB_BOARD
     for c in board.users_collection:
         c.objects.unlink(board)
     cbh.objects.link(board)
-    board.matrix_world = Matrix(np.asarray(calib_bench.SEATS[0]).tolist()) @ Matrix.Translation((100, 80, 4.2)) \
-        @ Matrix.Diagonal((240, 196, 8.4, 1))
+    pw, ph, pt = calib_bench.PLATE_MM
+    ox, oy, oz = calib_bench.BOARD_ORIGIN
+    board.matrix_world = Matrix(calib_bench.drawing_frame(psi, lean, turn).tolist()) \
+        @ Matrix.Translation((pw / 2 - ox, oy - ph / 2, oz - pt / 2)) @ Matrix.Diagonal((pw, ph, pt, 1))
+    board.parent = ball
+    board.matrix_parent_inverse = ball.matrix_world.inverted()
     bpy.ops.object.light_add(type="SUN", location=(0, 0, 500))
     bpy.context.active_object.name = "sun_key"
     sc["sensor_arm"] = {"arm_deg": [36.0, 51.0, 66.0, 80.0], "camera_deg": [40.0, 55.0, 70.0, 85.0], "shown_deg": 51.0}
@@ -1253,22 +1302,28 @@ def selftest():
     objects = lambda node: {o[0] for pr in doc["meshes"][by[node]["mesh"]]["primitives"]  # noqa: E731
                             for o in pr["extras"]["objects"]} if "mesh" in by.get(node, {}) else set()
     expect(objects("head") == {HEAD, "skull"} and objects("board_holder") == {"board_holder_foot"}
-           and objects("calib_board") == {CALIB_BOARD} and ex["parts"]["calib_board"]["mount"] == "board"
-           and ex["parts"]["head"]["mount"] == "head",
-           "model: the head in a node of its own; the board's holder (hidden) and its board in theirs")
+           and objects("calib_board") == {CALIB_BOARD, "board_holder_ball_head"} and "ball_pan" not in ex["parts"]
+           and ex["parts"]["calib_board"]["mount"] == "board" and ex["parts"]["head"]["mount"] == "head",
+           "model: the head in a node of its own; the board's ball joint (hidden) and its ball with the board in theirs")
     every_obj = set().union(*(objects(n["name"]) for n in doc["nodes"]))
     expect("ball_drill_jig" not in every_obj and "cable_phone" in every_obj,
            "model: the jigs for printing left out (print_tools)")
-    bs = ex.get("board_seats") or {}
-    bv = np.concatenate([positions(doc, binary, pr) for pr in doc["meshes"][by["calib_board"]["mesh"]]["primitives"]])
-    flat = []
-    for k, M in enumerate(bs.get("seats", [])):
-        M, T = np.array(M), np.asarray(calib_bench.SEATS[k])
-        w = bv @ M[:3, :3].T + M[:3, 3]
-        flat.append(round(float(np.ptp((w - T[:3, 3]) @ T[:3, 2])), 2))
-    expect(bs.get("seat") == 0 and abs(bs.get("thick_mm", 0) - 8.4) < 0.01 and len(flat) == 3
-           and all(abs(f - 8.4) < 0.05 for f in flat),
-           f"model: the board in seat 1, and taken to each seat it lies in it ({flat} mm thick)")
+    bp = ex.get("board_poses") or {}
+    bv = np.concatenate([positions(doc, binary, pr) for pr in doc["meshes"][by["calib_board"]["mesh"]]["primitives"]
+                         if {x[0] for x in pr["extras"]["objects"]} == {CALIB_BOARD}])
+    off = []
+    pw, ph, pt = calib_bench.PLATE_MM
+    ox, oy, oz = calib_bench.BOARD_ORIGIN
+    want = np.array([[-ox, oy - ph, oz - pt], [pw - ox, oy, oz]])
+    for q in bp.get("poses", []):
+        M, D = np.array(q["ball"]), np.linalg.inv(calib_bench.drawing_frame(*q["angles"]))
+        w = (bv @ M[:3, :3].T + M[:3, 3]) @ D[:3, :3].T + D[:3, 3]
+        off.append(round(float(np.abs(np.stack([w.min(0), w.max(0)]) - want).max()), 3))
+    names = [q["name"] for q in bp.get("poses", [])]
+    expect(bp.get("pose") == 1 and names == list(calib_bench.POSES) and max(off or [1]) < 0.05
+           and bp.get("board_off_mm", 1) < 0.05 and bp.get("ball_off_mm", 1) < 1e-3,
+           f"model: the board on its ball joint in pose {names[bp['pose']] if bp.get('pose') is not None else None}, "
+           f"and taken to each pose it lies where calib_bench has it (at most {max(off or [1])} mm off)")
     print(f"\n{len(fails)} failures" if fails else "\nall checks passed", flush=True)
     return 1 if fails else 0
 

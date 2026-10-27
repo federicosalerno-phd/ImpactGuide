@@ -4,28 +4,21 @@ The board is the A4 one of calibrate_charuco.py scaled to the printer's bed: 11 
 15 mm (3/4 of the square), DICT_5X5_100, the same marker ids in the same squares. Square = (length read between the
 ticks) / 11, as for the A4 sheet, so the code that finds the A4 board finds this one.
 
-Plate (mm, plate coordinates: X right, Y up, Z up from the bed face, origin at the plate's lower left corner):
-    white body   PLATE_W x PLATE_H x BASE, corners rounded in plan (vertical edges only: the face and the bed face keep
-                 sharp edges), printed face up. Its back is a grid of pockets, BASE - FACE deep: a face FACE thick
-                 (five solid layers, the first bridged over the pockets) on straight ribs RIB thick that run from
-                 edge to edge into a rim RIB thick and a solid band BAND wide along the bottom edge, with no fillets
-                 (the ribs, the rim and the band are the bed face). The pockets are equal, as near RIB_PITCH as the
-                 plate divides (8 x 6 of about 28 x 29 mm): the face bridges them without supports. The band is the
-                 edge the bench's board holder grips in its grooves (GROOVE: 8.8 wide, 10 deep): there the plate is
-                 solid and BASE + INK thick, as the solid plate was, so the holder is the same. The outside is the
-                 solid plate's, 240 x 196 x 8.4; only plastic inside it goes.
-                 Why: the solid plate printed as a sandwich (a bottom skin of 3 layers, a top skin of 5, a 10 % grid
-                 between them) held most of its plastic in the skins, about 12 g a layer. The ribs drop the bottom
-                 skin and the grid: about 30 g less of 150, and 15 minutes. A thinner plate saves less and bows more
-                 (5.0: 20 g less, 1.7 times the bow: a bow after the bed goes as 1 / (distance between the skins)).
-                 The face must stay flat within 0.1 mm along its diagonals (a board curved by 2 mm biases the focal
-                 length by about 1 %). Bending stiffness: 0.36 of the sandwich's; held flat by one short edge the
-                 plate sags by 0.47 mm (sandwich 0.24), nearly all a tilt (the 70 corners leave their best plane by
-                 0.04 mm); leaned or in the holder, by 0.01 mm. Bow after the bed, against the sandwich's: 1.35 times
-                 if the last skin printed holds the residual stress (the estimate that gives the 1 / d above), 0.25
-                 times if the layers on the hot bed do (the ribs leave little plastic on it). A thinner face bows
-                 less (the ribs are deeper): FACE is the thinnest wall, MIN_WALL.
-    black body   INK above the white face (two layers of 0.2 mm, from BASE to BASE + INK): the black squares, the
+Plate (mm, plate coordinates: X right, Y up, Z from the back (z 0, the ribs' ends) towards the face (z TOP), origin
+at the plate's lower left corner):
+    white body   PLATE_W x PLATE_H, PLATE_T (6.0) thick everywhere, corners rounded in plan (vertical edges only),
+                 printed face down: the drawing's two layers on the bed (both colours), the white face FACE thick
+                 (five solid layers) over them, then the back, a grid of pockets RIB_H deep between straight ribs RIB
+                 thick that run from edge to edge into a rim RIB thick, with no fillets. The pockets are equal, an
+                 even count each way as near RIB_PITCH as the plate divides (8 x 6 of about 28 x 31 mm); the face is
+                 on the bed, so nothing over them is bridged. The face comes off the bed smooth and flat, the back is
+                 one plane: nothing stands out of it. FACE is the thinnest wall, MIN_WALL.
+    tabs         four ears out of the long edges, TAB_X from the ends, as thick as the plate and solid: a half disc
+                 TAB_R round a through hole TAB_HOLE for an M4 screw (head and washer on the face side, away from the
+                 drawing), the corners where they leave the edge rounded by TAB_FILLET. Nothing else holds the plate:
+                 it is screwed to whatever carries it (a wall, a board, a profile with T-nuts), no nut in the plate.
+    black body   inlaid in the face's top INK (its two first layers on the bed, from BASE to TOP, flush with the white
+                 around it): the black squares, the
                  markers, the two dimension marks and the label. Two black cells that touch only at a corner (the
                  chessboard corners, and diagonal bits inside a marker) are parted there by CORNER_GAP (a diamond
                  centred on the corner cut away), so every black piece is a closed solid of its own and no edge is
@@ -37,20 +30,20 @@ Plate (mm, plate coordinates: X right, Y up, Z up from the bed face, origin at t
                  edges (160.0 mm). A caliper's outside jaws read between the outer faces of each pair.
     label        below the board: the board's parameters.
 Board coordinates (as OpenCV's CharucoBoard): x right, y down from the board's top left corner, z into the plate; in
-plate coordinates the board's corner is at (MARGIN left, PLATE_H - MARGIN top, BASE + INK).
+plate coordinates the board's corner is at (MARGIN left, PLATE_H - MARGIN top, TOP).
 
-Outputs in 02_cad/stl (NAME_*): white and black STL (one body per colour), a 3MF with one object of two parts (white
-on filament 1, black on filament 2) that carries PRINT as the object's own settings (Bambu Studio applies them over
-any process preset), placed on the X2D's bed where both nozzles reach, and NAME.json with the board's nominal sizes,
-what to measure and how to print, read by 04_code/src/charuco_plate.py.
+Outputs in 02_cad/stl (NAME_*): white and black STL (one body per colour, in plate coordinates), a 3MF with one
+object of two parts (white on filament 1, black on filament 2) that carries PRINT as the object's own settings (Bambu
+Studio applies them over any process preset), placed face down on the X2D's bed where both nozzles reach, and NAME.json with the board's nominal
+sizes, what to measure and how to print, read by 04_code/src/charuco_plate.py.
 
 Checks (build runs them; check runs them on the files):
     layout       the black cells equal OpenCV's own image of the board, cell for cell
     mesh         each body closed and two-manifold, outward and positive volume, no self intersections, the bodies
                  touch but do not overlap, the plate fits the bed
     walls        every black feature at least MIN_WIDTH wide (eroded by just under half of it, none vanishes or splits)
-    back         face, ribs and rim at least MIN_WALL thick, every pocket closed, its shorter side at most MAX_BRIDGE
-                 (bridged), the bottom band solid at full thickness and fit for the holder's grooves
+    back         face, ribs and rim at least MIN_WALL thick, every pocket closed, PLATE_T thick everywhere; the tabs
+                 solid, their holes through, at least MIN_WALL of plastic round them
     detection    synthetic photos of the face rasterised from the black mesh, at 30 to 60 cm, frontal and tilted up
                  to 45 degrees, stream and photo mode: calibrate_charuco.detect finds all 70 corners, and a flat
                  board's pose fits them within MAX_FIT_PX
@@ -94,15 +87,22 @@ NAME = f"charuco_plate_{SQUARES[0]}x{SQUARES[1]}_{SQUARE:g}mm"
 CELLS = 56              # grid cells per square: the marker's 7 bits are 6 cells, its white margin 7 (2.5 mm)
 
 # the plate, mm
-BASE = 8.0              # white body; the black starts at this height (top of layer 40 at 0.2 mm)
-INK = 0.4               # black above the white face: two layers of 0.2 mm
-FACE = 1.0              # the white face over the pockets of the back: five layers, the first bridged
+# plate coordinates: z 0 is the back (the ribs' ends), the face (the drawing) at TOP
+INK = 0.4               # the drawing, inlaid in the face: the first two layers of 0.2 mm on the bed, black and white
+FACE = 1.0              # the white face over the pockets of the back: five layers
+RIB_H = 4.6             # ribs and rim of the back, from the face's underside
+PLATE_T = INK + FACE + RIB_H    # 6.0: the plate's thickness, ribs included, everywhere
 RIB = 1.6               # ribs and rim of the back: four wall lines of a 0.4 nozzle
-RIB_PITCH = 30.0        # the pockets as near this as the plate divides evenly
-MAX_BRIDGE = 30.0       # a pocket's shorter side, bridged by the face's first layer without supports
-BAND = 12.0             # solid along the bottom edge, full thickness: the board holder's grooves (GROOVE)
-GROOVE = (8.8, 10.0)    # the bench's board holder: the plate's bottom edge in grooves this wide and deep
+RIB_PITCH = 30.0        # the pockets as near this as the plate divides evenly (an even count each way)
 MIN_WALL = 1.0          # thinnest white wall
+TOP = PLATE_T           # the face
+BASE = TOP - INK        # 5.6: the drawing's layers start here (the white face's top under the black)
+BACK = 0.0              # the ribs' and the rim's ends: the back, one plane
+# the tabs: four ears out of the long edges (top and bottom), solid, each a half disc round an M4 clearance hole
+TAB_R = 7.0             # the ear's half disc; its hole's centre TAB_R out of the edge
+TAB_HOLE = 4.5          # M4 clearance, through
+TAB_X = 30.0            # the ears' centres from the plate's left and right ends
+TAB_FILLET = 3.0        # where an ear leaves the edge
 MARGIN = {"left": 6.0, "right": 14.0, "top": 14.0, "bottom": 22.0}
 CORNER_R = 5.0          # plate corners in plan
 CORNER_GAP = 0.1        # two black cells touching only at a corner are parted by this there
@@ -129,8 +129,8 @@ BOTH_NOZZLES_X = (20.5, 256.0)
 BED_EDGE = 5.0
 LAYER_H = 0.2
 # Bambu Studio settings of the plate (0.20 mm layers, PLA), written into the 3MF as the object's own: the X2D's 0.20
-# Standard but for the grid, 10 % instead of 15 (only inside the bottom band), and no brim (sharp bed edge)
-PRINT = {"wall_loops": "2", "top_shell_layers": "5", "top_shell_thickness": "1", "bottom_shell_layers": "3",
+# Standard but for the grid, 10 % instead of 15 (hardly any: the back is ribs), and no brim (sharp bed edge)
+PRINT = {"wall_loops": "2", "top_shell_layers": "5", "top_shell_thickness": "1", "bottom_shell_layers": "7",
          "bottom_shell_thickness": "0", "sparse_infill_density": "10%", "sparse_infill_pattern": "grid",
          "enable_support": "0", "brim_type": "no_brim"}
 
@@ -331,13 +331,40 @@ def build():
         parts.append(CrossSection(c, rule))
     ink = CrossSection.batch_boolean(parts, OpType.Add)
     pockets, grid = back_pockets()
-    # the pockets cut from below the bed face up to the face (a cutter through the bed face, not on it)
-    white = Manifold.extrude(plate_outline(), BASE) - Manifold.extrude(pockets, BASE - FACE + 1.0).translate(
-        (0.0, 0.0, -1.0))
-    black = Manifold.extrude(ink, INK).translate((0.0, 0.0, BASE))
+    # the plate and its tabs from the back to the face, the pockets cut from behind up to the face's underside, the
+    # tabs' holes through; the black drawing inlaid in the face's two top layers, flush with the white
+    depth = BASE - FACE
+    plate = (Manifold.extrude(outline() - tab_holes(), TOP - BACK).translate((0.0, 0.0, BACK))
+             - Manifold.extrude(pockets, depth - BACK + 1.0).translate((0.0, 0.0, BACK - 1.0)))
+    inlay = Manifold.extrude(ink, INK).translate((0.0, 0.0, BASE))
+    white = plate - inlay
+    black = inlay
     facts = {"corner_cuts": len(cuts), "label_width_mm": round(label_w, 1), "cells": black_cells,
-             "pockets": pockets, "grid": grid}
+             "pockets": pockets, "grid": grid, "back": white.slice(BACK + 0.3)}
     return white, black, ink, facts
+
+
+def tab_centres():
+    """The centres of the tabs' holes: TAB_X from each end, TAB_R out of the bottom and the top edge."""
+    return [(x, y) for y in (-TAB_R, PLATE_H + TAB_R) for x in (TAB_X, PLATE_W - TAB_X)]
+
+
+def outline():
+    """The plate with its tabs in plan: each tab a half disc TAB_R on a strip from the edge, the corners where it
+    leaves the edge rounded by TAB_FILLET (closed: grown, then shrunk by it)."""
+    tabs = []
+    for x, y in tab_centres():
+        y0, y1 = (y, 1.0) if y < 0 else (PLATE_H - 1.0, y)        # the strip 1 mm into the plate
+        tabs += [CrossSection.circle(TAB_R, 96).translate((x, y)),
+                 CrossSection.square((2 * TAB_R, y1 - y0)).translate((x - TAB_R, y0))]
+    shape = CrossSection.batch_boolean([plate_outline()] + tabs, OpType.Add)
+    return shape.offset(TAB_FILLET, JoinType.Round, circular_segments=96).offset(
+        -TAB_FILLET, JoinType.Round, circular_segments=96)
+
+
+def tab_holes():
+    return CrossSection.batch_boolean([CrossSection.circle(TAB_HOLE / 2, 64).translate(c) for c in tab_centres()],
+                                      OpType.Add)
 
 
 def plate_outline(inset=0.0):
@@ -348,12 +375,12 @@ def plate_outline(inset=0.0):
 
 
 def back_pockets():
-    """The pockets of the back in plan: inside the rim (the outline inset by RIB) and above the band, parted by ribs
-    RIB thick into a grid of equal pockets as near RIB_PITCH as the plate divides. Returns the cross-section and
-    (pockets across, pockets up, pocket width, pocket height) in mm."""
-    x0, x1, y0, y1 = RIB, PLATE_W - RIB, BAND, PLATE_H - RIB
-    nx = max(1, round((x1 - x0 + RIB) / RIB_PITCH))
-    ny = max(1, round((y1 - y0 + RIB) / RIB_PITCH))
+    """The pockets of the back in plan: inside the rim (the outline inset by RIB), parted by ribs RIB thick into a
+    grid of equal pockets as near RIB_PITCH as the plate divides with an even count each way (two ribs cross at the
+    middle). Returns the cross-section and (pockets across, pockets up, pocket width, pocket height) in mm."""
+    x0, x1, y0, y1 = RIB, PLATE_W - RIB, RIB, PLATE_H - RIB
+    nx = max(2, 2 * round((x1 - x0 + RIB) / RIB_PITCH / 2))
+    ny = max(2, 2 * round((y1 - y0 + RIB) / RIB_PITCH / 2))
     cw, ch = (x1 - x0 - (nx - 1) * RIB) / nx, (y1 - y0 - (ny - 1) * RIB) / ny
     cells = [CrossSection.square((cw, ch)).translate((x0 + i * (cw + RIB), y0 + j * (ch + RIB)))
              for i in range(nx) for j in range(ny)]
@@ -428,13 +455,16 @@ def read_stl(path):
 
 
 def placement():
-    """Where the 3MF puts the plate: turned by 90 degrees (long side along the bed's y), centred in the area both
-    nozzles reach. Returns the 3 x 4 transform and the footprint on the bed."""
-    w, h = PLATE_H, PLATE_W                         # footprint after the turn
+    """Where the 3MF puts the plate: face down (the drawing on the bed, the ribs up), turned so that its long side
+    runs along the bed's y, centred with its tabs in the area both nozzles reach. Returns the 3 x 4 transform and
+    the footprint on the bed (tabs included)."""
+    out = 2 * TAB_R                                 # the tabs out of the long edges
+    w, h = PLATE_H + 2 * out, PLATE_W               # footprint after the turn
     x0 = (BOTH_NOZZLES_X[0] + BOTH_NOZZLES_X[1] - w) / 2
     y0 = (BED[1] - h) / 2
-    # plate (X, Y) -> bed (x0 + PLATE_H - Y, y0 + X): a turn of +90 degrees about z
-    M = np.array([[0.0, -1.0, 0.0, x0 + PLATE_H], [1.0, 0.0, 0.0, y0], [0.0, 0.0, 1.0, 0.0]])
+    # plate (X, Y, Z) -> bed (x0 + out + Y, y0 + X, TOP - Z): half a turn about the plate's X (face down), a quarter
+    # about z
+    M = np.array([[0.0, 1.0, 0.0, x0 + out], [1.0, 0.0, 0.0, y0], [0.0, 0.0, -1.0, TOP]])
     return M, (x0, y0, x0 + w, y0 + h)
 
 
@@ -497,16 +527,18 @@ def spec_json():
                                  "bottom edges"},
             "tool": "caliper, outside jaws square to the face, tips on the white face",
         },
-        "plate": {"size_mm": [PLATE_W, PLATE_H, BASE + INK], "base_mm": BASE, "ink_mm": INK,
+        "plate": {"size_mm": [PLATE_W, PLATE_H, TOP], "thickness_mm": PLATE_T, "base_mm": BASE, "ink_mm": INK,
                   "corner_radius_mm": CORNER_R, "board_origin_mm": [MARGIN["left"], PLATE_H - MARGIN["top"],
                                                                      BASE + INK],
                   "board_axes": {"x": [1, 0, 0], "y": [0, -1, 0], "z": [0, 0, -1]},
                   "corner_gap_mm": CORNER_GAP, "min_feature_mm": MIN_WIDTH,
-                  "back": {"face_mm": FACE, "rib_mm": RIB, "pockets": [nx_p, ny_p],
-                           "pocket_mm": [round(cw, 2), round(ch, 2)], "pocket_depth_mm": BASE - FACE,
-                           "bottom_band_mm": BAND, "bottom_band_thickness_mm": BASE + INK}},
+                  "back": {"face_mm": FACE, "rib_mm": RIB, "rib_height_mm": RIB_H, "pockets": [nx_p, ny_p],
+                           "pocket_mm": [round(cw, 2), round(ch, 2)], "pocket_depth_mm": RIB_H},
+                  "tabs": {"screw": "M4", "hole_d_mm": TAB_HOLE, "centres_mm": [list(c) for c in tab_centres()],
+                           "out_of_edge_mm": 2 * TAB_R, "thickness_mm": PLATE_T}},
         "files": {"white": f"{NAME}_white.stl", "black": f"{NAME}_black.stl", "3mf": f"{NAME}.3mf"},
-        "print": {"layer_mm": LAYER_H, "colour_change_mm": BASE, "filament_1": "white", "filament_2": "black",
+        "print": {"layer_mm": LAYER_H, "face_down": True, "two_colours_mm": [0.0, INK], "filament_1": "white",
+                  "filament_2": "black",
                   "settings": PRINT},
     }
 
@@ -583,26 +615,54 @@ def check_widths(ink):
                     + (f"; too thin: {bad[:6]}" if bad else ""))
 
 
-def check_back(white, pockets, grid):
-    """The back: ribs and rim at least MIN_WALL (the pockets grown by just under half of it stay apart, grown by just
-    under all of it stay inside the plate), the face too; every pocket closed by ribs that run into the rim and the
-    band; each pocket's shorter side bridged; the bottom band solid at full thickness, wider than the grooves are
-    deep and thinner than they are wide."""
-    nx, ny, cw, ch = grid
+def convex_angles(cs):
+    """The angles inside the plastic (degrees) at the convex corners of a cross-section (outlines counter-clockwise,
+    holes clockwise, as manifold3d gives them)."""
+    out = []
+    for poly in cs.to_polygons():
+        P = np.asarray(poly, np.float64)
+        a, b = P - np.roll(P, 1, axis=0), np.roll(P, -1, axis=0) - P
+        turn = np.degrees(np.arctan2(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0], np.einsum("ij,ij->i", a, b)))
+        out += (180.0 - turn[turn > 1e-6]).tolist()
+    return out or [180.0]
+
+
+def check_back(white, facts):
+    """The back: ribs, rim and tabs at least MIN_WALL (the plastic just behind the ribs' ends, eroded by just under
+    half of it, stays one piece, and has no corner sharper than a right angle: no wedge), the face too; every pocket
+    closed by ribs that run into the rim; PLATE_T thick everywhere, the back one plane. The tabs: solid, their holes
+    through, at least MIN_WALL of plastic round each hole."""
+    pockets, back, (nx, ny, cw, ch) = facts["pockets"], facts["back"], facts["grid"]
+    pieces = len([c for c in back.offset(-(MIN_WALL / 2 - 0.02), JoinType.Miter, 2.0).decompose() if c.area() > 1e-9])
+    sharp = min(convex_angles(back))
     apart = len([c for c in pockets.offset(MIN_WALL / 2 - 0.02, JoinType.Miter, 2.0).decompose() if c.area() > 1e-9])
     inside = (pockets.offset(MIN_WALL - 0.02, JoinType.Miter, 2.0) - plate_outline()).area()
     n = len(pockets.decompose())
-    expect(n == nx * ny and apart == n and inside < 1e-9 and FACE >= MIN_WALL and RIB >= MIN_WALL,
-           f"back: {nx} x {ny} pockets of {cw:.1f} x {ch:.1f} mm, {BASE - FACE:g} deep, each closed; face {FACE:g} mm,"
-           f" ribs and rim {RIB:g} mm (at least {MIN_WALL:g})")
-    expect(min(cw, ch) <= MAX_BRIDGE, f"back: the face bridges {min(cw, ch):.1f} mm over a pocket (at most "
-                                      f"{MAX_BRIDGE:g}), no supports")
-    box = Manifold.cube((PLATE_W + 2.0, BAND, BASE + 2.0)).translate((-1.0, 0.0, -1.0))
-    solid = (plate_outline() ^ CrossSection.square((PLATE_W + 2.0, BAND)).translate((-1.0, 0.0))).area() * BASE
-    band = (white ^ box).volume()
-    expect(abs(band / solid - 1) < 1e-6 and BAND >= GROOVE[1] and BASE + INK <= GROOVE[0] - 0.4,
-           f"bottom band: solid, {BASE + INK:g} mm thick over {BAND:g} mm (the holder's grooves {GROOVE[0]:g} wide,"
-           f" {GROOVE[1]:g} deep)")
+    expect(n == nx * ny and apart == n and inside < 1e-9 and pieces == len(back.decompose()) and sharp > 89.0
+           and FACE >= MIN_WALL and RIB >= MIN_WALL,
+           f"back: {nx} x {ny} pockets of {cw:.1f} x {ch:.1f} mm, {RIB_H:g} deep, each closed; face {FACE:g} mm,"
+           f" ribs and rim {RIB:g} mm, nothing thinner than {MIN_WALL:g}, sharpest corner {sharp:.0f} degrees")
+    depth = BASE - FACE
+
+    def prism(cs, z0, z1):
+        return Manifold.extrude(cs, z1 - z0).translate((0.0, 0.0, z0))
+    lo, hi = white.bounding_box()[2], white.bounding_box()[5]
+    flat = abs(white.slice(BACK + 0.01).area() - back.area()) < 1e-6        # every rib down to the back's plane
+    face = (white ^ prism(plate_outline(), depth, BASE)).volume() / (plate_outline().area() * FACE)
+    expect(abs(lo - BACK) < 1e-6 and abs(hi - TOP) < 1e-6 and flat and abs(face - 1) < 1e-6,
+           f"thickness: {PLATE_T:g} mm everywhere, ribs included; the back one plane, nothing out of it; the face "
+           f"whole")
+    # the tabs: solid round their holes, the holes through
+    solid, through = [], []
+    for c in tab_centres():
+        ring = (CrossSection.circle(TAB_R - 0.05, 96) - CrossSection.circle(TAB_HOLE / 2 + 0.05, 64)).translate(c)
+        solid.append((white ^ prism(ring, BACK + 0.01, TOP - 0.01)).volume() / (ring.area() * (TOP - BACK - 0.02)))
+        through.append((white ^ prism(CrossSection.circle(TAB_HOLE / 2 - 0.02, 64).translate(c), BACK - 1.0,
+                                      TOP + 1.0)).volume())
+    wall = TAB_R - TAB_HOLE / 2
+    expect(all(abs(s - 1) < 1e-3 for s in solid) and max(through) < 1e-6 and wall >= MIN_WALL,
+           f"tabs: {len(solid)} solid ears, holes d{TAB_HOLE:g} through for M4, {wall:g} mm of plastic round each "
+           f"(to the ear's end and to the plate's edge)")
 
 
 def check_fit():
@@ -724,12 +784,14 @@ def cmd_check(_args):
     vb = check_mesh("black", Vb, Fb)
     both = (white ^ black).volume()
     expect(abs(both) < 1e-6 and abs((white + black).volume() / (vw + vb) - 1) < 1e-6,
-           f"bodies touch at z = {BASE:g} without overlapping (common volume {both:.2e} mm3)")
+           f"bodies touch (the drawing inlaid) without overlapping (common volume {both:.2e} mm3)")
     zb = Vb[:, 2]
-    expect(abs(zb.min() - BASE) < 1e-5 and abs(zb.max() - BASE - INK) < 1e-5 and abs(Vw[:, 2].max() - BASE) < 1e-5,
-           f"heights: white 0-{Vw[:, 2].max():.3f}, black {zb.min():.3f}-{zb.max():.3f}")
+    expect(abs(zb.min() - BASE) < 1e-5 and abs(zb.max() - TOP) < 1e-5 and abs(Vw[:, 2].max() - TOP) < 1e-5
+           and abs(Vw[:, 2].min()) < 1e-5,
+           f"heights: white {Vw[:, 2].min():.3f}-{Vw[:, 2].max():.3f}, black {zb.min():.3f}-{zb.max():.3f} "
+           f"(flush with the white: a smooth, flat face off the bed)")
     check_widths(ink)
-    check_back(white, facts["pockets"], facts["grid"])
+    check_back(white, facts)
     expect(facts["label_width_mm"] <= SQUARES[0] * SQUARE - 10,
            f"label {facts['label_width_mm']} mm long, clear of the caliper's place at the lower right")
     print(f"      {facts['corner_cuts']} corners parted by {CORNER_GAP} mm")
@@ -740,8 +802,9 @@ def cmd_check(_args):
     expect({"3D/3dmodel.model", "Metadata/model_settings.config"} <= names
            and all(f'<metadata key="{k}" value="{v}"/>' in cfg for k, v in PRINT.items()),
            f"3MF {NAME}.3mf, with the print settings " + ", ".join(f"{k} {v}" for k, v in PRINT.items()))
-    n = BASE / LAYER_H
-    expect(abs(n - round(n)) < 1e-9, f"colour change at the top of a layer: BASE {BASE:g} = {round(n)} x {LAYER_H:g}")
+    n = [v / LAYER_H for v in (INK, BACK, BASE - FACE, TOP)]
+    expect(all(abs(k - round(k)) < 1e-9 for k in n),
+           f"layers: the drawing in the first {round(n[0])} (two colours), face, ribs' ends on the 0.2 grid")
     spec = json.loads((OUT / f"{NAME}.json").read_text(encoding="utf-8"))
     expect(spec == json.loads(json.dumps(spec_json())), f"{NAME}.json up to date")
     check_detection(Vb, Fb)

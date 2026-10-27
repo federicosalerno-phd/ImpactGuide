@@ -5,8 +5,10 @@
 
 .DESCRIPTION
   Everything it installs lives in %LOCALAPPDATA%\ImpactGuide\launch:
+    impactguide_boot.py  the start: a window at once, then the app behind it (the app keeps this copy current);
+                     the shortcut runs it with the pythonw of the interpreter found here
     launcher.ps1     copied from scripts\, refreshed when its LAUNCHER-VERSION changes
-    ImpactGuide.vbs  the file the shortcut runs, so no console flashes
+    ImpactGuide.vbs  what the shortcut runs when no interpreter was found: the launcher, with no console
     target.json      where impactguide_app.py is, also without the drive letter
     icon.ico         the app's icon, drawn by launcher_assets.py
     theme.json       the SlantUI roles of the launcher's small window
@@ -107,6 +109,9 @@ if (Test-Path -LiteralPath $dst) {
 }
 if ($verSrc -ne $verDst) { Copy-Item -LiteralPath $src -Destination $dst -Force; Say "launcher : version $verSrc installed" }
 else { Say "launcher : already at version $verSrc" }
+$boot = Join-Path $StateDir 'impactguide_boot.py'
+Copy-Item -LiteralPath (Join-Path $ScriptDir 'impactguide_boot.py') -Destination $boot -Force
+Say "start    : $boot"
 
 # --- where the app is ----------------------------------------------------------------
 $rel = $AppPath
@@ -143,22 +148,43 @@ if (Test-Path -LiteralPath $icon) {
         ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force } catch { } }
 }
 
-# --- the file the shortcut runs: wscript with a .vbs, so no console flashes -----------------
+# --- what the shortcut runs -------------------------------------------------------------------
+# The start itself, with pythonw (no console): PowerShell alone takes a second or two to begin, and wscript with a
+# .vbs before it up to another one on a busy computer, which is what kept the window from appearing at the click.
+# Without an interpreter, wscript with the .vbs below, which runs the launcher with no console flashing (window
+# style 1 for the start: a hidden start, 0, would hide its window too).
+$pyw = ""
+if ($py -and (Test-Path -LiteralPath $py)) {
+    $pyw = Join-Path (Split-Path -Parent $py) 'pythonw.exe'
+    if (-not (Test-Path -LiteralPath $pyw)) { $pyw = "" }
+}
 $vbs = Join-Path $StateDir 'ImpactGuide.vbs'
 $lines = @(
     "' ImpactGuide: the launch with no console. install_shortcut.ps1 writes this file.",
-    'Dim fso, sh, launcher',
+    'Dim fso, sh, here, pyw, boot',
     'Set fso = CreateObject("Scripting.FileSystemObject")',
     'Set sh = CreateObject("WScript.Shell")',
-    'launcher = fso.GetParentFolderName(WScript.ScriptFullName) & "\launcher.ps1"',
-    'sh.Run "powershell -NoProfile -ExecutionPolicy Bypass -STA -File """ & launcher & """", 0, False'
+    'here = fso.GetParentFolderName(WScript.ScriptFullName)',
+    ('pyw = "' + $pyw + '"'),
+    'boot = here & "\impactguide_boot.py"',
+    'If pyw <> "" And fso.FileExists(pyw) And fso.FileExists(boot) Then',
+    '    sh.Run """" & pyw & """ """ & boot & """", 1, False',
+    'Else',
+    '    sh.Run "powershell -NoProfile -ExecutionPolicy Bypass -STA -File """ & here & "\launcher.ps1""", 0, False',
+    'End If'
 )
 [IO.File]::WriteAllText($vbs, ($lines -join "`r`n"), [Text.Encoding]::ASCII)
 
+$bootFile = Join-Path $StateDir 'impactguide_boot.py'
 function Write-Shortcut([string]$path) {
     $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
-    $sc.TargetPath = "$env:WINDIR\System32\wscript.exe"
-    $sc.Arguments = '//B "' + $vbs + '"'
+    if ($pyw) {
+        $sc.TargetPath = $pyw
+        $sc.Arguments = '"' + $bootFile + '"'
+    } else {
+        $sc.TargetPath = "$env:WINDIR\System32\wscript.exe"
+        $sc.Arguments = '//B "' + $vbs + '"'
+    }
     $sc.WorkingDirectory = $StateDir
     $sc.IconLocation = $iconRef
     $sc.Description = 'ImpactGuide'

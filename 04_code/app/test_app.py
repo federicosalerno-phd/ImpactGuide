@@ -650,6 +650,7 @@ def test_backend(app, work, calibration=True):
     if calibration:
         test_series(d)
         test_flow(d)
+        test_sequence(d)
         test_judged(d)
     test_midnight(d)
     d.backend.shutdown()
@@ -769,10 +770,10 @@ def test_twin(d, work, scanned):
 
 def test_flow(d):
     """The photos without waiting: never a countdown (none in the preferences, the page or the host; the shutter at
-    once); a Take while a photo is taken follows it; the guide on the next pose at the shutter, the check later on the
-    photo's small picture, its pose kept with it; Calibrate with photos on their way waits for them, and is refused
-    only under the calibration's own least; the photo taken by itself when the simulated phone holds the guide's pose,
-    once the gap is over, and not once the Photos step is left."""
+    once); one photo at a time: a Take while a photo is on its way is refused, the guide stays on its pose until the
+    photo's check, then moves on; its pose kept with it; Calibrate with photos on their way waits for them, and is
+    refused only under the calibration's own least; the photo taken by itself when the simulated phone holds the
+    guide's pose, once the gap is over, and not once the Photos step is left."""
     import re
     import numpy as np
     b = d.backend
@@ -814,7 +815,8 @@ def test_flow(d):
     expect(not missing and "error" not in st and st.get("next"),
            f"the backend calls only methods it has ({missing or 'all there'}); a failing watcher leaves calib_state "
            f"answering")
-    # Take, and Take again at once: the second follows the first; the shutter of each said before its check
+    # Take, and Take again at once: the second refused (one photo at a time); the guide on the same pose until the
+    # check, the next pose only then; the shutter said at once
     n0 = len(d.events)
     t0 = time.monotonic()
     a1 = d.call("calib_take")
@@ -822,21 +824,18 @@ def test_flow(d):
     first_shot = d.wait(lambda: any(x["type"] == "calib_photo" and x.get("action") == "shot" for x in d.events[n0:]), 20)
     t_shot = time.monotonic() - t0
     s_mid = d.call("calib_state")
-    both = d.wait(lambda: sum(1 for x in d.events[n0:] if x["type"] == "calib_photo" and x.get("check")) >= 2, 90)
-    ev = d.events[n0:]
-    kinds = [("shot" if x.get("action") == "shot" else "check") for x in ev
-             if x["type"] == "calib_photo" and (x.get("action") == "shot" or x.get("check"))]
-    at = [i for i, k in enumerate(kinds) if k == "shot"], [i for i, k in enumerate(kinds) if k == "check"]
+    d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n0:]), 60)
+    n1 = len(d.events)
+    d.call("calib_take")
+    both = d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n1:]), 60)
     s = d.call("calib_state")
     folder = raw / s["series"]["name"]
     checks = b._photo_checks(folder)
     poses = sorted(c.get("pose") for c in checks.values())
-    expect(a1.get("ok") and a2.get("queued") and first_shot and t_shot < 1.5 and len(at[0]) == 2 and len(at[1]) == 2
-           and at[0][0] < at[1][0] and at[0][1] < at[1][1]
-           and both and poses == [0, 1] and s_mid["next"]["n"] >= 1 and s["next"]["n"] == 2 and s["count"] == 2,
-           f"Take twice: the second taken right after the first ({a2}); the shutter {t_shot:.2f} s after Take, both "
-           f"shutters before their checks ({' '.join(kinds)}); the guide on pose {s_mid['next']['n'] + 1} at once; "
-           f"each photo kept with its pose ({poses})")
+    expect(a1.get("ok") and a2.get("error") == "busy" and first_shot and t_shot < 1.5 and both and poses == [0, 1]
+           and s_mid["next"]["n"] == 0 and s_mid["shot"] and s["next"]["n"] == 2 and s["count"] == 2,
+           f"Take twice: the second refused ({a2}); the shutter {t_shot:.2f} s after Take; the guide on pose "
+           f"{s_mid['next']['n'] + 1} until the check; each photo kept with its pose ({poses})")
     shots = s["series"]["shots"]
     tim = [c.get("timing_s") or {} for c in checks.values()]
     expect(len(shots) == 2 and all(x["state"] == "kept" and x["thumb"].startswith("file:") for x in shots)
@@ -905,6 +904,124 @@ def test_flow(d):
     b._pending_cal.clear()
 
 
+def test_sequence(d):
+    """One photo at a time, as a strict sequence: the guide on its pose from Take through a camera that counts down,
+    the copy and the check, then the next; a photo put aside: the same pose again; an automatic photo due for a guide
+    that moved since is not taken; a photo of the strip opened, deleted, retaken (its pose at once); Start again in the
+    middle of a photo: everything clean at once, the old photo's events stale (an older sequence)."""
+    import numpy as np
+    b = d.backend
+    raw = b.roots.calib_raw
+    had = {x.name for x in raw.iterdir()} if raw.is_dir() else set()
+    phone = b.phone()
+    phone.photo_px = (2040, 1536)
+    d.call("calib_set", json.dumps({"mode": "photo", "plan": "quick", "kind": "calibration", "auto": False}))
+    d.call("board_area", area(1500, 820))
+    d.call("calib_series_new")
+    take0 = phone.take
+
+    def counting(timeout=None, pressed=None, keep_mode=False):     # the camera app's own timer: 1 s after the press
+        def late():
+            if pressed:
+                pressed()
+            time.sleep(1.0)
+        name = take0(pressed=late, keep_mode=keep_mode)
+        phone.last_shot = {"name": name, "delay_s": 1.0 + ig.acquisition.COUNTDOWN_S}
+        return name
+    phone.take = counting
+    try:
+        # the shot: the guide's pose sampled until the check, one value all along; the next pose only after it
+        n0 = len(d.events)
+        d.call("calib_take")
+        poses, states, end = set(), [], time.monotonic() + 60
+        while time.monotonic() < end and not any(x["type"] == "calib_photo" and x.get("check")
+                                                 for x in d.events[n0:]):
+            st = d.call("calib_state")
+            poses.add(st["next"]["n"])
+            if st["shot"] and (not states or states[-1] != st["shot"]["state"]):
+                states.append(st["shot"]["state"])
+            d.wait(lambda: False, 0.05)
+        after = d.call("calib_state")
+        expect(poses == {0} and "copying" in states and after["next"]["n"] == 1 and not after["shot"]
+               and after["count"] == 1 and after["countdown"],
+               f"one shot: the guide on pose 1 from Take to the check ({sorted(p + 1 for p in poses)}, {states}), then "
+               f"pose {after['next']['n'] + 1}; the camera's own countdown said on the page")
+    finally:
+        phone.take = take0
+    # a photo without the board: put aside, the same pose again (a clear retake, never the next pose)
+    b._sim_scene = lambda: (lambda: np.full((1536, 2040, 3), 90, np.uint8))
+    try:
+        n1 = len(d.events)
+        d.call("calib_take")
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n1:]), 60)
+    finally:
+        del b._sim_scene
+    s = d.call("calib_state")
+    expect(s["next"]["n"] == 1 and s["series"]["shots"][-1]["state"] == "retake" and s["count"] == 1,
+           f"a photo put aside: the same pose again ({s['next']['n'] + 1}), retake on its small picture")
+    # a stale automatic photo: due for pose 1, fired once the guide is on another pose: not taken
+    d.call("calib_set", json.dumps({"auto": True}))
+    d.call("calib_watch", True)
+    w = b._auto
+    w.stop()
+    stale_key = (s["series"]["name"], 0)
+    shots0 = len(b._shots)
+    b._auto_fire(stale_key)
+    stale_ok = len(b._shots) == shots0 and "phone" not in b._busy
+    d.call("calib_watch", False)
+    d.call("calib_set", json.dumps({"auto": False}))
+    expect(stale_ok, "an automatic photo due for a guide that moved since: not taken")
+    # the strip: open, delete, retake
+    opened = []
+    keep_open = ig.open_externally
+    ig.open_externally = lambda path: opened.append(Path(path).name)
+    try:
+        kept = next(x["name"] for x in s["series"]["shots"] if x["state"] == "kept")
+        o = d.call("calib_photo_open", kept)
+        n2 = len(d.events)
+        d.call("calib_take")
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("check") for x in d.events[n2:]), 60)
+        s2 = d.call("calib_state")
+        r = d.call("calib_photo_redo", kept)
+        gone = d.call("calib_photo_drop", s2["series"]["shots"][-1]["name"])
+    finally:
+        ig.open_externally = keep_open
+    names = [x["name"] for x in gone["series"]["shots"]]
+    expect(o.get("ok") and opened == [kept] and s2["next"]["n"] == 2 and r["next"]["n"] == 0 and r["count"] == 1
+           and kept not in names and gone["count"] == 0 and gone["next"]["n"] == 0,
+           f"a photo of the strip: opened ({opened}); retaken: the guide on its pose at once ({r['next']['n'] + 1}); "
+           f"deleted: out of the strip and of the count ({gone['count']})")
+    # Start again during a photo: at once, clean; the old photo's check comes with the old sequence
+    phone.take = counting
+    try:
+        n3 = len(d.events)
+        d.call("calib_take")
+        d.wait(lambda: any(x["type"] == "calib_photo" and x.get("action") == "shot" for x in d.events[n3:]), 20)
+        s0 = d.call("calib_state")
+        seq0, old = s0["seq"], raw / s0["series"]["name"]
+        t0 = time.monotonic()
+        a = d.call("calib_series_new")
+        dt = time.monotonic() - t0
+        # the old photo dropped with its series at once; the phone still ends its shot and its copy, which go nowhere
+        d.wait(lambda: not b._shots and not b._checking() and not b._copy_queue
+               and not {"phone", "phone_copy"} & b._busy, 60)
+    finally:
+        phone.take = take0
+    late = [x for x in d.events[n3:] if x["type"] == "calib_photo" and x.get("check")]
+    s3 = d.call("calib_state")
+    expect(a["seq"] == seq0 + 1 and a["count"] == 0 and a["next"]["n"] == 0 and not a["shot"] and dt < 1.0
+           and all(x["seq"] == seq0 for x in late) and s3["count"] == 0 and not s3["series"]["shots"]
+           and s3["next"]["n"] == 0 and a["dropped"] > 0 and not old.exists() and s3["old_n"] == 0,
+           f"New calibration in the middle of a photo: clean at once ({dt:.2f} s, pose {a['next']['n'] + 1}, none on "
+           f"its way), the old series deleted ({a['dropped']} photos); the old photo's events stale")
+    phone.photo_px = b.run().config.photo_px
+    phone.last_shot = None
+    for x in raw.iterdir():
+        if x.name not in had:
+            shutil.rmtree(x)
+    b._pending_cal.clear()
+
+
 def test_judged(d):
     """The calibration judges its photos: never good with a board not flat, a phone that moved or automatic settings
     (the worst first; a corner never reached only advice); each photo checked against the camera's settings of the
@@ -957,7 +1074,12 @@ def test_judged(d):
     expect(got.get("name") == "b.jpg" and got.get("first") == first and got.get("size") == [4080, 3072],
            f"a photo checked against the settings of the first one kept ({got.get('first')})")
     # every pose of the plan taken, the board never in the top right corner: that corner's pose again, past the plan
-    d.call("calib_series_new")
+    # (a new series that keeps the old photos: the folder above is used again below)
+    d.call("calib_set", json.dumps({"keep_old": True}))
+    kept = d.call("calib_series_new")
+    d.call("calib_set", json.dumps({"keep_old": False}))
+    expect(folder.is_dir() and kept["dropped"] == 0 and kept["keep_old"],
+           "a new calibration that keeps the old photos: the old series left as it is")
     plan = calib_guide.PLANS["quick"]
     b._poses_taken = lambda *a: set(range(len(plan)))
     try:
@@ -981,11 +1103,11 @@ def test_judged(d):
     phone.take = take
     try:
         n = len(d.events)
-        b._shoot_into(folder, check=False)
+        shot = b._shoot_into(folder, check=False)
         d.wait(lambda: any(x["type"] == "calib_photo" and x.get("name") for x in d.events[n:]), 30)
     finally:
         del phone.take
-    expect(seen.get("keep_mode") is True, f"a calibration photo: the camera app kept in its mode ({seen})")
+    expect(seen.get("keep_mode") is True, f"a calibration photo: the camera app kept in its mode ({seen}, {shot})")
     for x in raw.iterdir():
         if x.name not in had:
             shutil.rmtree(x)
@@ -1919,16 +2041,18 @@ LENS_READ = r"""
 """
 
 
-# The board's holder on the post in the head's place (ui/18-twin.js setMount), the board taken to seat 2, then the head
-# again; nothing when the model has no holder (made before it was in the scene)
+# The board's ball head on the post in the head's place (ui/18-twin.js setMount), in P1 then in P5 by its button, then
+# the head again; nothing when the model has no holder (made before it was in the scene)
 BOARD_READ = r"""
 (function () {
   if (!TWIN.hasBoard()) return JSON.stringify({ has: false });
-  const at = function () { const p = TWIN.probe(); return [p.mount, p.seat, p.headShown, p.boardShown, p.holderA || p.holderB, p.boardAt, p.swing]; };
-  TWIN.setMount('board', 0); const s1 = at();
-  $('twSeats').children[1].click(); const s2 = at();
+  const at = function () { const p = TWIN.probe(); return [p.mount, p.ballPose, p.headShown, p.boardShown, p.holderA || p.holderB, p.boardAt, p.swing]; };
+  TWIN.setMount('board', 'P1'); const s1 = at();
+  const b5 = Array.prototype.find.call($('twPoses').children, function (b) { return b.dataset.pose === 'P5'; });
+  if (b5) b5.click();
+  const s2 = at(), tip = b5 ? b5.title : '';
   $('twMount').children[0].click(); const h = at();
-  return JSON.stringify({ has: true, s1: s1, s2: s2, head: h, seats: $('twSeats').children.length });
+  return JSON.stringify({ has: true, s1: s1, s2: s2, head: h, poses: $('twPoses').children.length, tip: tip });
 })()
 """
 
@@ -1982,7 +2106,6 @@ SWEEP = [
     ("cal_plate_short", "__adv('calBdShort', true)", 900, True),
     ("cal_sheet", "__adv('calBdShort', false); BOARD.set({kind: 'sheet'})", 1300, True),
     ("cal_photos_phys", "go('calibration', 'photos')", 1500, True),
-    ("cal_bench", "BOARD.set({kind: 'plate'}); CAL.set({plan: 'bench'})", 2200, True),
     ("cal_bench_quick", "CAL.set({plan: 'quick'})", 900, False),
     ("cal_photos", "BOARD.set({kind: 'screen'}); go('calibration', 'photos')", 1800, True),
     ("cal_photos_adv", "__adv('calPhAdv', true)", 900, True),
@@ -2446,13 +2569,15 @@ def test_ui(work, shots):
             ("board_14_photos", "", 300, None),
             ("-take", lambda: None, 0, ("take", 12)),
             # the space bar takes the next photo at once: the guide flashes and moves on
+            # pressed twice at once: one photo (the same strict sequence as the photo taken by itself)
             ("-space", "window.__n0 = CAL.state.count; window.__g0 = CAL.state.next && CAL.state.next.n;"
+                       " for (var i = 0; i < 2; i++) {"
                        " document.body.dispatchEvent(new KeyboardEvent('keydown', {key: ' ', bubbles: true}));"
-                       " document.body.dispatchEvent(new KeyboardEvent('keyup', {key: ' ', bubbles: true}))", 600,
+                       " document.body.dispatchEvent(new KeyboardEvent('keyup', {key: ' ', bubbles: true})); }", 600,
              ("space_flash", "JSON.stringify([$('phGuide').classList.contains('shot'), $('cpCard').classList.contains('shot')])")),
             ("cal_14b_space", "", 2500,
              ("space", "JSON.stringify([window.__n0, CAL.state.count, window.__g0, CAL.state.next && CAL.state.next.n,"
-                       " $('calAutoSay').textContent, (CAL.state.series.shots || []).length])")),
+                       " $('calAutoSay').textContent, (CAL.state.series.shots || []).length, !!CAL.state.shot])")),
             # the phone's video: the space bar never starts or stops a film, and nothing is taken by itself
             ("-space_video", "CAL.set({mode: 'video'}); setTimeout(function () { document.body.dispatchEvent("
                              "new KeyboardEvent('keydown', {key: ' ', bubbles: true})); }, 900)", 2600,
@@ -2676,10 +2801,12 @@ def test_ui(work, shots):
            f"({space_video})")
     expect(few and few[0] < few[3] and few[2] and few[1] == "At least 8 photos",
            f"window: under the calibration's least, Calibrate says how many it takes ({few})")
-    expect(flash == [True, True] and space and space[1] == space[0] + 1 and space[3] != space[2]
-           and space[4] == "Space bar or Enter: take" and space[5] >= 12,
-           f"window: the space bar takes the photo at once, the guide and the counter flash ({flash}), the guide moves "
-           f"on, the strip shows the photos ({space})")
+    # the guide moves on once the photo is checked; still in flight, it stays on its pose
+    moved_on = space and not space[6] and space[1] == space[0] + 1 and space[3] != space[2]         and space[4] == "Space bar or Enter: take"
+    expect(flash == [True, True] and space and (moved_on or (space[6] and space[3] == space[2]))
+           and space[1] <= space[0] + 1 and space[5] >= 12,
+           f"window: the space bar pressed twice takes one photo at once, the guide and the counter flash ({flash}), "
+           f"the guide moves on after its check, the strip shows the photos ({space})")
     c1, c2 = read("calib_first"), read("calib_again")
     leave, saved = read("leave"), read("saved")
     sound_phone = read("sound_phone")
@@ -2746,11 +2873,11 @@ def test_ui(work, shots):
             print("skip  window: the twin's board holder, not in this model (made before it)", flush=True)
         else:
             s1, s2, hd = tb["s1"], tb["s2"], tb["head"]
-            expect(s1[:5] == ["board", 0, False, True, False] and s2[:4] == ["board", 1, False, True]
-                   and s2[5] != s1[5] and hd[:5] == ["head", 1, True, False, True] and tb["seats"] == 3
-                   and s1[6] == 30,
-                   f"window: the twin with the board's holder on the post in the head's place, the board moved to "
-                   f"seat 2 ({s1[5]} -> {s2[5]} mm), the pendulum hooked up; the head again")
+            expect(s1[:5] == ["board", "P1", False, True, False] and s2[:4] == ["board", "P5", False, True]
+                   and s2[5] != s1[5] and hd[:5] == ["head", "P5", True, False, True] and tb["poses"] == 7
+                   and s1[6] == 30 and "40" in tb.get("tip", ""),
+                   f"window: the twin with the ball head on the post in the head's place, the board from P1 to P5 by "
+                   f"its button ({s1[5]} -> {s2[5]} mm; '{tb.get('tip')}'), the pendulum hooked up; the head again")
         size = lambda p: sum(x * x for x in (p or {}).get("marker") or [0]) ** 0.5  # noqa: E731
         expect(t_scans and t_scans["mode"] == "results" and t_scans["points"] == 7 and t_gain and t_gain["ghost"]
                and t_gain["gain"] == 12 and size(t_gain) > 5 * size(t_scans) > 0,

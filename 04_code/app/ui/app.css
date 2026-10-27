@@ -5,10 +5,10 @@
    the status cells of home included).
    ========================================================================== */
 
-/* The mark on the band. The library gives .tbar-logo its size (the 22 px square of --tbar-mark,
-   with its radius) and, as a button, its disc; the page gives only the picture, the app icon,
-   as a background so it keeps its own colours and is fitted, never cropped (as in UniGuide): the
-   icon's drawing without its disc, cut tight, so it fills the square as SlantUI's own mark does. */
+/* The mark on the band. The library gives .tbar-logo its size and, as a button, its disc; the page
+   gives only the picture, the app icon, as a background so it keeps its own colours and is fitted,
+   never cropped (as in UniGuide). The icon is round (data-round in ui.html): SlantUI draws it as
+   the button's disc itself, so the band, the loading screen and the desktop show one icon. */
 #tbLogo{background:url(impactguide-mark.svg) center/contain no-repeat}
 
 /* A toolbar group per step; only the open step's is shown. */
@@ -141,8 +141,14 @@
 .tw-hint{max-width:calc(100% - 130px)}
 .tw-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
         text-align:center;font-size:var(--fs-lg);color:var(--text-3);pointer-events:none}
+.tw-off{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+        padding:24px;text-align:center;background:var(--surface-2);color:var(--text-3)}
+.tw-off > svg{width:40px;height:40px;opacity:.55}
+.tw-3d.tw-dark > :not(.tw-off){display:none !important}
+.tw-off-t{font-size:var(--fs-lg)}
+[data-panel="twin"].twin-off .rp-scroll > :not(.tw-on-row){display:none}
 .tw-views{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-.tw-seats{grid-template-columns:repeat(3,minmax(0,1fr))}
+.tw-poses{grid-template-columns:repeat(4,minmax(0,1fr))}
 .tw-views .btn{min-width:0}
 .tw-step{display:flex;align-items:center;gap:8px}
 .tw-step .btn{flex:none}
@@ -225,6 +231,12 @@
 .ph-tile.kept .ph-tile-s{background:var(--ok)}
 .ph-tile.retake::after{box-shadow:inset 0 0 0 2px var(--warn)}
 .ph-tile.retake img{opacity:.4}
+.ph-tile[role=button]{cursor:pointer}
+.ph-tile.sel::after{box-shadow:inset 0 0 0 3px var(--accent)}
+.ph-menu{display:flex;gap:6px;margin-top:6px}
+.ph-menu.hidden{display:none}
+.auto-say.ring{display:flex;align-items:center;gap:6px}
+.auto-say.ring::before{content:'';flex:none;width:12px;height:12px;border-radius:50%;background:conic-gradient(var(--ok-text) calc(var(--hold,0)*360deg),var(--surface-2) 0);-webkit-mask:radial-gradient(circle,transparent 3px,#000 3.5px);mask:radial-gradient(circle,transparent 3px,#000 3.5px)}
 .ph-tile.retake .ph-tile-s{background:var(--warn)}
 /* kept and to be taken again differ in shape too, not only in colour: a tick, a cross */
 .ph-tile.kept .ph-tile-s,.ph-tile.retake .ph-tile-s{width:12px;height:12px;right:3px;bottom:3px}
@@ -236,6 +248,34 @@
 /* the shutter went: the guide and the counter flash (never the board, which may be in the photo) */
 @keyframes shot{0%{box-shadow:0 0 0 3px var(--accent);filter:brightness(1.3)}100%{box-shadow:0 0 0 3px transparent;filter:none}}
 #phGuide.shot .guide,#cpCard.shot{animation:shot .55s ease-out}
+/* a photo on its way: the guide faded under a card that says what the wait is for, a turning ring and a bar that
+   fills smoothly over the time the last photo took; the next pose comes in with a short slide */
+.guide-wrap{position:relative;display:flex;flex-direction:column}
+.ph-guide.wide .guide-wrap{width:var(--gw)}
+.guide-wrap>.guide{transition:opacity .25s ease,filter .25s ease}
+.guide-wrap.waiting>.guide{opacity:.28;filter:saturate(.4)}
+.ph-wait{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+         padding:16px;pointer-events:none;opacity:0;transition:opacity .2s ease}
+.guide-wrap.waiting .ph-wait{opacity:1}
+.ph-wait-card{display:flex;align-items:center;gap:12px;max-width:100%;padding:10px 16px;border-radius:var(--r-md);
+              background:var(--surface-1);box-shadow:0 6px 24px rgba(0,0,0,.28)}
+.ph-wait-ring{flex:none;width:22px;height:22px;border-radius:50%;
+              background:conic-gradient(from 0deg,transparent 0 25%,var(--accent) 100%);
+              -webkit-mask:radial-gradient(circle,transparent 7.5px,#000 8px);mask:radial-gradient(circle,transparent 7.5px,#000 8px);
+              animation:wait-turn .9s linear infinite}
+@keyframes wait-turn{to{transform:rotate(360deg)}}
+.ph-wait-w{display:flex;flex-direction:column;gap:1px;min-width:0}
+.ph-wait-t{font-size:var(--fs);font-weight:var(--w-strong);color:var(--text-1);white-space:nowrap;overflow:hidden;
+           text-overflow:ellipsis}
+.ph-wait-s{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ph-wait-bar{width:min(240px,70%);height:3px;border-radius:2px;background:var(--surface-1);overflow:hidden}
+.ph-wait-bar i{display:block;height:100%;width:100%;border-radius:inherit;background:var(--accent);transform-origin:left;
+               transform:scaleX(0);transition-property:transform;transition-timing-function:cubic-bezier(.25,.6,.35,1)}
+@keyframes guide-in{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+.guide-wrap>.guide.fresh{animation:guide-in .32s ease-out}
+@media (prefers-reduced-motion: reduce){.ph-wait-ring{animation-duration:2.4s}.guide-wrap>.guide.fresh{animation:none}}
+.ph-tile.kept.warn::after{box-shadow:inset 0 0 0 2px var(--warn)}
+.ph-tile.kept.warn .ph-tile-s{background:var(--warn)}
 /* the photo taken by itself: its switch, and below it what it waits for */
 .auto-row{gap:4px}
 .auto-say{font-size:var(--fs-sm);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:2px}

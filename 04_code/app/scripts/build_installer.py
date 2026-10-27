@@ -17,7 +17,8 @@ impactguide.iss. In OUT:
         work/                   the models of the live view (face, occluders, mandible), when found in the work folder
         twin/                   the twin's model in use, copied into the user's cache at the first start
         scrcpy/                 scrcpy's server and adb (Apache 2.0, its LICENSE beside it), for the phone's stream
-        impactguide_start.pyw   the start (this folder's), impactguide.ico (launcher_assets.py), LICENSE.txt
+        impactguide_start.pyw   the start (this folder's), impactguide.ico and first.json (the first window's,
+                                launcher_assets.py), LICENSE.txt
     ImpactGuide-<version>-setup.exe
 
 Left out: PyTorch, SAM 2 and the network's weights (only the correction of the registration needs them: --ai adds

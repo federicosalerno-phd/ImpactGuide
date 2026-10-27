@@ -1196,7 +1196,7 @@ def check_photo(path, board, size=None, first=None):
     problems = settings_problems(settings, first)
     out["settings"] = {**settings, "problems": problems}
     out["why"] = _board_why(img, board, out)
-    if problems:
+    if problems and not out["why"]:     # the board's own fault first: a retake for it fixes something
         out["why"] = "settings"
     out["ok"] = not out["why"]
     return out

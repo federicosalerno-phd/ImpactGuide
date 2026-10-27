@@ -47,11 +47,32 @@ import time
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import least_squares
-from scipy.spatial import cKDTree
 
+import drive_cache              # the project's files on the synced drive, from memory (load_frame, refresh_rigs)
 import trials                   # the protocol: the arm positions the scans are taken from
-from scipy.spatial.transform import Rotation
+
+
+# scipy takes seconds to import (its linear algebra, its array layer) and only measuring a scan needs it, while the
+# app imports this module at its start (scans_page.py): the three names below import it at their first use.
+def least_squares(*args, **kw):
+    from scipy.optimize import least_squares as solve
+    return solve(*args, **kw)
+
+
+def cKDTree(*args, **kw):  # noqa: N802  (scipy's name)
+    from scipy.spatial import cKDTree as tree
+    return tree(*args, **kw)
+
+
+class _Rotation:
+    """scipy.spatial.transform.Rotation, imported at its first use."""
+
+    def __getattr__(self, name):
+        from scipy.spatial.transform import Rotation as R
+        return getattr(R, name)
+
+
+Rotation = _Rotation()
 
 SPHERE_D = 15.0
 RIGS = {
@@ -112,7 +133,15 @@ def load_targets(path=TARGETS_CSV, roles=TARGET_ROLES):
 
 def load_frame(path=FRAME_JSON):
     """T_B_mandible (4 x 4, mm): the head frame B from the mandible frame, or None when the file does not exist. The
-    file holds the single-precision matrix of the scene; its rotation is made orthonormal (a change below 1e-6)."""
+    file holds the single-precision matrix of the scene; its rotation is made orthonormal (a change below 1e-6).
+    The project's own file is answered from memory (_FRAME, drive_cache.py): every state of the Scans page asks."""
+    if Path(path) == FRAME_JSON:
+        T = _FRAME.get()
+        return None if T is None else T.copy()
+    return _read_frame(path)
+
+
+def _read_frame(path):
     if not Path(path).exists():
         return None
     T = np.asarray(json.loads(Path(path).read_text(encoding="utf-8"))["T_B_mandible"], np.float64)
@@ -121,6 +150,9 @@ def load_frame(path=FRAME_JSON):
     U, _, Vt = np.linalg.svd(T[:3, :3])
     T[:3, :3] = U @ np.diag([1.0, 1.0, np.linalg.det(U @ Vt)]) @ Vt
     return T
+
+
+_FRAME = drive_cache.Memo(lambda: _read_frame(FRAME_JSON), [FRAME_JSON])
 
 
 def load_calibration(path=None):
@@ -147,6 +179,8 @@ RIG_DESIGN = Path(__file__).resolve().parents[2] / "03_data" / "processed" / "pr
 RIGS_BUILT_IN = {k: v.copy() for k, v in RIGS.items()}
 RIG_TOL_MM = 1.0        # a rig calibration whose distances differ from the design's by more is of other spheres
 _DESIGN = {"key": None, "info": None}
+_RIG_FILE = RIG_DESIGN
+_RIG_STAMP = drive_cache.Memo(lambda: drive_cache.stamp([_RIG_FILE])[0], [_RIG_FILE])
 
 
 def design_rigs(path=None):
@@ -180,11 +214,15 @@ def refresh_rigs(path=None):
     """RIGS as the rig design file has it now (the built-in rigs without one), changed in place key by key. Returns
     the design read, None for the built-in rigs."""
     path = Path(RIG_DESIGN if path is None else path)
-    try:
-        st = path.stat()
-        key = (str(path), st.st_mtime_ns, st.st_size)
-    except OSError:
-        key = (str(path), None, None)
+    if path == _RIG_FILE:       # the project's: its size and time from memory, looked at again by drive_cache's thread
+        st = _RIG_STAMP.get()
+        key = (str(path), st[1], st[0]) if st else (str(path), None, None)
+    else:
+        try:
+            st = path.stat()
+            key = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = (str(path), None, None)
     if key != _DESIGN["key"]:
         info = design_rigs(path) if key[1] is not None else None
         new = info["rigs"] if info else RIGS_BUILT_IN
@@ -390,7 +428,14 @@ def fibonacci_sphere(n):
     return np.column_stack([r * np.cos(a), r * np.sin(a), z])
 
 
-DIRECTIONS = cKDTree(fibonacci_sphere(500))
+_DIRECTIONS = []
+
+
+def directions():
+    """The 500 directions a sphere's coverage is counted in (a tree of them, made at the first fit)."""
+    if not _DIRECTIONS:
+        _DIRECTIONS.append(cKDTree(fibonacci_sphere(500)))
+    return _DIRECTIONS[0]
 
 
 def fit_sphere(points, centre=None, radius=None, fixed_radius=False, trim=3.0, iters=5):
@@ -435,11 +480,11 @@ def fit_sphere(points, centre=None, radius=None, fixed_radius=False, trim=3.0, i
     dof = max(len(Q) - J.shape[1], 1)
     cov = (r @ r / dof) * np.linalg.pinv(J.T @ J)
     u = Q - x[:3]
-    cells = DIRECTIONS.query(u / np.linalg.norm(u, axis=1)[:, None])[1]
+    cells = directions().query(u / np.linalg.norm(u, axis=1)[:, None])[1]
     return {"centre": x[:3].copy(), "radius": r_fixed if fixed_radius else float(x[3]),
             "rms": float(np.sqrt(np.mean(r ** 2))), "n": len(P), "n_in": int(mask.sum()),
             "sigma_centre": float(np.sqrt(np.trace(cov[:3, :3]))),
-            "coverage": len(np.unique(cells)) / DIRECTIONS.n, "inliers": mask}
+            "coverage": len(np.unique(cells)) / directions().n, "inliers": mask}
 
 
 def grid_keys(X, cell):

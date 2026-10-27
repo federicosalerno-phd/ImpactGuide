@@ -7,12 +7,13 @@
 //              to hold the phone for the next one (12-figures.js). A photo is
 //              taken at once, never after a countdown: with Take, the space bar
 //              or Enter, or by itself when the phone holds the guide's pose still
-//              (Auto, on unless switched off); a flash and a short sound say so
-//              and the guide moves on. Each photo is checked in the background
-//              (board found, corners, blur, the same size as the others) and its
-//              small picture says later whether it is kept or put aside: its
-//              pose comes again; one refused for the camera's settings says
-//              which. A counter with the least and the most the plan takes.
+//              (Auto, on unless switched off); a flash and a short sound say so.
+//              One photo at a time: the guide stays on its pose until the photo
+//              is checked (board found, corners, blur, the same size as the
+//              others), then moves on, or shows the same pose again when it is
+//              put aside; one refused for the camera's settings says which. A
+//              press on a small picture opens, deletes or retakes that photo.
+//              A counter with the least and the most the plan takes.
 //   Calibrate  the calibration and its result: a verdict, never good with a
 //              board not flat, a phone that moved or automatic settings, and
 //              what spoils it (the worst in full); the error of each
@@ -33,6 +34,12 @@ const CAL = {
   excludeFor: '',   // the result `exclude` belongs to
   waiting: false,   // the stream of the streaming mode was asked for and has not started yet
   keys: false,      // the space bar and Enter take the photo (wired once)
+  tile: '',         // the photo of the strip whose actions are on show
+  asking: false,    // a Take asked and not answered yet (the space bar pressed twice takes one photo)
+  waitAt: null,     // the photo on its way the wait card shows: {t0, state, pose}
+  guideKey: '',     // the pose the guide shows (a new one slides in)
+  // seconds from Take to the shutter, the photo whole on the phone, copied, checked: until the series has its own
+  WAIT_S: { photo: { shutter: 1, taken: 5.5, copied: 11.5, checked: 13 }, stream: { shutter: 0, checked: 1.5 } },
 
   enter: function (step) {
     showView(step === 'board' ? 'board' : 'cal-' + step);
@@ -91,6 +98,7 @@ const CAL = {
   },
 
   render: function (s) {
+    if (CAL.state && s.seq !== undefined && CAL.state.seq !== undefined && s.seq < CAL.state.seq) return;   // stale
     CAL.state = s;
     if (s.live && s.live.purpose) setLiveOwner(s.live.purpose);
     BOARD.render(s.board_ui);
@@ -123,7 +131,6 @@ const CAL = {
     });
     $('calPlanQ').textContent = fmtNum(s.plans.quick.n, 0);
     $('calPlanA').textContent = fmtNum(s.plans.accurate.n, 0);
-    if (s.plans.bench) $('calPlanB').textContent = fmtNum(s.plans.bench.n, 0);
     const bench = !check && s.plan === 'bench';
     $('calPhotosSub').textContent = T(check ? 'cal.photos.sub.check' : stream ? 'cal.photos.sub.stream'
       : film ? 'cal.photos.sub.video' : 'cal.photos.sub');
@@ -149,14 +156,19 @@ const CAL = {
     // what to change before the next photo: the camera's settings the last one was refused for, else a phone that
     // moved in the last calibration (kept still on a stand); the camera in Pro with its focus set by hand
     const last = s.series && s.series.same ? s.series.last : null;
-    // the bench: before the first photo what to set up (the guide says the seat and the arm angle of each stop)
-    const warn = last && last.why === 'settings' ? Tcode('cal.set.', (last.problems || [])[0], 'exposure_auto')
-      : bench ? (!n ? T('cal.ph.bench') : '')
+    // the bench: before the first photo what to set up, at the first stop of each pose the ball joint to set (the
+    // guide says how), for the last photos the board by hand
+    const nx = s.next || {}, onHead = nx.view === 'bench';
+    const warn = s.countdown ? T('cal.countdown')
+      : last && (last.why === 'settings' || last.warn === 'settings')
+        ? Tcode('cal.set.', (last.problems || [])[0], 'exposure_auto')
+      : bench ? (!n ? T('cal.ph.bench') : !s.next ? '' : !onHead ? T('cal.ph.bench.hand')
+        : nx.first ? T('cal.ph.bench.set', nx.pose) : '')
       : s.moved ? T('cal.ph.stand') : '';
     $('calPhWarn').textContent = warn;
     $('calPhWarn').classList.toggle('hidden', !warn);
-    // the bench plan: the bench in 3D with the board's holder on (ui/18-twin.js)
-    $('calTwin').classList.toggle('hidden', !bench || typeof TWIN === 'undefined' || TWIN.failed);
+    // the bench plan: the bench in 3D with the ball joint on (ui/18-twin.js), while the photos are on the joint
+    $('calTwin').classList.toggle('hidden', !bench || (!!s.next && !onHead) || typeof TWIN === 'undefined' || TWIN.failed);
     $('calProNote').classList.toggle('hidden', s.mode !== 'photo');
 
     // the stage: the board (on this monitor) or the live picture, beside the guide
@@ -170,7 +182,7 @@ const CAL = {
     $('calTakeL').textContent = T(rec ? 'cal.take.stop' : film ? 'cal.take.film' : stream ? 'cal.take.frame' : 'cal.take');
     const streamOff = stream && !(s.live && s.live.purpose === 'calibration' && s.live.running);
     // a photo on its way never holds Take back: the next one follows it at once; a film's own work does
-    take.disabled = (film ? busyNow : CAL.takeBusy(s))
+    take.disabled = (film ? busyNow : CAL.takeBusy(s) || !!s.shot || CAL.asking)
       || (!rec && (needBoard || (full && !film) || streamOff || !s.board_ui.active));
     take.title = needBoard ? T('cal.need.board') : full ? T('cal.count.full') : film ? '' : T('cal.take.hint');
     CAL.autoSay(s.auto, s);
@@ -182,7 +194,8 @@ const CAL = {
     $('calOpen').disabled = !s.series;
     $('calRetake').disabled = !(s.series && s.series.last && s.series.last.ok) || busyNow;
     $('calImport').disabled = busyNow;
-    $('calNew').disabled = busyNow;
+    $('calNew').disabled = CAL.takeBusy(s);
+    $('calKeepOld').checked = !!s.keep_old;
   },
 
   // The Photos step's stage: the board on this monitor or the live picture, the guide of the next photo, the last one.
@@ -205,17 +218,27 @@ const CAL = {
       : T(lv.tracked ? 'cal.stream.seen' : 'cal.stream.none');
     $('phLiveTag').classList.toggle('hidden', false);
     $('phGuide').classList.toggle('wide', !screen && !stream);
-    if (s.next) FIG.guide($('phGuideFig'), s.next, !screen && !stream);
-    else {
+    const gk = s.next ? s.next.n + '|' + (s.next.extra || '') : '';
+    if (s.next) {
+      FIG.guide($('phGuideFig'), s.next, !screen && !stream);
+      if (CAL.guideKey && gk !== CAL.guideKey) {
+        $('phGuideFig').classList.remove('fresh');
+        void $('phGuideFig').offsetWidth;       // the slide again from its start
+        $('phGuideFig').classList.add('fresh');
+      }
+    } else {
       const why = s.mode !== 'video' && full ? 'cal.count.full' : screen && !s.board_ui.layout ? 'cal.need.board'
         : s.mode === 'video' ? (screen ? 'cal.guide.film' : 'cal.guide.film.board') : 'cal.guide.none';
       $('phGuideFig').replaceChildren(E('div', 'guide-done', T(why)));
     }
+    CAL.guideKey = gk;
+    CAL.wait(s);
     const last = s.series && s.series.same ? s.series.last : null;
     $('phLast').classList.toggle('hidden', !last);
     if (last) {
-      $('phLastDot').className = 'live-dot ' + (last.ok ? 'ok' : 'warn');
-      $('phLastT').textContent = last.ok ? T('cal.last.kept', fmtNum(last.corners, 0))
+      $('phLastDot').className = 'live-dot ' + (last.ok && !last.warn ? 'ok' : 'warn');
+      $('phLastT').textContent = last.ok && last.warn ? T('cal.last.warn', Tcode('cal.why.', last.warn, 'none'))
+        : last.ok ? T('cal.last.kept', fmtNum(last.corners, 0))
         : T('cal.last.retake', Tcode('cal.why.', last.why, 'none'));
       const kept = (s.series.photos || []).map(function (p, i) { return p.ok ? s.series.points[i] : null; })
         .filter(function (x) { return x; });
@@ -223,6 +246,43 @@ const CAL = {
       FIG.shot($('phShot'), last);
       FIG.cov($('phCov'), kept, last.points, last.ok, s.series.missing_corners || []);
     }
+  },
+
+  // A photo on its way, from Take to its check (one at a time): the guide faded under a card that says in plain words
+  // what the wait is for (the shutter, the phone saving the photo, its copy to this PC, its check) and a bar that
+  // fills smoothly, stage by stage, over the times the last photo took; the page stays usable all along. With the
+  // check the bar ends, the card fades and the next pose slides in (the same one again for a photo to take again).
+  STAGES: ['shooting', 'shot', 'copying', 'checking'],
+  wait: function (s) {
+    const bar = $('phWaitBar'), wrap = bar.closest('.guide-wrap'), x = s && s.shot, was = CAL.waitAt;
+    wrap.classList.toggle('waiting', !!x);
+    if (!x) {
+      CAL.waitAt = null;
+      if (was) { bar.style.transitionDuration = '.15s'; bar.style.transform = 'scaleX(1)'; }
+      return;
+    }
+    if (was && was.state === x.state && was.pose === x.pose) return;
+    if (!was || was.pose !== x.pose) {            // a new photo: the bar from its start, at once
+      CAL.waitAt = { t0: Date.now() };
+      bar.style.transitionDuration = '0s';
+      bar.style.transform = 'scaleX(0)';
+      void bar.offsetWidth;
+    }
+    CAL.waitAt.state = x.state;
+    CAL.waitAt.pose = x.pose;
+    const stage = Math.max(0, CAL.STAGES.indexOf(x.state));
+    $('phWaitT').textContent = T('cal.wait.' + CAL.STAGES[stage]);
+    $('phWaitS').textContent = s.next ? T('guide.n', s.next.n + 1, s.next.of) : '';
+    // the bar: up to where this stage ended for the last photo, in the time left until then
+    const own = s.series && s.series.same && s.series.last && s.series.last.timing_s;
+    const t = Object.assign({}, CAL.WAIT_S[s.mode === 'stream' ? 'stream' : 'photo'], own || {});
+    const keys = ['shutter', 'taken', 'copied', 'checked'];
+    let end = 0;
+    for (let i = 0; i <= stage; i++) end = Math.max(end, t[keys[i]] || 0);
+    const total = Math.max(end, t.checked || 0, 0.5);
+    const left = Math.max(0.3, end - (Date.now() - CAL.waitAt.t0) / 1000);
+    bar.style.transitionDuration = left.toFixed(2) + 's';
+    bar.style.transform = 'scaleX(' + Math.min(0.94, Math.max(0.05, end / total)).toFixed(3) + ')';
   },
 
   // The photo taken by itself: the switch, and in a few words what it waits for (the space bar when it is off).
@@ -234,13 +294,21 @@ const CAL = {
     $('calAutoRow').classList.toggle('hidden', manual);
     // holding still: on a stand, when the last calibration found the phone moved between its photos
     const hold = s.moved ? 'cal.auto.hold.stand' : 'cal.auto.hold';
-    const word = !on ? 'cal.auto.key' : { off: 'cal.auto.off', none: 'cal.auto.none', far: 'cal.auto.far',
-      hold: hold, wait: hold, ready: 'cal.auto.ready' }[a.state] || 'cal.auto.none';
-    // the bench: the arm to the stop shown, or the seat the board stands in when it is the wrong one
-    const bench = on && s.plan === 'bench' && s.kind !== 'check' && a.state === 'far';
-    $('calAutoSay').textContent = !bench ? T(word) : a.seat && s.next && s.next.seat
-      ? T('cal.auto.bench.seat', a.seat, s.next.seat) : T('cal.auto.bench.far');
-    $('calAutoSay').classList.toggle('near', on && (a.state === 'hold' || a.state === 'wait' || a.state === 'ready'));
+    // a photo in flight: only that is said until its check comes
+    const word = s.shot ? 'cal.wait.' + (CAL.STAGES.indexOf(s.shot.state) >= 0 ? s.shot.state : 'checking')
+      : !on ? 'cal.auto.key' : { off: 'cal.auto.off', none: 'cal.auto.none', far: 'cal.auto.far',
+        hold: hold, wait: hold, ready: 'cal.auto.ready' }[a.state] || 'cal.auto.none';
+    // the bench: the arm to the stop shown, or the pose the ball joint is set to when it is the wrong one (the photos
+    // by hand at the end as any others)
+    const bench = on && s.plan === 'bench' && s.kind !== 'check' && a.state === 'far' && !!s.next
+      && s.next.view === 'bench';
+    $('calAutoSay').textContent = !bench || s.shot ? T(word) : a.pose && s.next.pose
+      ? T('cal.auto.bench.pose', a.pose, s.next.pose) : T('cal.auto.bench.far');
+    const near = !s.shot && on && (a.state === 'hold' || a.state === 'wait' || a.state === 'ready');
+    $('calAutoSay').classList.toggle('near', near);
+    // the hold before the photo as a small ring filling up (in the app only, never on the phone)
+    $('calAutoSay').classList.toggle('ring', near);
+    $('calAutoSay').style.setProperty('--hold', String(near ? Math.max(0, Math.min(1, a.hold || 0)) : 0));
   },
 
   // The newest photos of the series, each a small picture with how its check went: checking, kept, retake.
@@ -248,11 +316,18 @@ const CAL = {
     const shots = s.series && s.series.same ? s.series.shots || [] : [];
     const el = $('phStrip');
     el.classList.toggle('hidden', !shots.length || s.mode === 'video');
-    const key = JSON.stringify(shots);
+    if (CAL.tile && !shots.some(function (x) { return x.name === CAL.tile && x.state !== 'checking'; })) CAL.tile = '';
+    const key = JSON.stringify(shots) + CAL.tile;
     if (el.dataset.key === key) return;
     el.dataset.key = key;
     el.replaceChildren.apply(el, shots.map(function (x) {
-      const t = E('div', 'ph-tile ' + x.state);
+      const t = E('div', 'ph-tile ' + x.state + (x.state === 'kept' && x.why ? ' warn' : '')
+        + (x.name && x.name === CAL.tile ? ' sel' : ''));
+      if (x.name && x.state !== 'checking') {
+        t.tabIndex = 0;
+        t.setAttribute('role', 'button');
+        onActivate(t, function () { CAL.tile = CAL.tile === x.name ? '' : x.name; CAL.strip(CAL.state); });
+      }
       if (x.thumb) {
         const im = E('img');
         im.alt = '';
@@ -261,10 +336,36 @@ const CAL = {
       }
       t.append(E('span', 'ph-tile-n', x.pose === null || x.pose === undefined ? '' : fmtNum(x.pose + 1, 0)),
                E('span', 'ph-tile-s'));
-      t.title = x.state === 'kept' ? T('cal.strip.kept') : x.state === 'retake'
+      t.title = x.state === 'kept' ? (x.why ? T('cal.last.warn', Tcode('cal.why.', x.why, 'none')) : T('cal.strip.kept'))
+        : x.state === 'retake'
         ? T('cal.last.retake', Tcode('cal.why.', x.why, 'none')) : T('cal.strip.checking');
       return t;
     }));
+    CAL.tileMenu(el);
+  },
+
+  // The actions of the photo pressed in the strip: open it, delete it, take it again (its pose at once).
+  tileMenu: function (strip) {
+    let m = $('phTileMenu');
+    if (!m) {
+      m = E('div', 'ph-menu hidden');
+      m.id = 'phTileMenu';
+      [['open', 'calib_photo_open'], ['drop', 'calib_photo_drop'], ['redo', 'calib_photo_redo']].forEach(function (a) {
+        const b = E('button', 'btn btn-2 btn-sm');
+        b.type = 'button';
+        b.append(E('span', 'btn-label', T('cal.tile.' + a[0])));
+        b.firstChild.dataset.t = 'cal.tile.' + a[0];
+        b.onclick = function () {
+          const name = CAL.tile;
+          if (!name) return;
+          if (a[0] !== 'open') CAL.tile = '';
+          ask(a[1], name, function (r) { if (r && a[0] !== 'open') CAL.render(r); });
+        };
+        m.append(b);
+      });
+    }
+    if (m.previousElementSibling !== strip) strip.after(m);
+    m.classList.toggle('hidden', !CAL.tile || strip.classList.contains('hidden'));
   },
 
   // The shutter went: a flash on the guide and the counter (never over the board), and a short sound.
@@ -277,6 +378,25 @@ const CAL = {
       el.classList.add('shot');
     });
     if (auto) playSound('shutter');       // SlantUI's voice of a picture taken (none while the sounds are off)
+  },
+
+  // Start again, on the press: the strip, the last photo, the counter, the work pills and the choices of the old
+  // series gone at once; every event of the old series is stale from now on (its sequence is behind).
+  reset: function () {
+    CAL.tile = '';
+    CAL.exclude = null;
+    CAL.waitAt = null;
+    workOff('cal_photo');
+    ['phGuide', 'cpCard'].forEach(function (id) { $(id).classList.remove('shot'); });
+    const s = CAL.state;
+    if (s) {
+      s.seq = (s.seq || 0) + 1;
+      s.count = 0;
+      s.shot = null;
+      if (s.series) s.series = Object.assign({}, s.series, { shots: [], photos: [], points: [], last: null, n: 0 });
+      if (page === 'calibration' && STEP.calibration === 'photos') CAL.photos(s);
+    }
+    $('phStrip').dataset.key = '';
   },
 
   // ── the result ───────────────────────────────────────────────────────────
@@ -464,12 +584,22 @@ const CAL = {
     });
   },
 
+  // Take, the space bar or Enter: the same strict sequence as the photo taken by itself. One photo at a time: a press
+  // while one is in flight (asked, taken, copied or checked) does nothing; Take stays off until its check comes.
   take: function () {
-    ask('calib_take', function (a, bad) {
+    const s = CAL.state, film = s && s.mode === 'video';
+    if (!film && (CAL.asking || (s && s.shot))) return;
+    if (!film) {
+      CAL.asking = true;
+      $('calTake').disabled = true;
+    }
+    askQuiet('calib_take', function (a, bad) {
+      CAL.asking = false;
       // a film: filming from its start, choosing frames once stopped (calib_film events end them)
       if (a && a.film) { workOn('cal_film', a.film === 'starting' ? 'pill.filming' : 'pill.film.choosing'); CAL.refresh(); return; }
       if (a) { workOn('cal_photo', 'pill.shooting'); CAL.refresh(); return; }
-      if (bad) CAL.refresh();
+      if (bad && bad.error !== 'busy') failed(bad);     // busy: the photo in flight goes on, nothing to say
+      CAL.refresh();
     });
   },
 
@@ -499,6 +629,9 @@ const CAL = {
 
   onEvent: function (e) {
     BOARD.onEvent(e);     // the board's controls live in this module and in Live AR
+    // an event of a photo of an older series (before Start again): stale, said nowhere
+    if (e.seq !== undefined && CAL.state && CAL.state.seq !== undefined && e.seq < CAL.state.seq
+        && (e.type === 'calib_photo' || e.type === 'calib_auto' || e.type === 'acquire_failed')) return;
     if (e.type === 'calib') {
       workOff('calib');
       CAL.last = { action: e.action, mode: e.mode, ok: !!e.ok };
@@ -509,12 +642,22 @@ const CAL = {
     } else if (e.type === 'calib_photo' && e.action === 'countdown') {
       toast(T('cal.countdown'), TOAST_LONG_MS);     // the phone's camera counted down all the same: its timer is on
     } else if (e.type === 'calib_photo' && e.action === 'shot') {
-      // the shutter went: said at once, and the guide moves to the next pose (the check comes later on its tile)
+      // the shutter went: said at once; the guide stays on its pose until the photo's check (calib_photo check)
       workOff('cal_photo');
       if (page === 'calibration' && STEP.calibration === 'photos') CAL.flash(!!e.auto);
       CAL.refresh();
+    } else if (e.type === 'calib_photo' && e.action === 'stage') {
+      // the photo moved on (copied, checked): the wait says so, nothing else changes
+      if (CAL.state && CAL.state.shot) {
+        CAL.state.shot.state = e.state;
+        if (page === 'calibration' && STEP.calibration === 'photos') CAL.wait(CAL.state);
+        CAL.autoSay(CAL.state.auto);
+      }
     } else if (e.type === 'calib_auto') {
-      if (CAL.state && CAL.state.auto) CAL.autoSay({ on: CAL.state.auto.on, state: e.state, score: e.score });
+      if (CAL.state && CAL.state.auto) {
+        CAL.state.auto = { on: CAL.state.auto.on, state: e.state, score: e.score, pose: e.pose, hold: e.hold };
+        CAL.autoSay(CAL.state.auto);
+      }
     } else if (e.type === 'calib_photo' || (e.type === 'acquire_failed' && e.key === 'calibration')) {
       workOff('cal_photo');
       workOff('cal_film');
@@ -552,6 +695,7 @@ const CAL = {
     });
     $('calKind').onchange = function () { CAL.set({ kind: $('calKind').checked ? 'check' : 'calibration' }); };
     $('calAuto').onchange = function () { CAL.set({ auto: $('calAuto').checked }); };
+    $('calKeepOld').onchange = function () { CAL.set({ keep_old: $('calKeepOld').checked }); };
     $('calTake').onclick = CAL.take;
     $('calTake').setAttribute('data-sound', 'shutter');     // SlantUI's voice, on the press
     if (!CAL.keys) {
@@ -585,9 +729,20 @@ const CAL = {
       });
     };
     $('calOpen').onclick = function () { ask('calib_open'); };
+    // a new calibration: the old series' photos deleted (asked first when it has any), or kept beside it
     $('calNew').onclick = function () {
-      if (!armed($('calNew'), T('cal.series.new.sure'))) return;
-      ask('calib_series_new', function (s) { if (s) { CAL.render(s); toast(T('cal.series.made')); } });
+      const n = CAL.state && !CAL.state.keep_old ? CAL.state.old_n || 0 : 0;
+      if ((n || $('calNew')._armed) && !armed($('calNew'), T('cal.series.new.drop', fmtNum(n, 0)))) return;
+      CAL.reset();
+      ask('calib_series_new', function (s) {
+        if (s) {
+          CAL.render(s);
+          if (s.dropped || s.keep_old) toast(s.dropped ? T('cal.series.dropped', fmtNum(s.dropped, 0)) : T('cal.series.made'));
+          return;
+        }
+        if (CAL.state) delete CAL.state.seq;      // not started again after all: the backend's state as it is
+        CAL.refresh();
+      });
     };
     $('calRun').onclick = CAL.run;
     $('calLogOpen').onclick = function () { if (hasSlot('calib_log_open')) ask('calib_log_open'); };

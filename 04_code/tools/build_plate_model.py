@@ -29,9 +29,13 @@ OUT = ROOT / "04_code" / "app" / "ui" / "models" / "charuco_plate.glb"
 # printed colours, linear RGB for glTF (sRGB #F2F1EC and #1A1A1A): the white and black of a matte PLA. Both rough
 # (MATTE at least): the viewer's lights go with the eye, and a glossier black (0.48) mirrored them over the whole flat
 # face between about 10 and 30 degrees of elevation, turning the black light grey so that the markers vanished in
-# the white
+# the white. Rough is not enough: any dielectric reflects more towards grazing (Fresnel, about 35 % of the light at
+# 80 degrees from the normal against 4 % head on), and the lights that go with the eye then turn a 1 % black into a
+# grey next to the white at low views. So the black print reflects nothing (glTF's KHR_materials_specular at 0, which
+# the page draws as a purely diffuse surface): black at every angle, as a matte print looks
 MATTE = 0.85
 COLOURS = {"white": ((0.888, 0.879, 0.838, 1.0), 0.9), "black": ((0.010, 0.010, 0.010, 1.0), 0.9)}
+DIFFUSE_ONLY = {"black"}    # no specular reflection at all (KHR_materials_specular, specularFactor 0)
 
 
 def read_stl(path):
@@ -71,8 +75,11 @@ def glb(meshes, extras=None):
                           "min": v.min(0).tolist(), "max": v.max(0).tolist()})
         fi = add(f.astype(np.uint32).ravel(), 34963)
         accessors.append({"bufferView": fi, "componentType": 5125, "count": int(f.size), "type": "SCALAR"})
-        materials.append({"name": name, "pbrMetallicRoughness": {"baseColorFactor": list(rgba), "metallicFactor": 0.0,
-                                                                  "roughnessFactor": rough}})
+        mat = {"name": name, "pbrMetallicRoughness": {"baseColorFactor": list(rgba), "metallicFactor": 0.0,
+                                                       "roughnessFactor": rough}}
+        if name in DIFFUSE_ONLY:
+            mat["extensions"] = {"KHR_materials_specular": {"specularFactor": 0.0}}
+        materials.append(mat)
         gmeshes.append({"name": name, "primitives": [{"attributes": {"POSITION": 2 * i}, "indices": 2 * i + 1,
                                                       "material": i}]})
         nodes.append({"name": name, "mesh": i})
@@ -82,6 +89,8 @@ def glb(meshes, extras=None):
            "scenes": [{"nodes": list(range(len(nodes))), "extras": extras or {}}], "nodes": nodes, "meshes": gmeshes,
            "materials": materials, "accessors": accessors, "bufferViews": views,
            "buffers": [{"byteLength": len(bin_)}]}
+    if any("extensions" in m for m in materials):
+        doc["extensionsUsed"] = ["KHR_materials_specular"]
     js = json.dumps(doc, separators=(",", ":")).encode("utf-8")
     js += b" " * (-len(js) % 4)
     body = struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(bin_), 0x004E4942) + bytes(bin_)
@@ -163,6 +172,10 @@ def check():
         rough = doc["materials"][i]["pbrMetallicRoughness"]["roughnessFactor"]
         print(f"{part}: roughness {rough} ({'matte' if rough >= MATTE else 'TOO GLOSSY'}, at least {MATTE})")
         ok &= rough >= MATTE
+        spec = ((doc["materials"][i].get("extensions") or {}).get("KHR_materials_specular") or {}).get("specularFactor")
+        if part in DIFFUSE_ONLY:
+            print(f"{part}: specular {spec} ({'none: black at every angle' if spec == 0 else 'NOT diffuse only'})")
+            ok &= spec == 0
     print("check: " + ("ok" if ok else "FAILED"))
     return 0 if ok else 1
 

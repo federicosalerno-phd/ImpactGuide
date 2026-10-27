@@ -64,7 +64,8 @@ import numpy as np
 
 SRC = Path(__file__).resolve().parent
 ROOT = SRC.parents[1]
-sys.path.insert(0, str(SRC))
+if str(SRC) not in sys.path:        # the app keeps it last, away from the libraries' imports (impactguide_app.py)
+    sys.path.insert(0, str(SRC))
 
 import trials  # noqa: E402
 

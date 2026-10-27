@@ -1,11 +1,14 @@
-"""The two files the desktop launcher needs and cannot make for itself.
+"""The files the desktop launcher needs and cannot make for itself.
 
 icon.ico is what Windows shows on the shortcut and on the taskbar, drawn from
 ui/impactguide-icon.svg, the same icon the window
 carries in its title band. theme.json holds the few SlantUI roles the
-launcher's waiting window paints itself with. Both are written once, at
-install time, by install_shortcut.ps1, because the launcher has to work before
-the drive holding the project is mounted.
+launcher's waiting window paints itself with. first.json is what the start's
+first window is drawn with (impactguide_boot.py), with the app's own mark and
+icon, until the app has run once and kept its own (first_window.py, with the
+band). All are
+written at install time, by install_shortcut.ps1, because the launcher has to
+work before the drive holding the project is mounted.
 
     python scripts/launcher_assets.py <out-dir>
 """
@@ -79,8 +82,16 @@ def main():
     count = write_ico(app.app_icon(), out / "icon.ico")
     theme = {k: app.role(v) for k, v in THEME_ROLES.items()}
     (out / "theme.json").write_text(json.dumps(theme, indent=2), encoding="utf-8")
+    try:
+        lang = json.loads((app.LOCAL / "preferences.json").read_text(encoding="utf-8")).get("lang")
+    except (OSError, ValueError, AttributeError):
+        lang = None
+    lang = lang if lang in app.LANGS else "en"      # as the app chooses it (Backend: English unless chosen)
+    app.first_window.keep(out, palette=app.PALETTE, text=app.splash_words(lang)[0], size=app.WINDOW_SIZE,
+                          mark=app.MARK, wait=True)
     print(f"icon.ico: {count} sizes")
     print(f"theme.json: palette {app.PALETTE}")
+    print(f"first.json: the first window in {lang}")
     del qt
     return 0
 

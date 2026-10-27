@@ -2,6 +2,11 @@
 .SYNOPSIS
   The launcher behind the ImpactGuide icon on the desktop.
 
+  The icon itself runs impactguide_boot.py, which puts a window on screen at
+  once and starts the app behind it; this launcher is what it calls when the
+  project's folder is not there yet, or to say that the app did not start
+  (-Failed), and what the icon runs when no interpreter was found at install.
+
   install_shortcut.ps1 copies it to %LOCALAPPDATA%\ImpactGuide\launch, on the
   local disk, because the project may sit on Google Drive, whose letter does
   not exist for the first minutes after a login: a shortcut pointing into it
@@ -25,18 +30,20 @@ param(
     [int]$WaitSec = 900,       # how long to wait for the drive, at most
     [switch]$Diag,             # say what is visible from here, and stop
     [switch]$WhichPython,      # print the interpreter it would use, and stop
-    [switch]$NoWindow          # the small window's words written out instead of shown
+    [switch]$NoWindow,         # the small window's words written out instead of shown
+    [string]$Failed = ""       # the app did not start (impactguide_boot.py): say so, with this file as the log
 )
 
 $ErrorActionPreference = 'Stop'
 
-# LAUNCHER-VERSION: 3
+# LAUNCHER-VERSION: 4
 # install_shortcut.ps1 reads the number above: when it changes, the local copy is rewritten.
 
 $StateDir = Join-Path $env:LOCALAPPDATA 'ImpactGuide\launch'
 $LogFile  = Join-Path $StateDir 'launch.log'
 $ErrFile  = Join-Path $StateDir 'last-error.txt'
 $PyFile   = Join-Path $StateDir 'python.txt'
+$BootFile = Join-Path $StateDir 'impactguide_boot.py'
 $PrefsFile = Join-Path $env:LOCALAPPDATA 'ImpactGuide\preferences.json'
 
 # The small window's words in the app's six languages; the language is the one chosen in the app
@@ -326,6 +333,11 @@ function Start-Search($target, $shared) {
 
 # --- the round ----------------------------------------------------------------------
 try {
+    if ($Failed) {
+        $w = Get-Words
+        Show-Box $w.failHead $w.fail $true $null $Failed
+        return
+    }
     $target = Get-Target
     Write-Log "click: target=[$($target.app)]"
     if ($Diag) {
@@ -374,6 +386,12 @@ try {
     }
     $pyw = Join-Path (Split-Path -Parent $py) 'pythonw.exe'
     if (-not (Test-Path -LiteralPath $pyw)) { $pyw = $py }
+    # the start with a window at once, which also watches the app and says if it did not start
+    if (Test-Path -LiteralPath $BootFile) {
+        Start-Process -FilePath $pyw -ArgumentList ('"' + $BootFile + '"'), '--app', ('"' + $appPath + '"') `
+                      -WorkingDirectory $StateDir
+        return
+    }
     try { if (Test-Path -LiteralPath $ErrFile) { Remove-Item -LiteralPath $ErrFile -Force } } catch { }
 
     $made = $false

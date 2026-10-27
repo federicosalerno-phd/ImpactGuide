@@ -20,7 +20,7 @@
   <div class="titlebar">
     <div class="tbar-band"></div>
     <div class="tbar-brand">
-      <div class="tbar-logo" id="tbLogo"></div>
+      <div class="tbar-logo" id="tbLogo" data-round></div>
       <span class="tbar-name"><b>Impact</b>Guide</span>
     </div>
     <div class="tbar-drag"></div>
@@ -124,7 +124,16 @@
             <div class="bd-host hidden" id="bdHostPhotos"></div>
             <div class="ph-live hidden" id="phLive"><img class="live-img" id="phLiveImg" alt=""/><div class="covl ph-live-tag hidden" id="phLiveTag"></div></div>
             <div class="ph-guide" id="phGuide">
-              <div class="guide" id="phGuideFig"></div>
+              <!-- the guide, and over it while a photo is on its way what the wait is for (never blocking the page) -->
+              <div class="guide-wrap">
+                <div class="guide" id="phGuideFig"></div>
+                <div class="ph-wait" id="phWait" role="status" aria-live="polite">
+                  <div class="ph-wait-card"><span class="ph-wait-ring"></span>
+                    <div class="ph-wait-w"><span class="ph-wait-t" id="phWaitT"></span><span class="ph-wait-s" id="phWaitS"></span></div>
+                  </div>
+                  <div class="ph-wait-bar"><i id="phWaitBar"></i></div>
+                </div>
+              </div>
               <!-- the newest photos, each a small picture with its pose; its check (kept, retake) comes on it later -->
               <div class="ph-strip hidden" id="phStrip"></div>
               <div class="ph-last hidden" id="phLast">
@@ -277,7 +286,7 @@
         <!-- ── the twin of the bench: the bench in 3D as a trial has it, from
              the trial's page and as the Scans step (ui/18-twin.js) ───────── -->
         <div class="view tw-view" data-view="twin">
-          <div class="tw-3d" id="tw3d"><canvas id="tw3dCanvas"></canvas><div class="covl tw-hint" data-t="board.3d.hint"></div><div class="tw-msg hidden" id="twMsg"></div></div>
+          <div class="tw-3d" id="tw3d"><canvas id="tw3dCanvas"></canvas><div class="covl tw-hint" data-t="board.3d.hint"></div><div class="tw-msg hidden" id="twMsg"></div><div class="tw-off hidden" id="twOff"><span data-icon="cube"></span><div class="tw-off-t" data-t="twin.off"></div><button class="btn btn-2" id="twOffOn" type="button"><span class="btn-label" data-t="twin.off.on"></span></button></div></div>
         </div>
 
         <!-- ── scans and results, its first step: a trial's scans as the scanner exports them, before and
@@ -477,7 +486,6 @@
           <div class="mlist" id="calPlans">
             <div class="mitem" data-plan="quick" tabindex="0" role="button"><span class="mitem-name" data-t="cal.plan.quick"></span><span class="mbadge" id="calPlanQ"></span></div>
             <div class="mitem" data-plan="accurate" tabindex="0" role="button"><span class="mitem-name" data-t="cal.plan.accurate"></span><span class="mbadge" id="calPlanA"></span></div>
-            <div class="mitem" data-plan="bench" tabindex="0" role="button" data-t-title="cal.plan.bench.hint"><span class="mitem-name" data-t="cal.plan.bench"></span><span class="mbadge" id="calPlanB"></span></div>
           </div>
           <div class="count card" id="cpCard">
             <div class="count-n"><span id="cpN">0</span><span class="count-of" id="cpOf"></span></div>
@@ -487,7 +495,7 @@
           <div class="callout callout-warn hidden" id="cpNote"></div>
           <!-- what the last photo or the last calibration says to change: the camera's settings, the phone still -->
           <div class="callout callout-warn hidden" id="calPhWarn"></div>
-          <!-- the bench plan: the bench in 3D with the board's holder on, the board in the seat of the next stop -->
+          <!-- the bench plan: the bench in 3D with the ball joint on, in the pose of the next stop -->
           <button class="btn btn-2 btn-wide hidden" id="calTwin" type="button"><span data-icon="cube"></span><span class="btn-label" data-t="twin.title"></span></button>
           <div class="note hidden" id="calProNote" data-t="cal.pro.note"></div>
           <!-- the photo taken by itself when the phone holds the guide's pose still: one switch, and what it waits for -->
@@ -501,6 +509,7 @@
             <button class="btn btn-2 btn-wide" id="calImport"><span class="btn-label" data-t="cal.photos.import"></span></button>
             <button class="btn btn-2 btn-wide" id="calOpen"><span class="btn-label" data-t="cal.photos.open"></span></button>
             <button class="btn btn-2 btn-wide" id="calNew"><span class="btn-label" data-t="cal.series.new"></span></button>
+            <label class="toggle"><input type="checkbox" id="calKeepOld"/><span data-t="cal.series.keep"></span></label>
           </div></div></div>
         </div>
         <div class="rp-foot">
@@ -798,6 +807,8 @@
           <div class="rp-sub" id="twSub"></div>
         </div>
         <div class="rp-scroll stack">
+          <!-- the 3D on or off (kept for the next start): off, nothing of it is loaded or drawn -->
+          <label class="toggle tw-on-row" data-t-title="twin.on.hint"><input type="checkbox" id="twOn" checked/><span data-t="twin.on"></span></label>
           <div class="callout callout-warn hidden" id="twStale"></div>
           <div class="stack hidden" id="twPick">
             <div class="sec-lbl" data-t="twin.trial.sec"></div>
@@ -813,8 +824,8 @@
           </div>
           <div class="sec-lbl" data-t="twin.views"></div>
           <div class="tw-views" id="twViews"></div>
-          <!-- on the post: the head or the calibration board's holder, its seats (ui/18-twin.js) -->
-          <div class="stack hidden" id="twMountBox"><div class="sec-lbl" data-t="twin.mount.sec"></div><div class="tw-views" id="twMount"></div><div class="tw-views tw-seats hidden" id="twSeats"></div></div>
+          <!-- on the post: the head or the calibration board's ball joint, its poses (ui/18-twin.js) -->
+          <div class="stack hidden" id="twMountBox"><div class="sec-lbl" data-t="twin.mount.sec"></div><div class="tw-views" id="twMount"></div><div class="tw-views tw-poses hidden" id="twPoses"></div></div>
           <div class="row"><span class="sec-lbl grow" data-t="twin.scan.sec"></span><span class="chip chip-warn hidden" id="twSim" data-t="twin.scan.simulated"></span><span class="chip chip-warn hidden" id="twNoCal" data-t="twin.scan.uncalibrated" data-t-title="twin.scan.uncalibrated.hint"></span></div>
           <div class="note" id="twScanNote"></div>
           <div class="stack hidden" id="twScan">

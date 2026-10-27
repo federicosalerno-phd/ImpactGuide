@@ -378,6 +378,8 @@ function go(p, step) {
   // the board on this monitor is drawn only by the steps that show it: they place it again
   if (typeof BOARDVIEW !== 'undefined') BOARDVIEW.place(null);
   page = p;
+  // the twin made ready in the modules it opens from, let go a while after the others (ui/18-twin.js)
+  if (typeof TWIN !== 'undefined' && TWIN.module) TWIN.module(p);
   if (typeof LINK !== 'undefined' && LINK.open) LINK.hide();
   document.querySelector('.app').classList.toggle('at-home', p === 'home');
   document.querySelectorAll('.tool-group').forEach(function (g) { g.classList.toggle('hidden', g.dataset.for !== p + '-' + s); });

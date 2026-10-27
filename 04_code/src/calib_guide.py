@@ -12,8 +12,9 @@ A plan is a list of poses of the phone relative to the board. A pose says
             than MAX_ROLL, so the phone's own orientation (and so the photo's size) never flips;
     corner  (a pose for a corner of the photo only) top_left, top_right, bottom_right or bottom_left: `at` is then worked
             out for each board (placed) so that the board's own corner falls just inside that corner of the photo
-            (REACH): its corners then reach as near the corner of the image as they can be found (the corner nearest
-            needs the markers of the board's edge whole in the photo), where a lens model is least sure
+            (REACH, or the pose's own inset: < 0 just outside it): its corners then reach as near the corner of the
+            image as they can be found (the corner nearest needs the markers of the board's edge whole in the photo),
+            where a lens model is least sure
             (calibrate_charuco.coverage). The phone looks from the opposite side, so that the board's corner in the
             corner of the photo is the far one, its squares the smallest.
 The phone is held across (landscape) with its top to the left for every photo: a photo turned the other way has another
@@ -24,7 +25,8 @@ page draws it so for a physical board).
 PLANS: quick (15 poses: the five views at 35 degrees, the four corners of the photo, two turns, the edges at two
 distances), accurate (40: eight directions at 25 and 35 degrees, the nine places of the screen, turns, the four corners
 of the photo, near views, as the calibration protocol asks), check (10: the session check); bench (calib_bench: the
-phone on the arm, the plate in the three seats of the board holder, a step for each seat and stop of the arm). Each
+phone on the arm, the plate on the ball joint on the post, a step for each pose of the joint and stop of the arm,
+then BENCH_HAND: the plate held by hand near the four corners of the photo, which the joint can not reach). Each
 plan of the phone held by hand (HAND) covers tilts in
 every direction, the whole image and its four corners, and the three distances. No pose is tilted more than MAX_TILT:
 past it the board is deep enough to leave the depth of field of the phone's f/1.5 lens at 30-40 cm.
@@ -85,11 +87,13 @@ VIEWS = {"front": (0, 0), "left": (-1, 0), "right": (1, 0), "above": (0, 1), "be
 JITTER = {"tilt_deg": 6.0, "dir_deg": 12.0, "at": 0.06, "dist": 0.08, "roll_deg": 6.0}
 
 
-def P(view, tilt, at=(0.5, 0.5), dist="mid", roll=0.0, corner=None):
+def P(view, tilt, at=(0.5, 0.5), dist="mid", roll=0.0, corner=None, inset=None):
     p = {"view": view, "tilt": float(tilt if view != "front" else 0.0), "at": [float(at[0]), float(at[1])],
          "dist": dist, "roll": float(roll)}
     if corner:
         p["corner"] = corner
+    if inset is not None:
+        p["inset"] = float(inset)
     return p
 
 
@@ -127,10 +131,16 @@ PLANS = {
     "check": [P("front", 0), P("left", 35), P("right", 35), P("above", 35), P("below", 35)]
     + [P(v, 30, at, "far") for v, at in _CORNERS] + [P("front", 0, dist="near", roll=25)],
 }
-PLANS["bench"] = calib_bench.STEPS      # the phone on the arm, the plate in the seats of the board holder
+# the bench: the phone on the arm, the plate on the ball joint in its poses at the stops of the arm (calib_bench), then
+# the plate in the hand near each corner of the photo twice, far, at 20 and 35 degrees (the phone still on the arm: the
+# plate is moved), its own corner BENCH_INSET past the photo's: with the operator's slips (JITTER) a photo then reaches
+# its corner of the image beyond calibrate_charuco.COVER_CORNER about 2 times in 3 at 20 degrees, 5 in 6 at 35
+BENCH_INSET = -0.02
+BENCH_HAND = [P(v, t, at, "far", corner=c, inset=BENCH_INSET) for t in (20, 35) for v, at, c in _REACH]
+PLANS["bench"] = calib_bench.STEPS + BENCH_HAND
 HAND = ("quick", "accurate", "check")   # the plans of poses of the phone (the others: calib_bench)
 # what the counter allows of each plan: at least `min` photos kept to calibrate, at most the plan's length
-LIMITS = {"quick": {"min": 12}, "accurate": {"min": 30}, "check": {"min": 8}, "bench": {"min": 22}}
+LIMITS = {"quick": {"min": 12}, "accurate": {"min": 30}, "check": {"min": 8}, "bench": {"min": 44}}
 
 
 def limits(plan):
@@ -190,8 +200,9 @@ def direction(pose):
 
 def placed(pose, board_mm, mode="photo", K=None, size=None):
     """The pose with its `at` worked out when it is a pose for a corner of the photo ("corner"): the place of the
-    board's centre on the screen at which the board's own corner on that side falls REACH inside that corner of the
-    photo, for this board and camera (the pose then says which corner in "reach"); any other pose as it is."""
+    board's centre on the screen at which the board's own corner on that side falls REACH (or the pose's "inset")
+    inside that corner of the photo, for this board and camera (the pose then says which corner in "reach"); any other
+    pose as it is."""
     if not pose.get("corner"):
         return pose
     nominal_K, nominal_size = camera(mode)
@@ -199,7 +210,8 @@ def placed(pose, board_mm, mode="photo", K=None, size=None):
     w, h = nominal_size if size is None else size
     sx, sy = CORNER_SIDES[pose["corner"]]
     corner = np.array([[sx * board_mm[0], sy * board_mm[1], 0.0]])
-    want = np.array([(sx + (1 - 2 * sx) * REACH) * w, (sy + (1 - 2 * sy) * REACH) * h])
+    inset = float(pose.get("inset", REACH))
+    want = np.array([(sx + (1 - 2 * sx) * inset) * w, (sy + (1 - 2 * sy) * inset) * h])
     at = np.asarray(pose["at"], np.float64)
     for _ in range(12):         # turning the phone a little moves the whole picture about as much: a few steps
         uv, _ = project(_camera_pose({**pose, "at": at.tolist()}, board_mm, mode, K, (w, h)), corner, K)
@@ -261,11 +273,19 @@ def project(T, pts, K):
     return uv, cam[:, 2]
 
 
+def pose_T(pose, spec, mode="photo"):
+    """T_C_M of a pose of a plan for a board, with the mode's nominal camera: a step of the bench as calib_bench has
+    it, any other as camera_pose."""
+    if pose.get("view") == "bench":
+        return calib_bench.camera_pose(pose)
+    return camera_pose(pose, board_mm(spec), mode)
+
+
 def seen(pose, spec, mode="photo"):
     """Chessboard corners of the board inside the frame (EDGE_PX from its edge) at this pose."""
     K, (w, h) = camera(mode)
     board = calibrate_charuco.make_board(spec["square_mm"], spec["squares"], spec.get("marker_mm"))
-    uv, z = project(camera_pose(pose, board_mm(spec), mode), board.getChessboardCorners().astype(np.float64), K)
+    uv, z = project(pose_T(pose, spec, mode), board.getChessboardCorners().astype(np.float64), K)
     ok = (z > 1) & (uv[:, 0] >= EDGE_PX) & (uv[:, 0] < w - EDGE_PX) & (uv[:, 1] >= EDGE_PX) & (uv[:, 1] < h - EDGE_PX)
     return int(ok.sum()), int(len(ok))
 
@@ -279,7 +299,7 @@ def findable(pose, spec, mode="photo"):
     q = spec["square_mm"]
     xs, ys = np.meshgrid(np.arange(nx + 1) * q, np.arange(ny + 1) * q)
     grid = np.stack([xs, ys, np.zeros_like(xs)], -1).reshape(-1, 3)
-    uv, z = project(camera_pose(pose, board_mm(spec), mode), grid, K)
+    uv, z = project(pose_T(pose, spec, mode), grid, K)
     uv = uv.reshape(ny + 1, nx + 1, 2)
     inside = ((z.reshape(ny + 1, nx + 1) > 1) & (uv[..., 0] >= EDGE_PX) & (uv[..., 0] < w - EDGE_PX)
               & (uv[..., 1] >= EDGE_PX) & (uv[..., 1] < h - EDGE_PX))
@@ -552,6 +572,27 @@ def cmd_test(a):
                 expect(not cov["missing_corners"],
                        f"{name}, {mode}, {plan}: the board reaches the four corners of the photo ({cov['corners']}, "
                        f"{100 * cov['reach']:.0f} % of the way)")
+    # the bench: the ball joint's steps and then the plate by hand near the corners of the photo, every photo with
+    # enough of the plate in view, the whole plan reaching the four corners of the photo in both modes
+    _, _, pspec, _ = boards()[1]
+    bench = PLANS["bench"]
+    hand = [p for p in bench if p.get("view") != "bench"]
+    for mode in CAMERAS:
+        K, (w, h) = camera(mode)
+        low = [(i, seen(p, pspec, mode)[0]) for i, p in enumerate(bench) if seen(p, pspec, mode)[0] < MIN_SEEN]
+        alone = calibrate_charuco.coverage([findable(p, pspec, mode) for p in bench if p.get("view") == "bench"],
+                                           (w, h))
+        cov = calibrate_charuco.coverage([findable(p, pspec, mode) for p in bench], (w, h))
+        expect(not low and len(hand) == len(BENCH_HAND) == 8 and bench[-len(hand):] == hand
+               and {p["corner"] for p in hand} == set(CORNER_SIDES) and alone["missing_corners"]
+               and not cov["missing_corners"] and limits("bench")["min"] <= len(bench),
+               f"bench, {mode}: {len(bench) - len(hand)} steps of the joint (corners {100 * alone['reach']:.0f} % "
+               f"of the way) and {len(hand)} by hand: the four corners of the photo ({100 * cov['reach']:.0f} %), "
+               f"every photo with {MIN_SEEN} corners at least {low or ''}")
+    gb = [guide(p, pspec, "photo", i, "bench") for i, p in enumerate(bench)]
+    expect(gb[0]["view"] == "bench" and gb[0]["of"] == len(bench) and gb[0]["pose"] == "P1"
+           and gb[-1]["view"] != "bench" and gb[-1].get("reach") is None and gb[-1]["of"] == len(bench),
+           f"bench guide: {gb[0]['pose']} at arm {gb[0]['arm']} first, the corners by hand last ({gb[-1]['view']})")
     # the guide's picture is the projection of the pose: the outline holds the board's centre where the pose says
     _, _, spec, _ = boards()[1]
     g = guide(PLANS["quick"][1], spec)

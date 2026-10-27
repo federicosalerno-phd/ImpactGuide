@@ -89,6 +89,8 @@ function boot() {
     $('simChip').classList.toggle('hidden', !info.simulate);
     PHONE.link = info.link;
     LINK.btn();
+    // the twin's 3D on or off as it was left (before the first module, which may make it ready)
+    TWIN.setOn(info.twin !== false, false);
     // the app opens at home; a module asked for on the command line opens instead
     go(info.page || 'home');
     // SlantUI's sounds, once the start is made (it makes none): the speaker on the band and Ctrl+M, the choice kept

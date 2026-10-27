@@ -139,13 +139,22 @@ const FIG = {
   // the pose in words, two short lines: where from and how far round (or, the board moved, which of its edges comes
   // nearer the phone and by how much), then the distance and the turn
   caption: function (g) {
-    // the bench: the seat and the arm angle, nothing moved by hand
-    const v = g.view === 'bench' ? T('cal.ph.bench.step', g.seat, fmtNum(g.arm, 0))
-      : g.move === 'board' ? (g.view === 'front' ? T('guide.move.front') : T('guide.move.' + g.view, g.tilt))
+    // the bench: the pose and the arm angle, then how the ball joint is set (the turn of the board on a third line)
+    if (g.view === 'bench') {
+      return [T('cal.ph.bench.step', g.pose, fmtNum(g.arm, 0))].concat(FIG.benchWords(g.face, g.lean, g.turn));
+    }
+    const v = g.move === 'board' ? (g.view === 'front' ? T('guide.move.front') : T('guide.move.' + g.view, g.tilt))
       : g.view === 'front' ? T('guide.view.front') : T('guide.view.' + g.view) + ' ' + g.tilt + '°';
     const parts = [fmtNum(g.dist_cm, 0) + ' cm'];
     if (Math.abs(g.roll) >= 5) parts.push(T('guide.turned', Math.abs(g.roll)));
     return [v, parts.join(' · ')];
+  },
+  // the setting of the bench's ball joint in words: the arm angle the board faces and how far it leans back; how far
+  // the board is turned in its plane ('' when not: turn > 0 anticlockwise seen from the front)
+  benchWords: function (face, lean, turn) {
+    const f = fmtNum(face, 0), l = Math.round(Math.abs(lean || 0)), r = Math.round(turn || 0);
+    return [l ? T('cal.ph.bench.head', f, l) : T('cal.ph.bench.head.up', f),
+            !r ? '' : T(r > 0 ? 'cal.ph.bench.ccw' : 'cal.ph.bench.cw', Math.abs(r))];
   },
 
   guide: function (host, g, big) {
@@ -157,6 +166,9 @@ const FIG = {
     head.append(E('span', 'guide-n', g.extra ? T('guide.extra', T('cal.corner.' + g.extra)) : T('guide.n', g.n + 1, g.of)),
                 E('span', 'guide-w', words[0]),
                 E('span', 'guide-d', words[1]));
+    if (words[2]) head.append(E('span', 'guide-d', words[2]));
+    // the bench: how to set the ball joint, in full on the pointer
+    if (g.view === 'bench') head.title = T('cal.ph.bench.head.hint', fmtNum(g.face, 0));
     host.append(head);
     const row = E('div', 'guide-row');
     row.append(FIG.phone(g), FIG.sides(g));

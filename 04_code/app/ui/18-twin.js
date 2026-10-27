@@ -10,8 +10,8 @@
 // it, done over from 1 to 20 times on a slider (its place before the impact stays as a faint copy), and the seven
 // targets of the mandible take the colour of their error on the scale of the figures, blue (small) to yellow orange
 // (large), that keeps apart for those who confuse red and green; the face and the cap turn see-through, so that the
-// mandible shows. On the post the head, or in its place the calibration board's holder with the board in one of its
-// seats (the switch; opened from the calibration's bench plan, at the seat and the arm of the next stop). It opens on
+// mandible shows. On the post the head, or in its place the calibration board on its ball joint in one of its poses
+// P1-P7 (the switch; opened from the calibration's bench plan, at the pose and the arm of the next stop). It opens on
 // the whole bench; ready views: the phone at its four positions (through its calibrated lens, 18-lens.js; the keypad's
 // 0 is the phone where the arm is), the scanner, from above; the viewer of 17-plate3d.js is
 // navigated as Blender's viewport. It is lit as the scene is in Blender: its suns with soft shadows, the world's
@@ -26,6 +26,8 @@ ICONS.cube = { s: '<path d="M12 3.2l7.6 4.2v9.2L12 20.8l-7.6-4.2V7.4z"/>'
 
 const TWIN = {
   viewer: null, model: null, extras: null, url: '', failed: false,
+  on: true,             // the 3D switched on (its panel's switch, kept for the next start): off, nothing is loaded
+                        // or drawn, the view shows a light placeholder
   state: null,          // the backend's last answer (twin_state)
   mode: 'trials',       // opened from Trials (the trial in progress) or from Scans and results
   pick: '',             // in Scans and results, the trial chosen
@@ -46,9 +48,9 @@ const TWIN = {
   PANEL_LIGHT: 0.45,    // the light panels' own light on the bench (each a soft spot from its diffuser)
   PANEL_REACH_MM: 1600,
   SKY: ['#ffffff', '#e4e7ec'],    // behind the bench: from the top of the view to its bottom
-  mount: 'head',        // on the post: the head, or the calibration board's holder ('board': the switch, the
-  seat: 0,              // calibration's bench plan), the board in this seat of it (0-based)
-  BOARD_SWING_DEG: 30,  // with the board's holder on, the pendulum hooked up on the release (hanging, it meets seat 1)
+  mount: 'head',        // on the post: the head, or the calibration board on its ball joint ('board': the switch,
+  ballPose: 'P1',       // the calibration's bench plan), the ball joint in this pose (extras board_poses)
+  BOARD_SWING_DEG: 30,  // with the ball joint on, the pendulum hooked up on the release (hanging, it meets the board)
   blend: null,          // the cables between the arm's positions (false: their meshes do not allow it)
   sweepMesh: null,
   shadowKey: '', targetsKey: '',
@@ -99,13 +101,14 @@ const TWIN = {
     return !!v && v.classList.contains('show');
   },
 
-  // the viewer made, the model asked for: at idle after the start, or at the first opening
+  // the viewer made, the model asked for: at idle in a module the twin opens from (TWIN.module), or at the opening
   prepare: function () {
+    if (!TWIN.on) return false;
     if (TWIN.viewer || TWIN.failed) return !!TWIN.viewer;
     // Blender's axes (Z up, the front view along +Y); the keypad's 0 is the phone where the arm is; a turn by hand
-    // leaves the ready view
+    // leaves the ready view; a part clicked is named with its material, never its size
     TWIN.viewer = VIEW3D.create($('tw3d'), $('tw3dCanvas'), {
-      margin: 1.04, dir: [0.42, -0.78, 0.46], up: [0, 0, 1], front: [0, 1, 0], failed: TWIN.fail,
+      margin: 1.04, dir: [0.42, -0.78, 0.46], up: [0, 0, 1], front: [0, 1, 0], failed: TWIN.fail, size: false,
       name: function (n) { return PARTS.name(n); }, material: function (m) { return PARTS.material(m); }, mm: 1,
       camera: function () { TWIN.look('phone' + TWIN.armIndex(TWIN.armAz)); },
       changed: function () { if (TWIN.view) { TWIN.view = ''; TWIN.marks(); } } });
@@ -154,13 +157,14 @@ const TWIN = {
   },
 
   // opened from the trial's page (mode trials) or as the Scans step of Scans and results, the head on the post; o
-  // (the calibration's bench plan, openCal): {mount: 'board', seat, arm: the arm angle of the stop, back: 'calibration'}
+  // (the calibration's bench plan, openCal): {mount: 'board', pose: its name, arm: the arm angle of the stop, back:
+  // 'calibration'}
   open: function (mode, o) {
     o = o || {};
     TWIN.mode = mode === 'results' ? 'results' : 'trials';
     TWIN.from = o.back || '';
     TWIN.mount = o.mount === 'board' ? 'board' : 'head';
-    if (o.seat !== undefined) TWIN.seat = Math.max(0, Number(o.seat) || 0);
+    if (o.pose) TWIN.ballPose = String(o.pose);
     TWIN.calArm = isFinite(o.arm) && o.arm !== null ? Number(o.arm) : null;
     TWIN.t0 = performance.now();
     TWIN.openMs = 0;
@@ -173,6 +177,8 @@ const TWIN = {
     back.textContent = T(back.getAttribute('data-t'));
     $('twPick').classList.toggle('hidden', TWIN.mode !== 'results');
     $('hint').textContent = '';
+    TWIN.offShow();
+    if (!TWIN.on) return;           // off: the placeholder and the switch, nothing asked for
     if (TWIN.prepare()) {
       TWIN.viewer.background();
       TWIN.viewer.draw();
@@ -181,11 +187,32 @@ const TWIN = {
     TWIN.refresh(true);
   },
 
-  // from the calibration's bench plan: the board's holder on the post, the board in the seat of the next stop, seen
-  // from the phone with the arm at that stop
+  // the 3D switched on or off (keep: said to the backend, for the next start); off, everything of it is let go
+  setOn: function (on, keep) {
+    TWIN.on = !!on;
+    if (keep) be('set_twin', TWIN.on);
+    $('twOn').checked = TWIN.on;
+    TWIN.offShow();
+    if (!TWIN.on) {
+      TWIN.release();
+      return;
+    }
+    if (TWIN.showing()) TWIN.open(TWIN.mode, { mount: TWIN.mount, pose: TWIN.ballPose, back: TWIN.from });
+  },
+  // off: only the placeholder in the view (not the canvas, the hint, a part's tag), only the switch in the panel
+  offShow: function () {
+    $('twOff').classList.toggle('hidden', TWIN.on);
+    $('tw3d').classList.toggle('tw-dark', !TWIN.on);
+    if (!TWIN.on) $('twMsg').classList.add('hidden');
+    const panel = document.querySelector('.rp-page[data-panel="twin"]');
+    if (panel) panel.classList.toggle('twin-off', !TWIN.on);
+  },
+
+  // from the calibration's bench plan: the ball joint on the post in the pose of the next stop, seen from the phone
+  // with the arm at that stop (the photos by hand: the joint as it was left)
   openCal: function () {
-    const nx = (typeof CAL !== 'undefined' && CAL.state && CAL.state.next) || {};
-    TWIN.open('trials', { mount: 'board', seat: nx.seat ? nx.seat - 1 : 0, arm: nx.arm, back: 'calibration' });
+    const nx = (typeof CAL !== 'undefined' && CAL.state && CAL.state.next) || {}, bench = nx.view === 'bench';
+    TWIN.open('trials', { mount: 'board', pose: bench ? nx.pose : '', arm: bench ? nx.arm : null, back: 'calibration' });
   },
   // the camera azimuth of an arm angle (the scene's arm positions: arm_deg against camera_deg, straight between)
   azOfArm: function (deg) {
@@ -198,6 +225,7 @@ const TWIN = {
 
   // the backend's state of the twin; first: choose the view of the trial (the phone where the step is taken)
   refresh: function (first) {
+    if (!TWIN.on) return;
     askQuiet('twin_state', JSON.stringify({ mode: TWIN.mode, trial: TWIN.mode === 'results' ? TWIN.pick : '' }),
       function (s, bad) {
         if (!s) { if (TWIN.showing()) failed(bad); return; }
@@ -624,8 +652,9 @@ const TWIN = {
     const dir = dirs.reduce(function (m, d) {
       return Math.abs(d - (Number(t.direction_deg) || 0)) < Math.abs(m - (Number(t.direction_deg) || 0)) ? d : m;
     }, dirs.length ? dirs[0] : 0);
-    // on the post: the head (with the marker, its holders, the drape) or the board's holder, the board in its seat
-    const board = TWIN.mount === 'board' && TWIN.hasBoard(), seats = (x.board_seats || {}).seats || [];
+    // on the post: the head (with the marker, its holders, the drape) or the ball joint, its ball (with the board)
+    // in the pose chosen
+    const board = TWIN.mount === 'board' && TWIN.hasBoard(), bp = TWIN.boardPose();
     Object.keys(TWIN.parts).forEach(function (n) {
       const p = TWIN.parts[n], spec = x.parts[n];
       if (spec.pose === 'arm') return;
@@ -635,8 +664,8 @@ const TWIN = {
       if (spec.moves === 'marker') M.decompose(p.obj.position, p.obj.quaternion, p.obj.scale);
       if (spec.mount === 'board') p.obj.visible = board;
       else if (board && (spec.mount === 'head' || spec.holder || spec.moves === 'marker' || spec.drape)) p.obj.visible = false;
-      if (spec.moves === 'seat' && seats[TWIN.seat]) {
-        const S = seats[TWIN.seat];
+      if (spec.moves === 'ball' && bp && bp.ball) {
+        const S = bp.ball;
         new THREE.Matrix4().set(S[0][0], S[0][1], S[0][2], S[0][3], S[1][0], S[1][1], S[1][2], S[1][3],
                                 S[2][0], S[2][1], S[2][2], S[2][3], 0, 0, 0, 1)
           .decompose(p.obj.position, p.obj.quaternion, p.obj.scale);
@@ -653,7 +682,7 @@ const TWIN = {
     if (tk !== TWIN.targetsKey) { TWIN.targetsKey = tk; TWIN.marksTargets(scan); }
     TWIN.skin(!!scan);
     TWIN.shadowState = [t.holder, dir, t.direction_deg, pose.swing, pose.drape, TWIN.gain, tk.length, !!scan,
-                        board, TWIN.seat].join();
+                        board, TWIN.ballPose].join();
     TWIN.arm();
   },
 
@@ -1119,19 +1148,24 @@ const TWIN = {
     });
   },
 
-  // ── on the post: the head or the board's holder ─────────────────────────────
-  // (a model made before the holder was in it has none: no switch)
+  // ── on the post: the head or the board's ball joint ─────────────────────────
+  // (a model made before the holder was in it has none: no switch; one made before the joint, no poses)
   hasBoard: function () { return !!(TWIN.parts.board_holder || TWIN.parts.calib_board); },
-  seatCount: function () { return ((TWIN.extras && TWIN.extras.board_seats) || {}).seats ? TWIN.extras.board_seats.seats.length : 1; },
-  setMount: function (m, seat) {
+  boardPoses: function () { return ((TWIN.extras && TWIN.extras.board_poses) || {}).poses || []; },
+  // the pose on show (TWIN.ballPose by name; the first when the model has no such pose), null without poses
+  boardPose: function () {
+    const ps = TWIN.boardPoses();
+    return ps.find(function (q) { return q.name === TWIN.ballPose; }) || ps[0] || null;
+  },
+  setMount: function (m, pose) {
     TWIN.mount = m === 'board' ? 'board' : 'head';
-    if (seat !== undefined && seat !== null) TWIN.seat = Math.max(0, Math.min(TWIN.seatCount() - 1, Number(seat) || 0));
+    if (pose) TWIN.ballPose = String(pose);
     TWIN.mounts();
     TWIN.apply();
   },
-  // the switch and, with the holder on, its seats
+  // the switch and, with the ball joint on, its poses (each with its setting in words on the pointer)
   mounts: function () {
-    const has = TWIN.hasBoard(), n = TWIN.seatCount(), host = $('twMount'), seats = $('twSeats');
+    const has = TWIN.hasBoard(), ps = TWIN.boardPoses(), n = ps.length, host = $('twMount'), poses = $('twPoses');
     $('twMountBox').classList.toggle('hidden', !has);
     if (!has) return;
     const button = function (label, title, on) {
@@ -1149,18 +1183,21 @@ const TWIN = {
         button(T('twin.mount.board'), T('twin.mount.board.hint'), function () { TWIN.setMount('board'); }));
       host.children[0].dataset.mount = 'head'; host.children[1].dataset.mount = 'board';
     }
-    if (seats.dataset.lang !== LANG + n) {
-      seats.dataset.lang = LANG + n;
-      seats.replaceChildren();
-      for (let k = 0; k < n; k++) {
-        const b = button(T('twin.seat', k + 1), T('twin.seat.hint'), function () { TWIN.setMount('board', k); });
-        b.dataset.seat = String(k);
-        seats.append(b);
-      }
+    const key = LANG + ps.map(function (q) { return q.name; }).join();
+    if (poses.dataset.lang !== key) {
+      poses.dataset.lang = key;
+      poses.replaceChildren.apply(poses, ps.map(function (q) {
+        const a = q.angles || [0, 0, 0];
+        const b = button(q.name, FIG.benchWords(q.face, a[1], a[2]).filter(Boolean).join(' · '),
+                         function () { TWIN.setMount('board', q.name); });
+        b.dataset.pose = q.name;
+        return b;
+      }));
     }
+    const on = TWIN.boardPose();
     host.querySelectorAll('.btn').forEach(function (b) { b.classList.toggle('on', b.dataset.mount === TWIN.mount); });
-    seats.querySelectorAll('.btn').forEach(function (b) { b.classList.toggle('on', Number(b.dataset.seat) === TWIN.seat); });
-    seats.classList.toggle('hidden', TWIN.mount !== 'board' || n < 2);
+    poses.querySelectorAll('.btn').forEach(function (b) { b.classList.toggle('on', !!on && b.dataset.pose === on.name); });
+    poses.classList.toggle('hidden', TWIN.mount !== 'board' || n < 2);
   },
 
   scanPanel: function (scan) {
@@ -1251,7 +1288,8 @@ const TWIN = {
         .map(Math.round) : null,
       fov: v ? Math.round(v.cam.fov * 10) / 10 : null, nodes: x ? Object.keys(TWIN.parts).sort() : [],
       lens: !!(v && v.lens && v.lens.on(v)), lensMode: TWIN.lensMode(),
-      mount: TWIN.mount, seat: TWIN.seat, hasBoard: TWIN.hasBoard(),
+      on: TWIN.on, offShown: !$('twOff').classList.contains('hidden'), viewer: !!TWIN.viewer,
+      mount: TWIN.mount, ballPose: TWIN.boardPose() ? TWIN.boardPose().name : '', hasBoard: TWIN.hasBoard(),
       boardShown: !!(p('calib_board') && p('calib_board').visible), headShown: !!(p('head') && p('head').visible),
       boardAt: p('calib_board') ? p('calib_board').position.toArray().map(Math.round) : null,
       stale: !$('twStale').classList.contains('hidden'), drawn: !!(v && v.r),
@@ -1266,6 +1304,8 @@ const TWIN = {
   },
 
   wire: function () {
+    $('twOn').onchange = function () { TWIN.setOn($('twOn').checked, true); };
+    $('twOffOn').onclick = function () { TWIN.setOn(true, true); };
     $('twBack').onclick = function () {
       if (TWIN.from === 'calibration') go('calibration', 'photos');
       else if (TWIN.mode === 'results') go('results', 'scans');
@@ -1317,15 +1357,38 @@ VIEW3D.proto.lookFrom = function (eye, q, dist, fov) {
   v.draw();
 };
 
-// made ready while the app is idle, well after the plate: the trial's page then opens it at once
 TWIN.idle = function (fn) { (window.requestIdleCallback || function (f) { return setTimeout(f, 0); })(fn, { timeout: 4000 }); };
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    TWIN.idle(function () {
-      if (TWIN.url || TWIN.failed || !hasSlot('twin_state')) return;
-      askQuiet('twin_state', JSON.stringify({ mode: 'trials' }), function (s) {
-        if (s && s.model && s.model.url && !TWIN.url) { TWIN.state = s; TWIN.load(s.model.url); }
-      });
-    });
-  }, 6000);
-});
+
+// The model with its context, shadows and reflections holds some 440 MB of the app's memory. It is made ready while
+// a module the twin opens from is open (Trials, Scans and results: the twin then opens at once), never at the start,
+// and let go once the app has been elsewhere for RELEASE_MS (going back and forth keeps it). go() says the module.
+TWIN.FROM = ['trials', 'results'];
+TWIN.RELEASE_MS = 60000;
+TWIN.module = function (p) {
+  clearTimeout(TWIN.releasing);
+  TWIN.releasing = 0;
+  if (TWIN.FROM.indexOf(p) >= 0) {
+    TWIN.idle(TWIN.preload);
+  } else if (TWIN.viewer && !TWIN.showing()) {
+    TWIN.releasing = setTimeout(function () { if (!TWIN.showing()) TWIN.release(); }, TWIN.RELEASE_MS);
+  }
+};
+TWIN.preload = function () {
+  if (!TWIN.on || TWIN.url || TWIN.failed || !hasSlot('twin_state')) return;
+  askQuiet('twin_state', JSON.stringify({ mode: 'trials' }), function (s) {
+    if (s && s.model && s.model.url && !TWIN.url) { TWIN.state = s; TWIN.load(s.model.url); }
+  });
+};
+// everything of the model given back: its meshes and textures, the context; the next opening loads it again
+TWIN.release = function () {
+  clearTimeout(TWIN.retry);
+  if (TWIN.sweeping) { cancelAnimationFrame(TWIN.sweeping); TWIN.sweeping = 0; }
+  const v = TWIN.viewer, r = v && v.r;
+  TWIN.viewer = null;
+  if (v) {
+    try { v.dispose(); if (r) r.forceContextLoss(); } catch (e) { console.warn('twin release: ' + e); }
+  }
+  TWIN.model = null; TWIN.extras = null; TWIN.url = ''; TWIN.parts = {}; TWIN.ghost = null; TWIN.points = null;
+  TWIN.lights = []; TWIN.blend = null; TWIN.sweepMesh = null; TWIN.shadowKey = ''; TWIN.targetsKey = '';
+  TWIN.warmed = ''; TWIN.pending = null;
+};

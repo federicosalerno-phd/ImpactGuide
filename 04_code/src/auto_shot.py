@@ -9,7 +9,8 @@ nominal camera of the mode (calib_guide.camera), and the poses are compared wher
 differ: the board's tilt (the angle between the two normals, within TILT_DEG), where its centre falls (within AT of
 the photo's sides), how far it is (within DIST_RATIO either way) and its turn on the screen (within ROLL_DEG). Corner
 distances alone cannot tell a board tilted by 40 degrees from one seen straight on. The board is still once its
-corners have moved less than STILL between the looks of HOLD_S.
+corners have stayed within STILL of where they were at the start of the stillness for HOLD_S (a slow drift breaks it,
+as a jump does), on the guide's pose all along.
 
 Where the preview comes from:
     photo   the frame is the photo itself, upright (the live stream of the streaming mode, the simulation)
@@ -50,7 +51,7 @@ DIST_RATIO = 1.25       # its distance within this factor of the guide's
 ROLL_DEG = 15.0         # its turn on the screen within this of the guide's
 STILL = 0.012           # the corners moved less than this between two looks (fractions of the photo's sides): still
 HOLD_S = 0.6            # still this long before the photo
-GAP_S = 5.0             # at least this long between two photos
+GAP_S = 1.0             # at least this long between two photos (the next guide comes only once a photo is checked)
 NEW_STOP = 0.006        # with new_stop (the bench), the board this far from where it was at the last photo (fractions)
 RETRY_S = 1.0         # a photo that could not be taken is asked for again this much later at the soonest
 LOOK_HZ = 6.0           # looks at the preview per second
@@ -162,6 +163,7 @@ class Watch:
         self.last_shot = -math.inf  # when the last photo was taken
         self._prev = None           # the corners at the last look
         self._still_since = None
+        self._still_at = None       # the corners when the stillness began: every look within STILL of them
         self.state, self.error, self.corners = "none", None, 0
         self._rect, self._rect_t = None, -math.inf
         self.new_stop = False       # a photo only once the board moved since the last one (the bench: a new stop)
@@ -178,7 +180,7 @@ class Watch:
             self.detector = None if bk is None else cv2.aruco.CharucoDetector(self.board)
             self.board_wh = None if bk is None else (bk[0][0] * bk[1], bk[0][1] * bk[1])
         if key != self.key:
-            self._still_since = None
+            self._still_since = self._still_at = None
         self.mode = mode
         self.want = None if want is None or bk is None else outline_pose(want, self.board_wh, mode)
         self.key = key
@@ -188,11 +190,11 @@ class Watch:
         """A photo was taken (by itself or by hand): the next one no sooner than gap_s, after a new stillness (and,
         with new_stop, once the board moved NEW_STOP from where it was)."""
         self.last_shot = self.clock()
-        self._still_since = None
+        self._still_since = self._still_at = None
         self._shot_at = self._prev
 
     def _none(self) -> str:
-        self.state, self.error, self._prev, self._still_since = "none", None, None, None
+        self.state, self.error, self._prev, self._still_since, self._still_at = "none", None, None, None, None
         return self.state
 
     def feed(self, img: np.ndarray, kind: str = "photo") -> str:
@@ -222,16 +224,14 @@ class Watch:
         if best is None:
             return self._none()
         self.error, seen = best
-        moved = math.inf if self._prev is None else distance(seen, self._prev)
         self._prev = seen
         if self.error > 1.0:
-            self.state, self._still_since = "far", None
+            self.state, self._still_since, self._still_at = "far", None, None
             return self.state
-        if moved > STILL:
-            self.state, self._still_since = "hold", None
+        # still over the whole window: within STILL of where the board was when the stillness began
+        if self._still_at is None or distance(seen, self._still_at) > STILL:
+            self.state, self._still_since, self._still_at = "hold", now, seen
             return self.state
-        if self._still_since is None:
-            self._still_since = now
         if now - self._still_since < self.hold_s:
             self.state = "hold"
         elif now - self.last_shot < self.gap_s or (self.new_stop and self._shot_at is not None
@@ -240,6 +240,12 @@ class Watch:
         else:
             self.state = "ready"
         return self.state
+
+    def progress(self) -> float:
+        """How far the stillness before the photo has gone, 0 to 1 (0 unless holding)."""
+        if self.state not in ("hold", "wait", "ready") or self._still_since is None:
+            return 0.0
+        return round(max(0.0, min(1.0, (self.clock() - self._still_since) / max(self.hold_s, 1e-6))), 2)
 
     def score(self) -> float:
         """How near the board is to the guide's pose: 1 within a match, 0 at three times its limits or more (or
@@ -263,6 +269,7 @@ class Watcher:
         self._last = None
         self._said = None
         self._fired = False                 # a photo asked for and not yet taken or refused
+        self.due_key = None                 # the guide the last photo was asked for (stale once the guide moved)
         self.thread = threading.Thread(target=self._run, daemon=True, name="auto_shot")
 
     def start(self) -> Watcher:
@@ -312,12 +319,13 @@ class Watcher:
                     state = self.watch.feed(img, kind)
                     due = state == "ready" and not self._fired
                     if due:
-                        self._fired = True
+                        self._fired, self.due_key = True, self.watch.key
                 if due:
                     self.fire()
             score = self.watch.score()
-            if (state, round(score, 1)) != self._said:
-                self._said = (state, round(score, 1))
+            said = (state, round(score, 1), round(4 * self.watch.progress()))    # the hold said in quarters
+            if said != self._said:
+                self._said = said
                 self.on_state(state, score)
 
 
@@ -341,7 +349,7 @@ def preview_stream(serial=None, **kw):
         def _server_command(self):
             args = [f"scid={self.scid:08x}", "log_level=info", "video_source=display", "audio=false", "control=false",
                     "tunnel_forward=true", "send_device_meta=false", "send_dummy_byte=false", "send_stream_meta=true",
-                    "send_frame_meta=true", "video_codec=h264", f"video_bit_rate={self.bit_rate}",
+                    "send_frame_meta=true", f"video_codec={self.video_codec}", f"video_bit_rate={self.bit_rate}",
                     f"max_size={PREVIEW_SIZE}", f"max_fps={PREVIEW_FPS}", "cleanup=true"]
             if self.codec_options:
                 args.append(f"video_codec_options={self.codec_options}")
@@ -438,11 +446,21 @@ def run_test() -> int:
         clock.t += 0.17
     expect(far_state == "far" and none_state == "none" and "ready" not in shaky,
            f"another pose's guide: far; no board: none; the phone moving between looks: never ready ({set(shaky)})")
+    # a slow drift, each look well under STILL from the one before, more than STILL over the hold: never ready
+    w.target(None, spec)
+    w.target(g0, spec, ("s", 0))
+    base = calib_guide.photo("quick", 0, spec, kind, "photo", lay, size=size)
+    drift = []
+    for k in range(12):
+        shift = np.float32([[1, 0, 5.0 * k], [0, 1, 0]])        # 5 px a look: under STILL, over it in 3 looks
+        drift.append(w.feed(cv2.warpAffine(base, shift, (base.shape[1], base.shape[0]), borderValue=255)))
+        clock.t += 0.17
+    expect("ready" not in drift and "hold" in drift, f"a slow drift, under STILL a look: never still ({set(drift)})")
     # the bench: a photo at a stop, then none while the arm stays there for the next step, one once it gets there;
-    # the board of another seat is far
+    # the ball joint set to another pose is far
     _, pk, pspec, _ = calib_guide.boards()[1]
     bench = calib_guide.PLANS["bench"]
-    i50 = next(i for i, s in enumerate(bench) if s["seat"] == 1 and s["arm"] == 40.0)
+    i50 = next(i for i, s in enumerate(bench) if s.get("pose") == "P1" and s["arm"] == 40.0)
     at50, at51 = (calib_guide.photo("bench", i, pspec, pk, "photo", None, rng=np.random.default_rng(7), size=size)
                   for i in (i50, i50 + 1))
     wb = Watch(clock)
@@ -461,11 +479,11 @@ def run_test() -> int:
     for _ in range(8):
         moved_on.append(wb.feed(at51))
         clock.t += 0.17
-    other = next(i for i, s in enumerate(bench) if s["seat"] == 2 and s["arm"] == 40.0)
+    other = next(i for i, s in enumerate(bench) if s.get("pose") == "P4" and s["arm"] == 40.0)
     wb.target(calib_guide.guide(bench[other], pspec)["outline"], pspec, ("b", other), new_stop=True)
     expect("ready" in first and "ready" not in stay and moved_on[-1] == "ready" and wb.feed(at50) == "far",
-           f"the bench: a photo at the stop, none while the arm stays ({set(stay)}), one at the next stop; the board "
-           f"in another seat is far")
+           f"the bench: a photo at the stop, none while the arm stays ({set(stay)}), one at the next stop; the ball "
+           f"head in another pose is far")
     # the mirrored screen: the preview found between the app's bands, either turn of the phone held across
     for turn in (1, -1):
         disp = as_display(img, turn)

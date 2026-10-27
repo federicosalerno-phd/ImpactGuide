@@ -57,6 +57,14 @@ const GLB = {
     };
     const mats = (doc.materials || []).map(function (m) {
       const p = m.pbrMetallicRoughness || {}, c = p.baseColorFactor || [1, 1, 1, 1];
+      const spec = ((m.extensions || {}).KHR_materials_specular || {}).specularFactor;
+      // a surface that reflects nothing (glTF's specular at 0: the plate's black print): purely diffuse, never turned
+      // grey by the lights that go with the eye at a low view (any PBR surface reflects more towards grazing)
+      if (spec === 0) {
+        return new THREE.MeshPhongMaterial({ name: m.name || '', color: new THREE.Color(c[0], c[1], c[2]),
+          opacity: c[3], transparent: c[3] < 1, specular: 0x000000, shininess: 0,
+          side: m.doubleSided ? THREE.DoubleSide : THREE.FrontSide, flatShading: !!flat });
+      }
       return new THREE.MeshStandardMaterial({ name: m.name || '',
         color: new THREE.Color(c[0], c[1], c[2]), opacity: c[3], transparent: c[3] < 1,
         roughness: p.roughnessFactor === undefined ? 1 : p.roughnessFactor,
@@ -838,12 +846,14 @@ VIEW3D.proto = {
   },
 
   // the name of what is selected: a small tag with its name in words (the page's map of names) and, lighter, what
-  // it is made of (when the page knows) and its largest size; tied by a thin line to the point clicked
+  // it is made of (when the page knows) and its largest size (not with the option size: false); tied by a thin line
+  // to the point clicked
   labelFor: function (s) {
     const v = this, t = v.tag;
     if (!s) { t.style.opacity = 0; v.lead.style.opacity = 0; return; }
     v.label.textContent = v.o.name ? v.o.name(s.name) : s.name;
-    const size = s.box.isEmpty() ? 0 : Math.max.apply(null, s.box.getSize(new THREE.Vector3()).toArray()) * (v.o.mm || 1);
+    const size = s.box.isEmpty() || v.o.size === false ? 0
+      : Math.max.apply(null, s.box.getSize(new THREE.Vector3()).toArray()) * (v.o.mm || 1);
     const big = size >= 20, mm = big ? Math.round(size) : Math.round(size * 10) / 10;
     const made = v.o.material ? v.o.material(s.material) : '';
     const said = size ? (typeof fmtNum === 'function' ? fmtNum(mm, big ? 0 : 1) : String(mm)) + ' mm' : '';
@@ -1355,7 +1365,9 @@ VIEW3D.proto = {
     c.addEventListener('pointerdown', function (e) {
       if (v.press) return;
       const mid = e.button === 1 || (e.button === 0 && e.altKey);
-      const mode = mid ? (e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit') : e.button === 0 ? 'click' : '';
+      // a model of one piece (o.pick false: the plate) has nothing to select: the left button turns it too
+      const left = v.o.pick === false ? (e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit') : 'click';
+      const mode = mid ? (e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit') : e.button === 0 ? left : '';
       if (!mode) return;
       v.used = performance.now();
       v.press = { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, mode: mode };
@@ -1401,6 +1413,7 @@ VIEW3D.proto = {
   // button is down: a lighter highlight than the selection's
   hoverAt: function (e) {
     const v = this;
+    if (v.o.pick === false) return;
     v.hoverXY = [e.clientX, e.clientY];
     if (v.hoverTimer) return;
     const wait = Math.max(0, VIEW3D.HOVER_MS - (performance.now() - (v.hoverLast || 0)));
@@ -1424,6 +1437,8 @@ VIEW3D.proto = {
     if (v.maskRT) v.maskRT.dispose();
     if (v.r) v.r.dispose();
     v.r = null;
+    // what it laid over its box (the gizmo, a part's tag and its line): a new viewer there makes its own
+    [v.gz && v.gz.svg, v.tag, v.lead].forEach(function (e) { if (e) e.remove(); });
     VIEW3D.all = VIEW3D.all.filter(function (x) { return x !== v; });
   },
 };
@@ -1453,7 +1468,7 @@ const PLATE3D = {
     PLATE3D.viewer = VIEW3D.create($('bd3d'), $('bd3dCanvas'), { margin: 1.1, dir: [-0.179, 0.796, 0.579],
                                                                  up: [0, 1, 0], front: [0, 0, -1],
                                                                  failed: PLATE3D.fail,
-                                                                 name: function (n) { return PARTS.name(n); },
+                                                                 pick: false,     // one piece: nothing to select
                                                                  mm: 1000 });     // the plate's GLB is in metres
     if (!PLATE3D.viewer) { PLATE3D.failed = true; return false; }
     GLB.load(PLATE3D.URL, true, function (res) {

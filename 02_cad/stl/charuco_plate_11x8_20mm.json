@@ -35,15 +35,16 @@
   "size_mm": [
    240.0,
    196.0,
-   8.4
+   6.0
   ],
-  "base_mm": 8.0,
+  "thickness_mm": 6.0,
+  "base_mm": 5.6,
   "ink_mm": 0.4,
   "corner_radius_mm": 5.0,
   "board_origin_mm": [
    6.0,
    182.0,
-   8.4
+   6.0
   ],
   "board_axes": {
    "x": [
@@ -67,17 +68,40 @@
   "back": {
    "face_mm": 1.0,
    "rib_mm": 1.6,
+   "rib_height_mm": 4.6,
    "pockets": [
     8,
     6
    ],
    "pocket_mm": [
     28.2,
-    29.07
+    30.8
    ],
-   "pocket_depth_mm": 7.0,
-   "bottom_band_mm": 12.0,
-   "bottom_band_thickness_mm": 8.4
+   "pocket_depth_mm": 4.6
+  },
+  "tabs": {
+   "screw": "M4",
+   "hole_d_mm": 4.5,
+   "centres_mm": [
+    [
+     30.0,
+     -7.0
+    ],
+    [
+     210.0,
+     -7.0
+    ],
+    [
+     30.0,
+     203.0
+    ],
+    [
+     210.0,
+     203.0
+    ]
+   ],
+   "out_of_edge_mm": 14.0,
+   "thickness_mm": 6.0
   }
  },
  "files": {
@@ -87,14 +111,18 @@
  },
  "print": {
   "layer_mm": 0.2,
-  "colour_change_mm": 8.0,
+  "face_down": true,
+  "two_colours_mm": [
+   0.0,
+   0.4
+  ],
   "filament_1": "white",
   "filament_2": "black",
   "settings": {
    "wall_loops": "2",
    "top_shell_layers": "5",
    "top_shell_thickness": "1",
-   "bottom_shell_layers": "3",
+   "bottom_shell_layers": "7",
    "bottom_shell_thickness": "0",
    "sparse_infill_density": "10%",
    "sparse_infill_pattern": "grid",
