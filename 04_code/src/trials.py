@@ -276,7 +276,7 @@ class Config:
     order: str = "random"  # or "ascending" (pilot)
     direction_run: int = 1  # trials in a row with the same platter setting
     seed: int = 20261020
-    washers_per_side: int = 3
+    washers_per_side: int = 6
     reposition_mm: float = 3.0  # cap shift since the last reference
     scan_az: tuple = (40, 55)  # arm positions, camera azimuth in degrees
     photo_az: tuple = (40, 55, 70, 85)

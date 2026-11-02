@@ -97,7 +97,7 @@ HOLES_DEG = trials.Config().angles_deg
 DIRECTIONS_DEG = trials.Config().directions_deg
 # g / cm^3; printed parts solid (the mass block and the tip are printed at 100 % infill, the rest is light)
 DENSITY = {"aluminium": 2.70, "steel": 7.85, "spring_steel": 7.85, "brass": 8.5, "petg": 1.27, "pla": 1.24,
-           "sphere": 1.41, "magnet": 7.5, "rubber": 1.2}
+           "sphere": 1.41, "magnet": 7.5, "rubber": 1.2, "knob": 1.40}     # knob: thermoset head of the knurled knobs
 SWING = "pendulum_swing"
 TIP = "pendulum_tip"
 WASHER = "pendulum_mass_washer_l1"
@@ -105,9 +105,9 @@ P1SQ = {"label": "marker_charuco__p1sq", "cap": "marker_strike_cap__p1sq", "hold
         "spheres": [f"gt_sphere_marker_{i}__p1sq" for i in (1, 2, 3)]}
 BOARD_MM = 45.0                 # the printed squares: 5 x 9 mm (marker_pose.BOARD), inside the 50 mm label image
 STRIKE_TOL_MM = 1.0             # the scene's strike point within this of the pendulum's nose: it is the contact
-# share of the pendulum's energy that enters the marker, per direction (rigid impact, restitution 0.5, 100 g effective
-# at the tip against the marker's 31 / 21 / 15 g at the cap about its joint)
-TRANSFER = {0: 0.40, 45: 0.33, 90: 0.26}
+# share of the pendulum's energy that enters the marker, per direction (rigid impact, restitution 0.5, 150 g effective
+# at the tip against the marker's 31 / 21 / 15 g at the cap about its joint: m M (1 + e)^2 / (M + m)^2)
+TRANSFER = {0: 0.32, 45: 0.24, 90: 0.19}
 TURN_MJ = 17.0                  # energy that turns A by 5 degrees against its 0.2 N m (0.2 x 0.087 J)
 PLIERS_G = 50.0                 # an instrument dropped on the marker, for the energy as a height
 DELTA_MM = 0.5                  # difference of TRE the campaign must see...
@@ -1337,7 +1337,7 @@ def run_test(work: Path) -> int:
     expect(len(rows) == 9 and all(float(r2["energy_mj"]) > float(r1["energy_mj"]) for r1, r2 in zip(rows, rows[1:])),
            f"energy table: 9 holes, rising ({rows[0]['energy_mj']} to {rows[-1]['energy_mj']} mJ)")
     mr = {r["key"]: r["value"] for r in model_rows(model)}
-    expect(mr["turn_pendulum_0_mj"] == "42" and mr["turn_pendulum_90_mj"] == "65",
+    expect(mr["turn_pendulum_0_mj"] == "53" and mr["turn_pendulum_90_mj"] == "94",
            f"17 mJ in the marker: {mr['turn_pendulum_0_mj']} mJ at the pendulum frontal, "
            f"{mr['turn_pendulum_90_mj']} lateral (holes {mr['turn_hole_0_deg']} and {mr['turn_hole_90_deg']})")
 
